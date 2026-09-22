@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Logs — managed by AppLogService (per-worker dated files under logs/app/)
+logs/
+
+# Firebase service account credentials — real secret, never commit
+storage/firebase/google-services.json
+
+# APNs Auth Key (VoIP push, ApnsVoipService) — real secret, never commit
+storage/apple/
+
+# Redis snapshots
+*.rdb
+dump.rdb

@@ -1,0 +1,33 @@
+// Single source of truth for all call error codes.
+// Mirrors the role of EventTypes.js for pub/sub events.
+export const CallErrorCodes = {
+    // Management / query (callId: null)
+    MISSING_BUSINESS_CONTEXT:       'MISSING_BUSINESS_CONTEXT',
+    FAILED_FETCH_ACTIVE:            'FAILED_FETCH_ACTIVE',
+    AGENT_QUEUE_SYNC_FAILED:        'AGENT_QUEUE_SYNC_FAILED',
+    AGENT_AVAILABILITY_SYNC_FAILED: 'AGENT_AVAILABILITY_SYNC_FAILED',
+
+    // Signaling — per-call
+    CALL_INITIATION_FAILED:    'CALL_INITIATION_FAILED',
+    WHATSAPP_TRIGGER_FAILED:   'WHATSAPP_TRIGGER_FAILED',
+    ACCEPT_FAILED:             'ACCEPT_FAILED',
+    REJECT_FAILED:             'REJECT_FAILED',
+    TERMINATE_FAILED:          'TERMINATE_FAILED',
+    CANCEL_FAILED:             'CANCEL_FAILED',
+    RECONNECT_FAILED:          'RECONNECT_FAILED',
+    CALL_TRANSFER_FAILED:      'CALL_TRANSFER_FAILED',
+
+    // Media / bridge
+    BRIDGE_NOT_READY:          'BRIDGE_NOT_READY',
+    AGENT_MEDIA_NOT_READY:     'AGENT_MEDIA_NOT_READY',
+
+    // Monitoring
+    MONITOR_FAILED:            'MONITOR_FAILED',
+    STOP_MONITOR_FAILED:       'STOP_MONITOR_FAILED',
+    MONITOR_CONNECTION_FAILED: 'MONITOR_CONNECTION_FAILED',
+    MONITOR_ADD_FAILED:        'MONITOR_ADD_FAILED',
+    AGENT_PRIVATE_FAILED:      'AGENT_PRIVATE_FAILED',
+
+    // Internal
+    EVENT_HANDLER_FAILED:      'EVENT_HANDLER_FAILED',
+};
