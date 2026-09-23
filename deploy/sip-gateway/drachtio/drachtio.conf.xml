@@ -5,7 +5,7 @@
   connects to, receiving every SIP message as an event and deciding what to
   do entirely in JS.
 
-  admin-tcp's secret is a literal here, not an env substitution — same
+  admin's secret is a literal here, not an env substitution — same
   reasoning as the FreeSWITCH ESL password in the superseded milestone:
   verify this image's entrypoint actually supports env-var substitution in
   this file before relying on it; otherwise hand-edit this to match .env's
@@ -15,9 +15,14 @@
   the rest of this deployment. If Node ends up on a different host, change
   to a private-network address and firewall it — this secret grants full
   control over every SIP call the server handles.
+
+  Confirmed against a real drachtio-server instance (via the local-testing
+  variant): the element is <admin> with the bind address as its text
+  content, not <admin-tcp address="..."> as first written — a real bug,
+  caught by actually running the container, not a hypothetical one.
 -->
 <drachtio>
-  <admin-tcp port="9022" secret="CHANGE_ME" address="127.0.0.1"/>
+  <admin port="9022" secret="CHANGE_ME">127.0.0.1</admin>
 
   <sip>
     <contacts>

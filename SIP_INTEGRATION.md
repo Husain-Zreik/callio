@@ -82,11 +82,16 @@ application code. See `deploy/sip-gateway/`:
    the other side. Check via `SHOW CREATE TABLE call_connections;` against
    the real DB (RUNBOOK.md checkpoint 5). The same question applies to
    `TerminatedBy` if that enum is also DB-backed anywhere (see below).
-2. **drachtio-server + rtpengine's actual behavior against this specific
-   trunk is unverified** — RUNBOOK.md's checkpoints exist specifically to
-   prove this before Node code depends on it. The hand-written rtpengine
-   ng-protocol client (`test/rtpengine-ng-client.js`) in particular is the
-   single least-verified piece of this whole integration.
+2. **drachtio-server + rtpengine's behavior against this specific trunk is
+   still unverified** — that part needs the real server + real carrier.
+   However, the signaling+media logic itself has now been verified locally:
+   a raw SIP INVITE placed against the local stack went all the way through
+   `rtpengine-ng-client.js`'s `offer` command to a real rtpengine-generated
+   SDP answer, `call-test.js` answered it, and BYE tore it down cleanly (see
+   `deploy/sip-gateway/RUNBOOK.md`'s updated section 0). One real config bug
+   was found and fixed this way (`<admin-tcp address="...">` → `<admin>`).
+   What's still unverified: actual RTP audio content, and anything specific
+   to the real trunk (auth mode, firewall reachability, its SDP quirks).
 
 ## Milestone B scope (not started) — application-code blast radius
 

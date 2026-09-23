@@ -3,7 +3,7 @@
   header for why this exists as a separate file rather than reusing the
   production one directly.
 
-  The one real difference: admin-tcp binds to 0.0.0.0 (all interfaces
+  The one real difference: admin binds to 0.0.0.0 (all interfaces
   *inside the container*), not 127.0.0.1. This isn't a security loosening —
   it's a Docker networking necessity: a process bound to 127.0.0.1 inside a
   container's own network namespace is unreachable via Docker's port
@@ -12,9 +12,14 @@
   publishing to `127.0.0.1:9022` on the HOST side (see docker-compose.local.yml),
   achieves the same "reachable only from this machine" property the
   production config gets from host networking + a literal loopback bind.
+
+  Confirmed against a real drachtio-server instance: the element is <admin>
+  with the bind address as its text content, not <admin-tcp address="...">
+  as first written — that was a real bug, not a hypothetical one, caught by
+  actually running this container.
 -->
 <drachtio>
-  <admin-tcp port="9022" secret="CHANGE_ME" address="0.0.0.0"/>
+  <admin port="9022" secret="CHANGE_ME">0.0.0.0</admin>
 
   <sip>
     <contacts>

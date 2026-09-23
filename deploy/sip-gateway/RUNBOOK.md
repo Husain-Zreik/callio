@@ -6,11 +6,23 @@ plan). This runbook gets the gateway reachable by the real trunk and proves
 the SIP+media path works — **independent of the real Callio application** —
 before any Node integration code depends on it.
 
-Everything here is a starting point authored without access to a real
-drachtio-server/rtpengine instance or the trunk provider's exact
-requirements. Treat each step as something to verify, not something already
-proven — especially `test/rtpengine-ng-client.js`, which is the single
-least-verified file in this deployment (see its own header comment).
+**Update: the local-testing path (section 0) has been run for real.** A raw
+SIP INVITE placed against the local stack made it all the way through —
+drachtio-server accepted it, `rtpengine-ng-client.js`'s `offer` command got a
+genuine SDP answer back from rtpengine, `call-test.js` answered with 200 OK,
+and a BYE tore the session down cleanly. That confirms the ng-protocol client
+and the drachtio-srf integration logic are correct, not just plausible. One
+real bug was found and fixed this way: `drachtio.conf.xml`/
+`drachtio.local.conf.xml` used `<admin-tcp address="...">`, but the actual
+element is `<admin>` with the bind address as its text content — the
+container was crash-looping on this before the fix.
+
+What that test did **not** cover: actual RTP audio content (it was a
+signaling-only test — a UDP SIP client that never sent real RTP packets), and
+anything specific to the real trunk (auth, firewall reachability, its exact
+SDP quirks). Those still need the real server + a softphone/real call — the
+sections below are otherwise unchanged starting points, authored without a
+live instance to confirm against.
 
 ## Prerequisites
 
