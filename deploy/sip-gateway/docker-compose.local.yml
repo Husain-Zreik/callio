@@ -36,11 +36,23 @@ services:
     cap_add:
       - NET_ADMIN
       - SYS_NICE
+    # Bypasses the image's own /entrypoint.sh entirely. That script
+    # unconditionally runs `sed -i` on /etc/rtpengine.conf to substitute a
+    # MY_IP placeholder from cloud-provider auto-detection (see $CLOUD in the
+    # image's entrypoint.sh) — but `sed -i`'s create-temp-then-rename approach
+    # cannot succeed against a single-file bind mount (fails with "Device or
+    # resource busy" regardless of read/write mode; this is a Docker
+    # limitation, not a permissions issue). Since our config already sets a
+    # real interface value directly, we don't need that substitution at all —
+    # launching the real binary directly with our own config sidesteps the
+    # whole problem.
+    entrypoint: ["rtpengine"]
+    command: ["--config-file", "/etc/rtpengine.conf"]
     ports:
       - "127.0.0.1:22222:22222/udp"
       - "127.0.0.1:30000-30010:30000-30010/udp"
     volumes:
-      - ./rtpengine/rtpengine.local.conf:/etc/rtpengine/rtpengine.conf:ro
+      - ./rtpengine/rtpengine.local.conf:/etc/rtpengine.conf:ro
 
 volumes:
   drachtio-local-log:

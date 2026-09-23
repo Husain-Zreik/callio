@@ -38,7 +38,7 @@ services:
       - NET_ADMIN
       - SYS_NICE
     volumes:
-      - ./rtpengine/rtpengine.conf:/etc/rtpengine/rtpengine.conf:ro
+      - ./rtpengine/rtpengine.conf:/etc/rtpengine.conf
 
 volumes:
   drachtio-log:
