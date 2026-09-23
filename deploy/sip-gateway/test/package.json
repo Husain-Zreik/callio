@@ -1,0 +1,14 @@
+{
+  "name": "callio-drachtio-validation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone validation script for Milestone A — proves the trunk can reach drachtio-server and complete a call. Not part of the Callio application; do not import from src/.",
+  "type": "commonjs",
+  "main": "call-test.js",
+  "scripts": {
+    "start": "node call-test.js"
+  },
+  "dependencies": {
+    "drachtio-srf": "latest"
+  }
+}

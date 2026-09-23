@@ -1,0 +1,46 @@
+# Local-machine variant of docker-compose.yml, for testing with a softphone
+# instead of the real trunk — NOT used in production. Standalone file rather
+# than a compose override, on purpose: `network_mode: host` (used in the real
+# docker-compose.yml) doesn't work the same way on Docker Desktop for Windows/
+# Mac as it does on Linux, so this uses ordinary port publishing instead.
+# Merging that difference via a compose override is more error-prone than
+# just keeping two clear, separate files.
+#
+# Everything is bound to 127.0.0.1 on the host side — only reachable from
+# this machine, matching the "same-host" assumption the config files
+# (drachtio.local.conf.xml / rtpengine.local.conf) already document, just
+# achieved via Docker port publishing instead of a literal network namespace.
+#
+# RTP range narrowed to 11 ports (30000-30010) — plenty for one or two test
+# calls, keeps the port list short. The production file's wider range
+# doesn't need to change.
+#
+# Usage: docker compose -f docker-compose.local.yml up -d
+services:
+  drachtio:
+    image: drachtio/drachtio-server:latest
+    container_name: callio-drachtio-local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5060:5060/udp"
+      - "127.0.0.1:5060:5060/tcp"
+      - "127.0.0.1:9022:9022/tcp"
+    volumes:
+      - ./drachtio/drachtio.local.conf.xml:/etc/drachtio.conf.xml:ro
+      - drachtio-local-log:/var/log/drachtio
+
+  rtpengine:
+    image: drachtio/rtpengine:latest
+    container_name: callio-rtpengine-local
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_NICE
+    ports:
+      - "127.0.0.1:22222:22222/udp"
+      - "127.0.0.1:30000-30010:30000-30010/udp"
+    volumes:
+      - ./rtpengine/rtpengine.local.conf:/etc/rtpengine/rtpengine.conf:ro
+
+volumes:
+  drachtio-local-log:

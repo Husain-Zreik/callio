@@ -1,0 +1,35 @@
+<!--
+  Local-testing variant of drachtio.conf.xml — see docker-compose.local.yml's
+  header for why this exists as a separate file rather than reusing the
+  production one directly.
+
+  The one real difference: admin-tcp binds to 0.0.0.0 (all interfaces
+  *inside the container*), not 127.0.0.1. This isn't a security loosening —
+  it's a Docker networking necessity: a process bound to 127.0.0.1 inside a
+  container's own network namespace is unreachable via Docker's port
+  publishing (docker-compose.local.yml's `ports:` mechanism), even from the
+  host machine. Binding to 0.0.0.0 inside the container, combined with
+  publishing to `127.0.0.1:9022` on the HOST side (see docker-compose.local.yml),
+  achieves the same "reachable only from this machine" property the
+  production config gets from host networking + a literal loopback bind.
+-->
+<drachtio>
+  <admin-tcp port="9022" secret="CHANGE_ME" address="0.0.0.0"/>
+
+  <sip>
+    <contacts>
+      <contact>sip:*:5060;transport=udp,tcp</contact>
+    </contacts>
+  </sip>
+
+  <logging>
+    <file>
+      <name>/var/log/drachtio/drachtio.log</name>
+      <archive>/var/log/drachtio/archive</archive>
+      <size>1024</size>
+      <maxSize>5000</maxSize>
+      <loglevel>info</loglevel>
+      <sofia-loglevel>3</sofia-loglevel>
+    </file>
+  </logging>
+</drachtio>

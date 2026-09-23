@@ -1,0 +1,44 @@
+# drachtio-server + rtpengine — SIP signaling + media relay for the Callio
+# SIP trunk integration. Two single-purpose processes instead of FreeSWITCH's
+# one monolith: drachtio-server does SIP signaling only (no dialplan, no
+# media) and hands control to a Node app (drachtio-srf); rtpengine does RTP
+# relay/transcoding (including WebRTC<->plain-RTP), controlled by that same
+# Node app over rtpengine's "ng" UDP control protocol.
+#
+# Images: verify current tags before deploying — written without the ability
+# to pull/test images in this environment.
+#   - drachtio/drachtio-server is the project's own official image.
+#   - rtpengine has no single canonical maintained image the way FreeSWITCH/
+#     drachtio do; confirm whichever one you use is current and built from a
+#     real rtpengine release, or build from source (github.com/sipwise/rtpengine)
+#     if you want more certainty.
+#
+# host networking for the same reason as any SIP/RTP workload: SDP embeds
+# real IPs/ports, and Docker's bridge NAT breaks that unless carefully
+# worked around. Firewall rules (see RUNBOOK.md), not Docker port mappings,
+# are what actually restrict access here.
+services:
+  drachtio:
+    image: drachtio/drachtio-server:latest
+    container_name: callio-drachtio
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - ./drachtio/drachtio.conf.xml:/etc/drachtio.conf.xml:ro
+      - drachtio-log:/var/log/drachtio
+
+  rtpengine:
+    image: drachtio/rtpengine:latest
+    container_name: callio-rtpengine
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - SYS_NICE
+    volumes:
+      - ./rtpengine/rtpengine.conf:/etc/rtpengine/rtpengine.conf:ro
+
+volumes:
+  drachtio-log:

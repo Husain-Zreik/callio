@@ -1,0 +1,40 @@
+<!--
+  drachtio-server config. This process does SIP signaling ONLY — no
+  dialplan, no media, no call logic. It listens for SIP (the trunk side)
+  and exposes a control connection (admin-tcp) that a drachtio-srf Node app
+  connects to, receiving every SIP message as an event and deciding what to
+  do entirely in JS.
+
+  admin-tcp's secret is a literal here, not an env substitution — same
+  reasoning as the FreeSWITCH ESL password in the superseded milestone:
+  verify this image's entrypoint actually supports env-var substitution in
+  this file before relying on it; otherwise hand-edit this to match .env's
+  DRACHTIO_SECRET before starting the container.
+
+  Bound to loopback: the Node app connects locally, same-host assumption as
+  the rest of this deployment. If Node ends up on a different host, change
+  to a private-network address and firewall it — this secret grants full
+  control over every SIP call the server handles.
+-->
+<drachtio>
+  <admin-tcp port="9022" secret="CHANGE_ME" address="127.0.0.1"/>
+
+  <sip>
+    <contacts>
+      <!-- Listens for the trunk's SIP traffic. Add ;transport=tls,5061 here
+           too if the provider requires SIP/TLS (see RUNBOOK.md checklist). -->
+      <contact>sip:*:5060;transport=udp,tcp</contact>
+    </contacts>
+  </sip>
+
+  <logging>
+    <file>
+      <name>/var/log/drachtio/drachtio.log</name>
+      <archive>/var/log/drachtio/archive</archive>
+      <size>1024</size>
+      <maxSize>5000</maxSize>
+      <loglevel>info</loglevel>
+      <sofia-loglevel>3</sofia-loglevel>
+    </file>
+  </logging>
+</drachtio>
