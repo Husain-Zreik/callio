@@ -13,7 +13,7 @@ import { createWebSocketServer } from "./src/websocket/server.js";
 import { presenceService } from "./src/services/redis/PresenceService.js";
 import { redisCleanupService } from "./src/services/redis/RedisCleanupService.js";
 import { callCleanupService } from "./src/services/call/cleanup/CallCleanupService.js";
-import { peerRegistry } from "./src/services/call/connection/PeerRegistry.js";
+import { peerRegistry } from "./src/services/call/signaling/webrtc/PeerRegistry.js";
 import { workerStatsService } from "./src/services/monitoring/WorkerStatsService.js";
 import { initRedis, initOptionalServices } from "./src/server/bootstrap.js";
 import { shutdown } from "./src/server/shutdown.js";
