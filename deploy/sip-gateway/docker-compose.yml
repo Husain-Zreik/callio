@@ -17,6 +17,15 @@
 # real IPs/ports, and Docker's bridge NAT breaks that unless carefully
 # worked around. Firewall rules (see RUNBOOK.md), not Docker port mappings,
 # are what actually restrict access here.
+#
+# rtpengine.conf's `interface` value: if this host has a real public IP
+# directly on its NIC, just use that IP alone. If it's behind a cloud
+# provider's NAT/floating IP (AWS/GCP/DigitalOcean etc.), use the
+# "private!public" form so rtpengine advertises the externally-reachable
+# address in SDP, not the private one — the single most common cause of
+# one-way/no audio in any SIP+RTP stack. (This note lives here, not in
+# rtpengine.conf itself, because that file cannot contain any comment lines
+# at all — see the rtpengine service's own comments below for why.)
 services:
   drachtio:
     image: drachtio/drachtio-server:latest
@@ -37,8 +46,26 @@ services:
     cap_add:
       - NET_ADMIN
       - SYS_NICE
+    # Bypasses the image's own /entrypoint.sh, confirmed necessary by actually
+    # running this image and inspecting its entrypoint.sh directly (not
+    # guessed): that script unconditionally runs `sed -i` on /etc/rtpengine.conf
+    # to substitute a MY_IP placeholder from cloud-provider auto-detection
+    # ($CLOUD env var — gcp/aws/digitalocean/azure). `sed -i`'s
+    # create-temp-then-rename approach cannot succeed against a single-file
+    # bind mount — fails with "Device or resource busy" regardless of
+    # read/write mode; this is a Docker limitation, not a permissions issue.
+    # Since our config sets a real interface value directly, we don't need
+    # that substitution — launching the real binary bypasses the problem
+    # entirely.
+    entrypoint: ["rtpengine"]
+    command: ["--config-file", "/etc/rtpengine.conf"]
     volumes:
-      - ./rtpengine/rtpengine.conf:/etc/rtpengine.conf
+      # rtpengine.conf must have NO comment lines of any kind (no `;`-prefixed
+      # lines anywhere in the file) — confirmed by direct testing that its
+      # config parser crashes silently (exit 255, zero output) on ANY `;`
+      # comment, regardless of position or content. Put explanatory notes in
+      # this docker-compose.yml instead, never in rtpengine.conf itself.
+      - ./rtpengine/rtpengine.conf:/etc/rtpengine.conf:ro
 
 volumes:
   drachtio-log:
