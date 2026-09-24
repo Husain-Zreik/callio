@@ -22,7 +22,7 @@ const srf = new Srf();
 const TRUNK_IP = process.env.TRUNK_IP || '185.231.78.58';
 const DESTINATION_NUMBER = process.env.DESTINATION_NUMBER || '+96181030841';
 const DESTINATION = `sip:${DESTINATION_NUMBER}@${TRUNK_IP}`;
-const YOUR_DID = process.env.YOUR_DID || 'CHANGE_ME_TO_YOUR_ASSIGNED_DID';
+const YOUR_DID = process.env.YOUR_DID || '123456789';
 
 const fakeSdp = [
     'v=0',
