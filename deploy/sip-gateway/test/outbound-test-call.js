@@ -22,6 +22,7 @@ const srf = new Srf();
 const TRUNK_IP = process.env.TRUNK_IP || '185.231.78.58';
 const DESTINATION_NUMBER = process.env.DESTINATION_NUMBER || '+96181030841';
 const DESTINATION = `sip:${DESTINATION_NUMBER}@${TRUNK_IP}`;
+const YOUR_DID = process.env.YOUR_DID || 'CHANGE_ME_TO_YOUR_ASSIGNED_DID';
 
 const fakeSdp = [
     'v=0',
@@ -48,12 +49,18 @@ srf.on('connect', async (err, hostport) => {
         process.exit(1);
     }
     console.log(`[outbound-test] connected to drachtio-server at ${hostport}`);
-    console.log(`[outbound-test] dialing ${DESTINATION} ...`);
+    console.log(`[outbound-test] dialing ${DESTINATION} as ${YOUR_DID} ...`);
 
     try {
         const { dialog } = await srf.createUAC(
             DESTINATION,
-            { localSdp: fakeSdp },
+            {
+                localSdp: fakeSdp,
+                headers: {
+                    'From': `<sip:${YOUR_DID}@${TRUNK_IP}>`,
+                    'Contact': `<sip:${YOUR_DID}@92.204.169.121:5060>`,
+                }
+            },
             {
                 cbRequest: (err, req) => {
                     if (err) return console.error('[outbound-test] failed to send INVITE:', err.message);
