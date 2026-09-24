@@ -19,26 +19,27 @@ import { initRedis, initOptionalServices } from "./src/server/bootstrap.js";
 import { shutdown } from "./src/server/shutdown.js";
 import { handleWorkerHealth } from "./src/controllers/healthController.js";
 import apiRoutes from "./src/routes/apiRoutes.js";
-import express from "express";
-import http from "http";
-import cors from "cors";
+import Fastify from "fastify";
+import fastifyCors from "@fastify/cors";
 
-const app = express();
-const server = http.createServer(app);
+const fastify = Fastify({ bodyLimit: 10 * 1024 * 1024 }); // 10mb, matches the old express.json({ limit: "10mb" })
+let server = null;
 let io = null;
-
-app.use(cors({ origin: config.node.corsAllowedOrigins }));
-app.use(express.json({ limit: "10mb" }));
 
 async function startServer() {
     try {
         console.log("🚀 Starting server...");
 
+        await fastify.register(fastifyCors, { origin: config.node.corsAllowedOrigins });
+
         await initRedis();
         await initOptionalServices();
 
-        app.use("/api", apiRoutes);
-        app.get("/health", handleWorkerHealth);
+        await fastify.register(apiRoutes, { prefix: "/api" });
+        fastify.get("/health", handleWorkerHealth);
+
+        await fastify.ready();
+        server = fastify.server;
 
         io = createWebSocketServer(server);
 
@@ -63,11 +64,10 @@ async function startServer() {
         process.on("SIGTERM", () => shutdown(server, io));
         workerStatsService.start();
 
-        server.listen(config.node.port, config.node.host, () => {
-            console.log(`🚀 Server running on ${config.node.host}:${config.node.port}`);
-            console.log(`📡 WebSocket: ws://${config.node.host}:${config.node.port}/socket.io`);
-            console.log(`🌐 API: http://${config.node.host}:${config.node.port}/api`);
-        });
+        await fastify.listen({ port: config.node.port, host: config.node.host });
+        console.log(`🚀 Server running on ${config.node.host}:${config.node.port}`);
+        console.log(`📡 WebSocket: ws://${config.node.host}:${config.node.port}/socket.io`);
+        console.log(`🌐 API: http://${config.node.host}:${config.node.port}/api`);
     } catch (error) {
         console.error("❌ Server startup failed:", error.message);
         process.exit(1);

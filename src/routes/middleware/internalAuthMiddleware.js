@@ -11,15 +11,15 @@
 import { timingSafeEqual } from "crypto";
 import { config } from "../../../config/envConfig.js";
 
-export function internalAuthMiddleware(req, res, next) {
+export async function internalAuthMiddleware(request, reply) {
     const expected = config.auth.internalApiKey;
 
     if (!expected) {
         console.warn("[InternalAuth] INTERNAL_API_KEY not set — internal routes are UNPROTECTED. Set it in every real environment.");
-        return next();
+        return;
     }
 
-    const provided = req.header("X-Internal-Api-Key") || "";
+    const provided = request.headers["x-internal-api-key"] || "";
     const providedBuf = Buffer.from(provided);
     const expectedBuf = Buffer.from(expected);
 
@@ -28,9 +28,7 @@ export function internalAuthMiddleware(req, res, next) {
         timingSafeEqual(providedBuf, expectedBuf);
 
     if (!matches) {
-        console.warn(`[InternalAuth] Rejected unauthenticated request to ${req.method} ${req.originalUrl}`);
-        return res.status(401).json({ error: "Unauthorized" });
+        console.warn(`[InternalAuth] Rejected unauthenticated request to ${request.method} ${request.url}`);
+        return reply.code(401).send({ error: "Unauthorized" });
     }
-
-    next();
 }

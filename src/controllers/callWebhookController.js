@@ -1,9 +1,9 @@
 import { callWebhookProcessor } from '../services/call/webhook/CallWebhookProcessor.js';
 import { isShuttingDown } from '../server/shutdown.js';
 
-export async function handleCallWebhook(req, res) {
+export async function handleCallWebhook(request, reply) {
     try {
-        const payload = req.body?.value;
+        const payload = request.body?.value;
         const phoneNumberId = payload?.metadata?.phone_number_id ?? 'UNKNOWN';
         const callsCount = Array.isArray(payload?.calls) ? payload.calls.length : 0;
         const statusesCount = Array.isArray(payload?.statuses) ? payload.statuses.length : 0;
@@ -14,11 +14,14 @@ export async function handleCallWebhook(req, res) {
         // delivery — it'll land on a worker that's actually able to see it through.
         if (isShuttingDown) {
             console.warn(`[Webhook] Rejecting during shutdown - phone=${phoneNumberId}, calls=${callsCount}, statuses=${statusesCount}`);
-            res.sendStatus(503);
+            reply.code(503).send();
             return;
         }
 
-        res.sendStatus(200);
+        // Ack immediately, keep processing after — Fastify's documented async-handler
+        // contract supports this: once reply.send() is called, the reply is marked
+        // sent, and further awaits below don't try to send a second response.
+        reply.code(200).send();
 
         console.log(`[Webhook] Received - phone=${phoneNumberId}, calls=${callsCount}, statuses=${statusesCount}`);
 

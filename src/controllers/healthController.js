@@ -23,13 +23,13 @@ function measureEventLoopLag() {
 
 // Lightweight infra health check — used by PM2, nginx, and load-balancer probes.
 // Returns 200 when encoding workers are ready, 503 otherwise.
-export function handleWorkerHealth(_req, res) {
+export function handleWorkerHealth(_request, reply) {
     const workerStats = workerStatsService.snapshot();
     const encodingStats = encodingWorkerBridge.getStats();
     const dtmfStats = dtmfWorkerBridge.getStats();
     const activeCalls = peerRegistry.peerConnections.size;
     const ok = encodingStats.ready && workerStats.ok !== false;
-    res.status(ok ? 200 : 503).json({
+    reply.code(ok ? 200 : 503).send({
         ok,
         activeCalls,
         ...workerStats,
@@ -39,7 +39,7 @@ export function handleWorkerHealth(_req, res) {
 }
 
 // Detailed per-worker diagnostic endpoint — memory, event loop lag, connections.
-export async function handleHealth(req, res) {
+export async function handleHealth(request, reply) {
     const mem = process.memoryUsage();
     const lag = await measureEventLoopLag();
 
@@ -47,7 +47,7 @@ export async function handleHealth(req, res) {
     const activeRecordings = recordingManager.activeSessions.size;
     const status = lag > 500 ? 'degraded' : 'ok';
 
-    res.status(status === 'ok' ? 200 : 503).json({
+    reply.code(status === 'ok' ? 200 : 503).send({
         status,
         worker:           process.env.pm_id ?? 0,
         pid:              process.pid,

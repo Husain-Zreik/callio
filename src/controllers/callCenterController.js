@@ -7,12 +7,12 @@ import { callCenterToggleService } from '../services/call/cleanup/CallCenterTogg
  * Body: { business_id, enabled }. Only the disable direction needs action
  * here — enabling doesn't require forcing anyone into any particular state.
  */
-export async function handleCallCenterStatus(req, res) {
+export async function handleCallCenterStatus(request, reply) {
     try {
-        const { business_id: businessId, enabled } = req.body || {};
+        const { business_id: businessId, enabled } = request.body || {};
 
         if (!businessId || typeof enabled !== 'boolean') {
-            return res.status(400).json({
+            return reply.code(400).send({
                 error: 'business_id and enabled (boolean) are required',
             });
         }
@@ -21,9 +21,9 @@ export async function handleCallCenterStatus(req, res) {
             await callCenterToggleService.disableForBusiness(businessId);
         }
 
-        return res.json({ success: true });
+        return reply.send({ success: true });
     } catch (error) {
         console.error('[CallCenterWebhook] Error handling call center status change', error);
-        return res.status(500).json({ error: 'Internal server error' });
+        return reply.code(500).send({ error: 'Internal server error' });
     }
 }

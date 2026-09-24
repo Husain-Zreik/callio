@@ -42,7 +42,7 @@ node/
     │   ├── bootstrap.js              Service init sequences (required + optional/degradable)
     │   └── shutdown.js               Graceful shutdown sequence (SIGINT / SIGTERM)
     ├── controllers/                  HTTP request handlers (thin layer)
-    ├── routes/                       Express route definitions
+    ├── routes/                       Fastify route definitions
     ├── middlewares/                  Socket.IO / HTTP middleware
     ├── repositories/                 Database access layer (Knex queries)
     ├── utils/                        Stateless helper functions
