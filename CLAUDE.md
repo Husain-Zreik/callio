@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Callio is a standalone Node.js WebRTC call-center service. It was extracted from a larger Laravel+Node monorepo (`WhatsappCommunicationSystem`) — specifically from that repo's `node/src/services/call/` domain and everything it depends on. Chat, orders, templates, activities, and tickets stayed behind; this repo only ever imported the `call` and `device` Socket.IO namespaces.
 
-**This service does not have its own database.** It connects to the same MySQL instance the original Laravel backend uses, and both apps read/write the same tables under an explicit ownership contract. **Read `TABLE_OWNERSHIP.md` before writing any code that touches `calls`, `call_connections`, `call_lifecycle_events`, `call_transfer_logs`, `call_recordings`, or `ivr_menus`** — each of those tables has exactly one designated writer (usually this service), and the doc explains why (a real production bug came from two independently-implemented writers on the same table). Communication with the Laravel side is over HTTP, authenticated with a shared `X-Internal-Api-Key` header (`internalAuthMiddleware.js` on inbound routes, `LaravelInternalApiClient.js` for outbound calls) — never direct.
+**This service does not have its own database.** It connects to the same MySQL instance the original Laravel backend uses, and both apps read/write the same tables under an explicit ownership contract. **Read `TABLE_OWNERSHIP.md` before writing any code that touches `calls`, `call_connections`, `call_lifecycle_events`, `call_transfer_logs`, `call_recordings`, or `ivr_menus`** — each of those tables has exactly one designated writer (usually this service), and the doc explains why (a real production bug came from two independently-implemented writers on the same table). Communication with the Laravel side is one-directional: Laravel calls into this service over HTTP, authenticated with a shared `X-Internal-Api-Key` header (`internalAuthMiddleware.js` on inbound routes). This service makes no calls back into Laravel — see `TABLE_OWNERSHIP.md`'s `ivr_menus` row for what used to exist there and why it was removed.
+
+**`SIP_INTEGRATION.md`** documents the SIP trunk work (Phase 2 of the roadmap below, now underway): the drachtio-server + rtpengine gateway architecture, why that stack was chosen over Janus/FreeSWITCH/Asterisk, and the full Milestone B (application-code integration) scope. Read it before touching anything under `deploy/sip-gateway/` or `src/services/call/signaling/sip/`.
 
 `ARCHITECTURE.md` is the detailed developer guide carried over from the original codebase (folder-by-folder breakdown, call flow diagrams, architectural patterns, naming conventions). It predates the extraction, so it still has some prose mentioning the chat/orders/templates/activities/ticket namespaces that no longer exist in this repo — treat those specific mentions as stale, everything else in it is accurate and worth reading for depth beyond this file.
 
@@ -24,15 +26,15 @@ Files that exist in both this repo and the monorepo (`BusinessRepository.js`, `A
 This extraction is Phase 1 of a larger plan, not an end in itself:
 
 1. **Phase 1 (done)**: decouple the call domain inside the monorepo (single-writer table contract, authenticated internal API, configurable storage path — see `WhatsappCommunicationSystem-callservice`), then extract it here as this standalone repo.
-2. **Phase 2 (planned, not started)**: add a SIP trunk channel alongside WhatsApp Calling for real PSTN phone numbers, behind a channel-adapter abstraction — the goal is for `AudioBridge`/IVR/recording/assignment to stay channel-agnostic, with only a new adapter (likely fronted by something like jambonz or a SIP↔WebRTC gateway, not yet decided) producing the same internal peer/track shape WhatsApp calls already do.
-3. **Phase 3 (planned)**: unify the two call pipelines that currently exist in the monorepo (direct 1:1 calls vs. call-center queue/transfer/monitor) into one engine, ideally before or alongside adding the SIP channel, so a third parallel pipeline doesn't get built by accident.
+2. **Phase 2 (underway)**: add a SIP trunk channel alongside WhatsApp Calling for real PSTN phone numbers. First step was a hexagonal `signaling/` port/adapter boundary (`src/services/call/signaling/` — `SignalingAdapter` port, `webrtc/` holding the existing WebRTC implementation relocated from the old `connection/`+`api/` folders, `sip/` for the SIP adapter). Gateway choice for the SIP side: **drachtio-server + rtpengine** (not jambonz/Janus/FreeSWITCH/Asterisk — see `SIP_INTEGRATION.md` for the full comparison and why). Milestone A (the gateway itself, deployed under `deploy/sip-gateway/`) is **validated end-to-end with a real inbound call from the trunk provider** (Digitalk) — signaling and media negotiation both confirmed working. Milestone B (wiring SIP calls into `AudioBridge`/IVR/recording/assignment as a channel-agnostic customer leg, same shape WhatsApp calls already use) has not started — see `SIP_INTEGRATION.md`'s scope section.
+3. **Phase 3 (planned)**: unify the two call pipelines that currently exist in the monorepo (direct 1:1 calls vs. call-center queue/transfer/monitor) into one engine, ideally before or alongside finishing the SIP channel, so a third parallel pipeline doesn't get built by accident.
 4. **Phase 4 (planned, after the backend work above is solid)**: build a custom frontend for Callio — a new UI, not a copy of the monorepo's React app. No framework/stack decisions have been made yet.
 
-## Current status (as of this extraction)
+## Current status
 
-- Nothing in this repo is committed yet — it's a fresh working tree.
-- No `.env` has been created here; `npm install` has not been run or verified in this environment (a few dependencies — `@roamhq/wrtc`, `@discordjs/opus` — are native builds that can be slow or fail depending on the host toolchain).
-- The app has not been booted or smoke-tested since extraction — treat it as unverified until someone runs it end-to-end against real DB/Redis credentials.
+- Committed and under active development (`main` branch) — no longer a fresh extraction snapshot. Deployed to a real development server (`callio.pcg-ms.com`) with nginx reverse-proxying to a PM2 worker pool.
+- The app has been booted and smoke-tested against real DB/Redis credentials on that server.
+- The SIP gateway (`deploy/sip-gateway/`) is deployed on the same server and has handled a real inbound call end-to-end. No SIP-related application code exists in `src/` yet (Milestone B, not started).
 
 ## Commands
 
@@ -70,11 +72,10 @@ PM2 runs multiple **fork-mode** worker processes (`ecosystem.config.cjs`, count 
 
 Organized by concern, no files at the folder root:
 
-- `api/` — `WhatsAppCallApi.js`, the Graph API adapter (initiate/accept/reject/terminate)
+- `signaling/` — the hexagonal port/adapter boundary for call signaling. `SignalingAdapter.js` is the port; `webrtc/` holds the WebRTC adapter (`Peer`, `PeerRegistry`, SDP/ICE coordinators, `WhatsAppCallApi.js` — this subfolder is where the old top-level `connection/` and `api/` folders were relocated to); `sip/` holds the SIP adapter (currently just a stub — see `SIP_INTEGRATION.md`, Milestone B not started)
 - `assignment/` — agent assignment and queue management (`AgentAssignmentCoordinator` is the single entry point for anything that changes agent/queue state)
 - `audio/` — audio bridging between peers, placeholder tracks, recording pipeline (`bridge/`, `dtmf/`, `recording/` + `recording/encoding/` subfolders)
 - `cleanup/` — stuck-call detection (periodic scan + on-demand via the internal API) and call-center disable handling
-- `connection/` — the WebRTC peer connection layer (`Peer`, `PeerRegistry`, SDP/ICE coordinators)
 - `constants/` — frozen enums (`CallConstants.js`) — never use raw string literals for call status/direction/etc.
 - `events/` — `CallEventHandler` routes Redis-sourced events to one of 8 specialized handlers (initiation, agent, connection, whatsapp, termination, rejection, transfer, monitor)
 - `ivr/` — IVR state machine, audio playback, transfer-to-queue handling

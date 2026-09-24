@@ -1,5 +1,18 @@
 # drachtio-server + rtpengine — deployment & validation runbook
 
+**STATUS: Milestone A complete.** A real inbound call from Digitalk (the
+trunk provider) went all the way through — see `../../SIP_INTEGRATION.md`'s
+Milestone A section for the full trace. This runbook's checklist below is
+now historical record of how that was reached (and useful as-is for
+redeploying to a new server), not an open TODO.
+
+Two additional standalone scripts exist in `test/` beyond what's described
+below: `options-ping.js` (a SIP OPTIONS reachability probe — confirms the
+trunk is alive without placing a call; must run from the server itself) and
+`outbound-test-call.js` (exploratory outbound-call signaling test — the
+trunk currently rejects outbound with `503`, not pursued further since
+outbound is out of scope for this milestone; see `SIP_INTEGRATION.md`).
+
 Milestone A of the SIP trunk integration (see `../../SIP_INTEGRATION.md` for
 the full context, including why this replaced an earlier FreeSWITCH-based
 plan). This runbook gets the gateway reachable by the real trunk and proves

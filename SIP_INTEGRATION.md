@@ -1,17 +1,22 @@
 # SIP Trunk Integration
 
-Status: **Milestone A in progress** (gateway deployment/validation — see
-`deploy/sip-gateway/RUNBOOK.md`). No application code exists yet; this doc
-exists so Milestone B doesn't have to re-derive the scope from scratch.
+Status: **Milestone A complete and validated with a real inbound call.**
+Milestone B (application code, wiring SIP into the call domain) has not
+started — this doc exists so it doesn't have to re-derive the scope from
+scratch.
 
 ## Goal
 
 Accept calls from a SIP trunk/carrier as a second "customer leg" alongside
 the existing WhatsApp Business Calling leg, first slice scoped to **inbound
 only — accept a PSTN call, bridge to an agent** (parity with the existing
-WhatsApp inbound flow). Outbound-via-SIP is out of scope until this works.
+WhatsApp inbound flow). Outbound-via-SIP is out of scope until this works
+(an exploratory outbound signaling test was also run — see Milestone A
+results below — but building real outbound support is not part of this
+slice).
 
-Trunk: IP-authenticated, carrier IP `185.231.78.58`.
+Trunk: IP-authenticated, carrier is **Digitalk**, signaling IP
+`185.231.78.58`.
 
 ## Why this stack: drachtio-server + rtpengine (after considering Janus, FreeSWITCH, and Asterisk)
 
@@ -45,7 +50,28 @@ Four options were considered, in order:
    exact pattern for a similar goal: Jambonz (open-source "build your own
    programmable voice platform") is built on drachtio + rtpengine.
 
-## Milestone A — gateway infra (this pass)
+## Milestone A — gateway infra (complete)
+
+**Validated with a real inbound call from Digitalk (the trunk provider):**
+INVITE reached `drachtio-server` → `call-test.js` received it and logged the
+Call-ID/caller info → `rtpengine` accepted the SDP offer and allocated a real
+media session → `drachtio` answered with 200 OK, received the ACK, call
+established → Digitalk sent BYE after ~12 seconds, call ended cleanly. Both
+signaling (drachtio) and media negotiation (rtpengine) are confirmed working
+against the real trunk, not just simulated locally. One real, trunk-specific
+bug was found and fixed along the way: an inbound firewall rule was blocking
+the carrier's traffic before this succeeded — resolved on the server
+(specifics not captured in this repo; if re-deploying to a new server, don't
+assume the firewall rules in `RUNBOOK.md`'s prerequisites are sufficient
+as-is, verify against a real inbound attempt the way this one was).
+
+An exploratory outbound test (`test/outbound-test-call.js`, added after this
+milestone's original scope) also confirmed outbound SIP signaling reaches the
+trunk, but the trunk provider rejected the call with `503 Service
+Unavailable` — most likely a `From`/Caller-ID authorization requirement or
+outbound not being enabled on this trunk yet. Not investigated further since
+outbound is out of scope for this slice; would need the provider's input to
+resolve if outbound is ever needed.
 
 Deployment artifacts only, zero changes to `src/`/`config/`, **except** a
 standalone validation script under `deploy/sip-gateway/test/` with its own
@@ -82,16 +108,16 @@ application code. See `deploy/sip-gateway/`:
    the other side. Check via `SHOW CREATE TABLE call_connections;` against
    the real DB (RUNBOOK.md checkpoint 5). The same question applies to
    `TerminatedBy` if that enum is also DB-backed anywhere (see below).
-2. **drachtio-server + rtpengine's behavior against this specific trunk is
-   still unverified** — that part needs the real server + real carrier.
-   However, the signaling+media logic itself has now been verified locally:
-   a raw SIP INVITE placed against the local stack went all the way through
-   `rtpengine-ng-client.js`'s `offer` command to a real rtpengine-generated
-   SDP answer, `call-test.js` answered it, and BYE tore it down cleanly (see
-   `deploy/sip-gateway/RUNBOOK.md`'s updated section 0). One real config bug
-   was found and fixed this way (`<admin-tcp address="...">` → `<admin>`).
-   What's still unverified: actual RTP audio content, and anything specific
-   to the real trunk (auth mode, firewall reachability, its SDP quirks).
+2. **Resolved.** drachtio-server + rtpengine's behavior against the real
+   trunk is now confirmed — see Milestone A results above. Local testing
+   caught and fixed two real bugs before the real-trunk test (the `<admin-tcp
+   address="...">` → `<admin>` config element, and rtpengine's config
+   parser crashing on any `;` comment line — both fixed in
+   `deploy/sip-gateway/`), and the real inbound call caught one more
+   (a firewall rule), all now resolved. Still genuinely unverified: actual
+   two-way audio *content* (the real call negotiated real media sessions and
+   ran for ~12s, but audio quality/correctness wasn't specifically checked),
+   and outbound calling (rejected by the provider, see above — not pursued).
 
 ## Milestone B scope (not started) — application-code blast radius
 
