@@ -1,24 +1,24 @@
 // Entry point — wires the application together and starts the HTTP/WebSocket server.
 // Keep this file as an orchestrator only: no business logic, no service implementation.
 // Init sequences → src/server/bootstrap.js  |  Shutdown → src/server/shutdown.js
-// Routes → src/routes/  |  Handlers → src/controllers/
+// HTTP → src/http/  |  Agent sockets → src/realtime/  (layout: PLATFORM_ARCHITECTURE.md §7)
 
 // Logging must be the very first thing installed so no import-time
 // console.log slips through before the dated files are open.
-import { appLogService } from "./src/services/monitoring/AppLogService.js";
+import { appLogService } from "./src/infra/logging/AppLogService.js";
 appLogService.install();
 
 import { config } from "./config/envConfig.js";
-import { createWebSocketServer } from "./src/websocket/server.js";
-import { presenceService } from "./src/services/redis/PresenceService.js";
-import { redisCleanupService } from "./src/services/redis/RedisCleanupService.js";
-import { callCleanupService } from "./src/services/call/cleanup/CallCleanupService.js";
-import { peerRegistry } from "./src/services/call/signaling/webrtc/PeerRegistry.js";
-import { workerStatsService } from "./src/services/monitoring/WorkerStatsService.js";
+import { createWebSocketServer } from "./src/realtime/server.js";
+import { presenceService } from "./src/core/agents/PresenceService.js";
+import { redisCleanupService } from "./src/infra/cluster/RedisCleanupService.js";
+import { callCleanupService } from "./src/core/calls/CallCleanupService.js";
+import { peerRegistry } from "./src/media/webrtc/PeerRegistry.js";
+import { workerStatsService } from "./src/infra/monitoring/WorkerStatsService.js";
 import { initRedis, initOptionalServices } from "./src/server/bootstrap.js";
 import { shutdown } from "./src/server/shutdown.js";
-import { handleWorkerHealth } from "./src/controllers/healthController.js";
-import apiRoutes from "./src/routes/apiRoutes.js";
+import { handleWorkerHealth } from "./src/http/controllers/healthController.js";
+import apiRoutes from "./src/http/routes/apiRoutes.js";
 import Fastify from "fastify";
 import fastifyCors from "@fastify/cors";
 

@@ -3,20 +3,20 @@
 // → DB updates → S3 drain → Redis teardown). Do not reorder: each step depends
 // on the previous one having completed. Adding a new step: read the ordering
 // contract in the numbered comments below before choosing where to insert it.
-import { redisClient } from '../services/redis/RedisClient.js';
-import { redisPubSubService } from '../services/redis/RedisPubSubService.js';
-import { redisCleanupService } from '../services/redis/RedisCleanupService.js';
-import { storageClient } from '../services/storage/StorageClient.js';
-import { streamUploader } from '../services/storage/StreamUploader.js';
-import { recordingManager } from '../services/call/audio/recording/RecordingManager.js';
-import { encodingWorkerBridge } from '../services/call/audio/recording/encoding/EncodingWorkerBridge.js';
-import { dtmfWorkerBridge } from '../services/call/audio/dtmf/DTMFWorkerBridge.js';
-import { peerRegistry } from '../services/call/signaling/webrtc/PeerRegistry.js';
-import { workerStatsService } from '../services/monitoring/WorkerStatsService.js';
-import { terminateWhatsAppCall } from '../services/call/signaling/webrtc/WhatsAppCallApi.js';
-import { callLifecycleLogger } from '../services/call/lifecycle/CallLifecycleLogger.js';
-import { ivrCoordinator } from '../services/call/ivr/IvrCoordinator.js';
-import CallRepository from '../repositories/CallRepository.js';
+import { redisClient } from '../infra/redis/RedisClient.js';
+import { redisPubSubService } from '../infra/redis/RedisPubSubService.js';
+import { redisCleanupService } from '../infra/cluster/RedisCleanupService.js';
+import { storageClient } from '../infra/storage/StorageClient.js';
+import { streamUploader } from '../infra/storage/StreamUploader.js';
+import { recordingManager } from '../media/recording/RecordingManager.js';
+import { encodingWorkerBridge } from '../media/recording/encoding/EncodingWorkerBridge.js';
+import { dtmfWorkerBridge } from '../media/dtmf/DTMFWorkerBridge.js';
+import { peerRegistry } from '../media/webrtc/PeerRegistry.js';
+import { workerStatsService } from '../infra/monitoring/WorkerStatsService.js';
+import { terminateWhatsAppCall } from '../channels/whatsapp/WhatsAppCallApi.js';
+import { callLifecycleLogger } from '../core/calls/CallLifecycleLogger.js';
+import { ivrCoordinator } from '../core/ivr/IvrCoordinator.js';
+import CallRepository from '../persistence/CallRepository.js';
 import dbPool from '../../config/dbConnection.js';
 
 // Checked by callWebhookController before processing a new incoming-call webhook.

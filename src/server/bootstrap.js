@@ -2,13 +2,13 @@
 // initRedis()           — required services; throws on failure, aborting startup.
 // initOptionalServices() — degradable services (storage, worker threads); warns on
 //                          failure and continues. Add new optional services here.
-import { redisBaseService } from '../services/redis/RedisBaseService.js';
-import { redisPubSubService } from '../services/redis/RedisPubSubService.js';
-import { presenceService } from '../services/redis/PresenceService.js';
-import { redisCleanupService } from '../services/redis/RedisCleanupService.js';
-import { storageClient } from '../services/storage/StorageClient.js';
-import { encodingWorkerBridge } from '../services/call/audio/recording/encoding/EncodingWorkerBridge.js';
-import { dtmfWorkerBridge } from '../services/call/audio/dtmf/DTMFWorkerBridge.js';
+import { redisBaseService } from '../infra/redis/RedisBaseService.js';
+import { redisPubSubService } from '../infra/redis/RedisPubSubService.js';
+import { presenceService } from '../core/agents/PresenceService.js';
+import { redisCleanupService } from '../infra/cluster/RedisCleanupService.js';
+import { storageClient } from '../infra/storage/StorageClient.js';
+import { encodingWorkerBridge } from '../media/recording/encoding/EncodingWorkerBridge.js';
+import { dtmfWorkerBridge } from '../media/dtmf/DTMFWorkerBridge.js';
 
 function logOptional(label, result, disabledFeature) {
     if (result.status === 'fulfilled')
