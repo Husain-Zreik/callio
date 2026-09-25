@@ -43,7 +43,7 @@ class PeerRegistry {
 
             // If a WHATSAPP audio track arrives after checkAndStartBridging already ran
             // (and returned early because customerTrack was null), retry now.
-            if (connectionType === ConnectionType.WHATSAPP && track.kind === 'audio') {
+            if (connectionType === ConnectionType.CUSTOMER && track.kind === 'audio') {
                 this.checkAndStartBridging(callId).catch(err =>
                     console.error(`[PeerRegistry] Bridge retry on trackReceived failed for call ${callId}:`, err.message)
                 );
@@ -153,36 +153,36 @@ class PeerRegistry {
     async checkAndStartBridging(callId) {
         const context = this.peerConnections.get(callId)?.context;
 
-        // ivrMenuId caching: undefined = not yet fetched; null = fetched, confirmed no IVR.
+        // ivrFlowId caching: undefined = not yet fetched; null = fetched, confirmed no IVR.
         // Non-IVR calls (majority) skip the DB round-trip on every connection-ready event
         // after the first. IVR calls always re-fetch because state changes during the session.
         let callRecord = null;
-        let ivrMenuId;
+        let ivrFlowId;
 
-        if (context?.ivrMenuId === undefined) {
+        if (context?.ivrFlowId === undefined) {
             callRecord = await CallRepository.findById(callId).catch(() => null);
-            ivrMenuId = callRecord?.ivr_menu_id ?? null;
+            ivrFlowId = callRecord?.ivr_flow_id ?? null;
             if (context) {
-                context.ivrMenuId = ivrMenuId;
-                // Seed businessId now so it survives the non-IVR fast-path (DB skipped on
+                context.ivrFlowId = ivrFlowId;
+                // Seed tenantId now so it survives the non-IVR fast-path (DB skipped on
                 // subsequent calls). Without this, callRecord is null when both peers finally
-                // become ready and AGENT_JOINED hasn't fired yet — recording gets no businessId.
-                if (callRecord?.business_id && !context.businessId) {
-                    context.update({ businessId: callRecord.business_id });
+                // become ready and AGENT_JOINED hasn't fired yet — recording gets no tenantId.
+                if (callRecord?.tenant_id && !context.tenantId) {
+                    context.update({ tenantId: callRecord.tenant_id });
                 }
             }
-        } else if (context.ivrMenuId !== null) {
+        } else if (context.ivrFlowId !== null) {
             // Known IVR call — re-fetch to get current state
             callRecord = await CallRepository.findById(callId).catch(() => null);
-            ivrMenuId = context.ivrMenuId;
+            ivrFlowId = context.ivrFlowId;
         } else {
             // Confirmed non-IVR — skip DB
-            ivrMenuId = null;
+            ivrFlowId = null;
         }
 
-        if (ivrMenuId && callRecord?.state === 'IVR' && !ivrCoordinator.isActive(callId) && !ivrCoordinator.hasCompleted(callId)) {
+        if (ivrFlowId && callRecord?.state === 'IVR' && !ivrCoordinator.isActive(callId) && !ivrCoordinator.hasCompleted(callId)) {
             // IVR mode: only the WhatsApp connection is needed
-            const whatsappResult = this.getConnectionData(callId, ConnectionType.WHATSAPP, true);
+            const whatsappResult = this.getConnectionData(callId, ConnectionType.CUSTOMER, true);
             if (!whatsappResult.valid) {
                 console.log(`[PeerRegistry] ⏳ IVR waiting for WHATSAPP — call ${callId}`);
                 return;
@@ -200,18 +200,19 @@ class PeerRegistry {
             }
 
             const callMeta = {
-                businessId: context?.businessId ?? callRecord?.business_id,
-                businessNumberId: context?.callee?.id ?? callRecord?.business_number_id,
+                tenantId: context?.tenantId ?? callRecord?.tenant_id,
+                channelId: context?.channelId ?? callRecord?.channel_id ?? null,
+                queueId: callRecord?.queue_id ?? null,
             };
 
-            console.log(`[PeerRegistry] 🔊 IVR mode — starting IVR session for call ${callId}, menu ${ivrMenuId}`);
-            await ivrCoordinator.startSession(callId, ivrMenuId, whatsappPc, customerTrack, callMeta, whatsappPeer);
+            console.log(`[PeerRegistry] 🔊 IVR mode — starting IVR session for call ${callId}, menu ${ivrFlowId}`);
+            await ivrCoordinator.startSession(callId, ivrFlowId, whatsappPc, customerTrack, callMeta, whatsappPeer);
             return;
         }
 
         // Normal mode: both FRONTEND and WHATSAPP must be ready
-        const frontendResult = this.getConnectionData(callId, ConnectionType.FRONTEND, true);
-        const whatsappResult = this.getConnectionData(callId, ConnectionType.WHATSAPP, true);
+        const frontendResult = this.getConnectionData(callId, ConnectionType.AGENT, true);
+        const whatsappResult = this.getConnectionData(callId, ConnectionType.CUSTOMER, true);
 
         if (!frontendResult.valid || !whatsappResult.valid) {
             console.log(`[PeerRegistry] ⏳ Bridge not ready for call ${callId} — FRONTEND=${frontendResult.valid}, WHATSAPP=${whatsappResult.valid}`);
@@ -221,14 +222,14 @@ class PeerRegistry {
 
         this._clearIceStallTimers(callId);
 
-        const resolvedBusinessId = frontendResult.data?.context?.businessId
-            ?? whatsappResult.data?.context?.businessId
-            ?? callRecord?.business_id
+        const resolvedTenantId = frontendResult.data?.context?.tenantId
+            ?? whatsappResult.data?.context?.tenantId
+            ?? callRecord?.tenant_id
             ?? null;
 
         // Bridge events can fire before AGENT_JOINED updates context; seed from DB as fallback.
-        if (resolvedBusinessId && context && !context.businessId) {
-            context.update({ businessId: resolvedBusinessId });
+        if (resolvedTenantId && context && !context.tenantId) {
+            context.update({ tenantId: resolvedTenantId });
         }
 
         console.log(`[PeerRegistry] 🚀 Both connections ready, starting bridge for call ${callId}`);
@@ -236,7 +237,7 @@ class PeerRegistry {
             callId,
             frontendResult.data,
             whatsappResult.data,
-            resolvedBusinessId,
+            resolvedTenantId,
         );
     }
 
@@ -280,9 +281,9 @@ class PeerRegistry {
         }
 
         const closingAll = !connectionType;
-        const closingFrontend = connectionType === ConnectionType.FRONTEND;
+        const closingFrontend = connectionType === ConnectionType.AGENT;
 
-        if (closingAll || connectionType === ConnectionType.WHATSAPP) {
+        if (closingAll || connectionType === ConnectionType.CUSTOMER) {
             console.log(`[PeerRegistry] 🛑 Stopping recording for call ${callId}`);
             await audioCoordinator.stopRecording(callId);
         }
@@ -309,11 +310,11 @@ class PeerRegistry {
             }
         }));
 
-        if (closingFrontend && callConnections[ConnectionType.WHATSAPP]) {
+        if (closingFrontend && callConnections[ConnectionType.CUSTOMER]) {
             await audioCoordinator.handleFrontendDisconnected(callId);
         }
 
-        const hasMainConnections = callConnections[ConnectionType.FRONTEND] || callConnections[ConnectionType.WHATSAPP];
+        const hasMainConnections = callConnections[ConnectionType.AGENT] || callConnections[ConnectionType.CUSTOMER];
 
         // Only do full cleanup when closing all, or when a non-FRONTEND connection is removed
         // and no main connections remain.  Closing just FRONTEND (transfer / reconnect) must NOT

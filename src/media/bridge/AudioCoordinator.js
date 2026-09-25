@@ -58,7 +58,7 @@ export class AudioCoordinator {
      * Called when both FRONTEND and WHATSAPP connections reach 'connected'.
      * Starts the audio bridge and triggers recording if enabled.
      */
-    async checkAndStartBridging(callId, frontendData, whatsappData, fallbackBusinessId = null) {
+    async checkAndStartBridging(callId, frontendData, whatsappData, fallbackTenantId = null) {
         const bridgeStarted = await this.bridgeManager.checkAndStartBridging(callId, frontendData, whatsappData);
 
         if (!bridgeStarted) {
@@ -73,13 +73,13 @@ export class AudioCoordinator {
 
         console.log(`[AudioCoordinator] Bridge started for call ${callId} — checking recording`);
 
-        const businessId = frontendData?.context?.businessId
-            ?? whatsappData?.context?.businessId
-            ?? fallbackBusinessId
+        const tenantId = frontendData?.context?.tenantId
+            ?? whatsappData?.context?.tenantId
+            ?? fallbackTenantId
             ?? null;
 
         try {
-            await recordingCoordinator.checkAndStartRecording(callId, businessId, {
+            await recordingCoordinator.checkAndStartRecording(callId, tenantId, {
                 getTracks: () => this.bridgeManager.getTracksForRecording(callId),
                 getAgentTrack: () => this.bridgeManager.getAgentTrackForRecording(callId),
                 isBridgeActive: () => this.bridgeManager.getBridge(callId)?.isActive === true,
@@ -107,9 +107,9 @@ export class AudioCoordinator {
         }
 
         if (bridge.isActive) {
-            const toType = connectionType === ConnectionType.FRONTEND
-                ? ConnectionType.WHATSAPP
-                : ConnectionType.FRONTEND;
+            const toType = connectionType === ConnectionType.AGENT
+                ? ConnectionType.CUSTOMER
+                : ConnectionType.AGENT;
             console.log(`[AudioCoordinator] Relaying track: ${connectionType} → ${toType}`);
             bridge.handleIncomingTrack(track, stream, connectionType);
         } else {
@@ -138,7 +138,7 @@ export class AudioCoordinator {
             return;
         }
 
-        bridge.relayTrack(beepTrack, new wrtc.MediaStream([beepTrack]), ConnectionType.FRONTEND, ConnectionType.WHATSAPP);
+        bridge.relayTrack(beepTrack, new wrtc.MediaStream([beepTrack]), ConnectionType.AGENT, ConnectionType.CUSTOMER);
         console.log(`[AudioCoordinator] Reconnect beep attached for call ${callId}`);
     }
 

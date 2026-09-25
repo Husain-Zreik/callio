@@ -6,7 +6,7 @@ import { AgentEventHandler } from './handlers/AgentEventHandler.js';
 import { InitiationEventHandler } from './handlers/InitiationEventHandler.js';
 import { ConnectionEventHandler } from './handlers/ConnectionEventHandler.js';
 import { MonitorEventHandler } from './handlers/MonitorEventHandler.js';
-import { WhatsAppEventHandler } from './handlers/WhatsAppEventHandler.js';
+import { CustomerEventHandler } from './handlers/CustomerEventHandler.js';
 import { TerminationEventHandler } from './handlers/TerminationEventHandler.js';
 import { RejectionEventHandler } from './handlers/RejectionEventHandler.js';
 import { TransferEventHandler } from './handlers/TransferEventHandler.js';
@@ -20,7 +20,7 @@ export class CallEventHandler {
         this.connectionHandler = new ConnectionEventHandler();
         this.monitorHandler = new MonitorEventHandler();
         this.initiationHandler = new InitiationEventHandler();
-        this.whatsappHandler = new WhatsAppEventHandler();
+        this.customerHandler = new CustomerEventHandler();
         this.terminationHandler = new TerminationEventHandler();
         this.rejectionHandler = new RejectionEventHandler();
         this.transferHandler = new TransferEventHandler();
@@ -28,8 +28,14 @@ export class CallEventHandler {
         agentAssignmentCoordinator.setCallEventCallback(this.handleCallEvent);
     }
 
-    async initiateCall(data) {
-        return this.initiationHandler.handleCallInitiate(data, this.handleCallEvent);
+    // Outbound step 1 (Management API): the consumer asks for a call.
+    async createOutboundIntent(data) {
+        return this.initiationHandler.createOutboundIntent(data);
+    }
+
+    // Outbound step 2 (agent socket call:start): the agent connects its leg.
+    async startCall(data) {
+        return this.initiationHandler.handleCallStart(data, this.handleCallEvent);
     }
 
     async handleCallEvent(eventType, data) {
@@ -61,7 +67,7 @@ export class CallEventHandler {
                     await this.agentHandler.handleRingingAgentReconnect(data);
                     break;
 
-                case EventTypes.FRONTEND_DISCONNECTED:
+                case EventTypes.AGENT_DISCONNECTED:
                     await this.connectionHandler.handleFrontendDisconnected(data);
                     break;
 
@@ -85,8 +91,8 @@ export class CallEventHandler {
                     await this.monitorHandler.handleAgentPrivateChanged(data);
                     break;
 
-                case EventTypes.WHATSAPP_ANSWER_RECEIVED:
-                    await this.whatsappHandler.handleWhatsAppAnswerReceived(data);
+                case EventTypes.CUSTOMER_ANSWER_RECEIVED:
+                    await this.customerHandler.handleCustomerAnswerReceived(data);
                     break;
 
                 case EventTypes.CALL_TERMINATED:

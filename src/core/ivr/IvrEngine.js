@@ -17,7 +17,7 @@ import { ivrErrorAudioProvider } from '../../media/playback/IvrErrorAudioProvide
 class IvrEngine {
     constructor({
         callId,
-        businessId,
+        tenantId,
         structure,
         defaultTimeout,
         audioSource,
@@ -29,7 +29,7 @@ class IvrEngine {
         onRouteSelected,
     }) {
         this._callId         = callId;
-        this._businessId     = businessId ?? null;
+        this._businessId     = tenantId ?? null;
         this._nodes          = this._indexNodes(structure.nodes ?? []);
         this._edges          = structure.edges ?? [];
         this._defaultTimeout = (defaultTimeout ?? 10) * 1000;
@@ -123,7 +123,7 @@ class IvrEngine {
 
         EventBus.emit('call:ivr_node', {
             callId:     this._callId,
-            businessId: this._businessId,
+            tenantId: this._businessId,
             nodeId,
             nodeType:   node.type,
         });

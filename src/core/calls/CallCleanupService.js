@@ -1,10 +1,9 @@
 // src/core/calls/CallCleanupService.js
 // Owns stuck-call detection, cleanup queue processing, and periodic scan.
-// getOngoingCalls lives in CallManager (it's a query, not a cleanup operation).
 import CallRepository from '../../persistence/CallRepository.js';
 import AgentRepository from '../../persistence/AgentRepository.js';
 import RecordingRepository from '../../persistence/RecordingRepository.js';
-import BusinessRepository from '../../persistence/BusinessRepository.js';
+import TenantRepository from '../../persistence/TenantRepository.js';
 import EventBus from '../EventBus.js';
 import { peerRegistry } from '../../media/webrtc/PeerRegistry.js';
 import { AgentAvailability, CallStatus, TerminationReason } from '../constants/CallConstants.js';
@@ -13,6 +12,7 @@ import { callLifecycleLogger } from './CallLifecycleLogger.js';
 import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinator.js';
 
 const CLEANUP_COOLDOWN = 30_000;
+const OUTBOUND_INTENT_TTL_MINUTES = 2;
 
 // Statuses that mean the call is over. A local peer connection still held for a
 // call in one of these states is an orphan and must be closed (see reconciler).
@@ -24,8 +24,8 @@ const TERMINAL_STATUSES = new Set([
 
 class CallCleanupService {
     constructor() {
-        this.cleanupQueue = new Map();     // callId -> { callId, businessId, reason }
-        this.lastCleanupTime = new Map();  // businessId -> timestamp
+        this.cleanupQueue = new Map();     // callId -> { callId, tenantId, reason }
+        this.lastCleanupTime = new Map();  // tenantId -> timestamp
         this._timer = null;
         this._ivrTimer = null;
     }
@@ -41,25 +41,25 @@ class CallCleanupService {
 
     // ── Public API ────────────────────────────────────────────────────────────
 
-    enqueue(callId, businessId, reason) {
-        this.cleanupQueue.set(callId, { callId, businessId, reason });
+    enqueue(callId, tenantId, reason) {
+        this.cleanupQueue.set(callId, { callId, tenantId, reason });
     }
 
     // ── Cleanup queue ─────────────────────────────────────────────────────────
 
-    processCleanupQueue(businessId) {
+    processCleanupQueue(tenantId) {
         const now = Date.now();
-        const lastCleanup = this.lastCleanupTime.get(businessId) || 0;
+        const lastCleanup = this.lastCleanupTime.get(tenantId) || 0;
 
         if (now - lastCleanup < CLEANUP_COOLDOWN) return;
 
         const businessQueue = Array.from(this.cleanupQueue.values())
-            .filter(item => item.businessId === businessId);
+            .filter(item => item.tenantId === tenantId);
 
         if (businessQueue.length === 0) return;
 
-        this.lastCleanupTime.set(businessId, now);
-        console.log(`[Cleanup] Processing ${businessQueue.length} queued calls for business ${businessId}`);
+        this.lastCleanupTime.set(tenantId, now);
+        console.log(`[Cleanup] Processing ${businessQueue.length} queued calls for tenant ${tenantId}`);
 
         setImmediate(async () => {
             try {
@@ -76,9 +76,9 @@ class CallCleanupService {
         if (!callItems?.length) return;
 
         const callIds = callItems.map(item => item.callId);
-        const businessId = callItems[0].businessId;
+        const tenantId = callItems[0].tenantId;
 
-        console.log(`[Cleanup] 🧹 Batch cleaning ${callIds.length} calls for business ${businessId}`);
+        console.log(`[Cleanup] 🧹 Batch cleaning ${callIds.length} calls for tenant ${tenantId}`);
 
         const calls = await CallRepository.findByIds(callIds);
         if (calls.length === 0) { console.log(`[Cleanup] ⚠️ No calls found`); return; }
@@ -123,7 +123,7 @@ class CallCleanupService {
         // that call; marking them AVAILABLE would hand a second inbound call
         // to someone mid-conversation.
         const agentIds = [...new Set(
-            calls.filter(c => terminatedIds.has(c.id) && c.user_id).map(c => c.user_id)
+            calls.filter(c => terminatedIds.has(c.id) && c.agent_id).map(c => c.agent_id)
         )];
         if (agentIds.length > 0) {
             await AgentRepository.batchUpdateAgentAvailability(agentIds, AgentAvailability.AVAILABLE);
@@ -141,7 +141,7 @@ class CallCleanupService {
             const item = callItems.find(i => i.callId === call.id);
             EventBus.emit('call:terminated', {
                 callId: call.id,
-                businessId: call.business_id,
+                tenantId: call.tenant_id,
                 reason: 'cleanup_queued',
                 terminationReason: item?.reason || 'UNKNOWN',
             });
@@ -151,13 +151,9 @@ class CallCleanupService {
         return terminatedIds;
     }
 
-    // On-demand equivalent of the periodic scan, scoped to one agent. Called
-    // from POST /internal/calls/release-stale — the replacement for Laravel's
-    // UserController::updateCallAvailability doing its own raw `calls` UPDATE,
-    // which skipped peer close / agent release / call:terminated / lifecycle
-    // logging and lacked this service's own accept-vs-terminate race guard
-    // (see batchTerminateCalls). Runs the real cleanup immediately instead of
-    // waiting up to 30s for the next periodic tick.
+    // On-demand equivalent of the periodic scan, scoped to one agent — used
+    // when an agent's availability is forced through the Management API, so a
+    // stale call blocking them is released now instead of on the next 30s tick.
     async releaseStaleCallsForUser(userId) {
         const stuckCalls = await CallRepository.findStuckCallsForUser(userId, 1);
         if (stuckCalls.length === 0) return { releasedCount: 0 };
@@ -166,7 +162,7 @@ class CallCleanupService {
 
         const callItems = stuckCalls.map(call => ({
             callId: call.id,
-            businessId: call.business_id,
+            tenantId: call.tenant_id,
             reason: call.status === CallStatus.RINGING
                 ? TerminationReason.NO_ANSWER
                 : (call.termination_reason ?? TerminationReason.COMPLETED),
@@ -188,6 +184,10 @@ class CallCleanupService {
             console.error('[Cleanup] Stale recording scan failed:', err)
         );
 
+        await this._expireOutboundIntents().catch((err) =>
+            console.error('[Cleanup] Outbound intent expiry failed:', err)
+        );
+
         try {
             const stuckCalls = await CallRepository.findAllStuckCalls(1);
             if (stuckCalls.length === 0) return;
@@ -196,16 +196,35 @@ class CallCleanupService {
 
             for (const call of stuckCalls) {
                 const reason = call.status === 'RINGING' ? 'NO_ANSWER' : (call.termination_reason ?? 'COMPLETED');
-                this.enqueue(call.id, call.business_id, reason);
+                this.enqueue(call.id, call.tenant_id, reason);
             }
 
-            const businesses = [...new Set(stuckCalls.map(c => c.business_id))];
+            const businesses = [...new Set(stuckCalls.map(c => c.tenant_id))];
             for (const bId of businesses) {
                 this.lastCleanupTime.delete(bId); // force drain immediately
                 this.processCleanupQueue(bId);
             }
         } catch (err) {
             console.error('[Cleanup] ❌ Periodic cleanup scan failed:', err.message);
+        }
+    }
+
+    // Outbound intents the agent never started (no call:start within
+    // OUTBOUND_INTENT_TTL_MINUTES) are cancelled so they don't sit INITIATED forever.
+    async _expireOutboundIntents() {
+        const expired = await CallRepository.findExpiredOutboundIntents(OUTBOUND_INTENT_TTL_MINUTES);
+        for (const call of expired) {
+            const committed = await CallRepository.terminateCallIfNotTerminated(
+                call.id, TerminationReason.CANCELLED, 'SYSTEM'
+            );
+            if (!committed) continue;
+            console.log(`[Cleanup] Outbound intent ${call.id} expired without call:start — cancelled`);
+            EventBus.emit('call:terminated', {
+                callId: call.id,
+                tenantId: call.tenant_id,
+                reason: 'outbound_intent_expired',
+                terminationReason: TerminationReason.CANCELLED,
+            });
         }
     }
 
@@ -220,9 +239,9 @@ class CallCleanupService {
 
             const policyCache = new Map(
                 await Promise.all(
-                    [...new Set(stuckCalls.map(c => c.business_id))].map(async bId => {
+                    [...new Set(stuckCalls.map(c => c.tenant_id))].map(async bId => {
                         try {
-                            return [bId, await BusinessRepository.getAutoOfflineSettings(bId)];
+                            return [bId, await TenantRepository.getAutoOfflineSettings(bId)];
                         } catch {
                             return [bId, { enabled: false }];
                         }
@@ -232,11 +251,11 @@ class CallCleanupService {
 
             for (const call of stuckCalls) {
                 // Lifecycle event — written before termination so the duration is accurate.
-                callLifecycleLogger.logIvrAgentMissed(call.id, call.business_id, call.user_id, {
+                callLifecycleLogger.logIvrAgentMissed(call.id, call.tenant_id, call.agent_id, {
                     ring_duration_seconds: Math.floor(
                         (Date.now() - new Date(call.ringing_at).getTime()) / 1000
                     ),
-                    ivr_menu_id: call.ivr_menu_id,
+                    ivr_flow_id: call.ivr_flow_id,
                     configured_timeout: call.agent_ring_timeout,
                 }).catch(err =>
                     console.error(`[Cleanup] IVR lifecycle log failed for call ${call.id}:`, err.message)
@@ -248,38 +267,38 @@ class CallCleanupService {
                 // never runs. We skip the routing-strategy guard used for regular QUEUE calls
                 // because the IVR path is its own routing overlay (not strategy-specific).
                 try {
-                    const policy = policyCache.get(call.business_id) ?? { enabled: false };
-                    if (policy.enabled && call.user_id) {
-                        const agentIsOnActiveCall = await CallRepository.hasAgentActiveCall(call.user_id, call.id);
+                    const policy = policyCache.get(call.tenant_id) ?? { enabled: false };
+                    if (policy.enabled && call.agent_id) {
+                        const agentIsOnActiveCall = await CallRepository.hasAgentActiveCall(call.agent_id, call.id);
                         if (agentIsOnActiveCall) {
                             console.log(
-                                `[AutoOffline] Skipping IVR missed-streak for agent ${call.user_id} — agent is on ` +
-                                `an active call (business=${call.business_id}, missed=${call.id})`
+                                `[AutoOffline] Skipping IVR missed-streak for agent ${call.agent_id} — agent is on ` +
+                                `an active call (tenant=${call.tenant_id}, missed=${call.id})`
                             );
                         } else {
-                            const streak = await agentMissedCallTracker.increment(call.user_id);
+                            const streak = await agentMissedCallTracker.increment(call.agent_id);
                             console.log(
-                                `[AutoOffline] Agent ${call.user_id} IVR missed-streak=${streak}/${policy.threshold} ` +
-                                `(business=${call.business_id}, call=${call.id})`
+                                `[AutoOffline] Agent ${call.agent_id} IVR missed-streak=${streak}/${policy.threshold} ` +
+                                `(tenant=${call.tenant_id}, call=${call.id})`
                             );
                             if (streak >= policy.threshold) {
                                 const flipped = await AgentRepository.updateAgentAvailability(
-                                    call.user_id, AgentAvailability.OFFLINE
+                                    call.agent_id, AgentAvailability.OFFLINE
                                 );
-                                await agentMissedCallTracker.reset(call.user_id);
+                                await agentMissedCallTracker.reset(call.agent_id);
                                 if (flipped) {
                                     EventBus.emit('call:agent_availability', {
-                                        businessId: call.business_id,
-                                        userId: call.user_id,
+                                        tenantId: call.tenant_id,
+                                        userId: call.agent_id,
                                         availability: AgentAvailability.OFFLINE,
                                         reason: 'auto_offline_missed_calls',
                                         consecutiveMissed: streak,
                                         updatedAt: new Date().toISOString(),
                                     });
-                                    await agentAssignmentCoordinator.emitQueueUpdate(call.business_id).catch(() => { });
+                                    await agentAssignmentCoordinator.emitQueueUpdate(call.tenant_id).catch(() => { });
                                     console.log(
-                                        `[AutoOffline] Flipped agent ${call.user_id} OFFLINE after ${streak} consecutive ` +
-                                        `IVR missed calls (threshold=${policy.threshold}, business=${call.business_id})`
+                                        `[AutoOffline] Flipped agent ${call.agent_id} OFFLINE after ${streak} consecutive ` +
+                                        `IVR missed calls (threshold=${policy.threshold}, tenant=${call.tenant_id})`
                                     );
                                 }
                             }
@@ -291,10 +310,10 @@ class CallCleanupService {
                     );
                 }
 
-                this.enqueue(call.id, call.business_id, TerminationReason.IVR_AGENT_NO_ANSWER);
+                this.enqueue(call.id, call.tenant_id, TerminationReason.IVR_AGENT_NO_ANSWER);
             }
 
-            const businesses = [...new Set(stuckCalls.map(c => c.business_id))];
+            const businesses = [...new Set(stuckCalls.map(c => c.tenant_id))];
             for (const bId of businesses) {
                 this.lastCleanupTime.delete(bId);
                 this.processCleanupQueue(bId);
@@ -348,7 +367,7 @@ class CallCleanupService {
             const call = callById.get(String(callId));
             EventBus.emit('call:terminated', {
                 callId,
-                businessId: call?.business_id ?? null,
+                tenantId: call?.tenant_id ?? null,
                 reason: 'orphan_cleanup',
                 terminationReason: status ?? 'NOT_FOUND',
             });

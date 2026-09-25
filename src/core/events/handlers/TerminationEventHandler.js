@@ -55,7 +55,7 @@ export class TerminationEventHandler {
                 // call terminated by the business side would be recorded as COMPLETED
                 // even though no media session was ever established, and that stale
                 // COMPLETED would then survive the later Meta webhook via COALESCE.
-                terminatedBy = TerminatedBy.BUSINESS;
+                terminatedBy = TerminatedBy.AGENT;
                 terminationReason = reason === 'cancelled'
                     ? TerminationReason.CANCELLED
                     : (!call.answered_at && (call.status === 'RINGING' || call.status === 'INITIATED'))
@@ -72,48 +72,51 @@ export class TerminationEventHandler {
                 return;
             }
 
-            // Tell Meta to terminate (for normal path: triggers authoritative webhook
-            // that patches durations; for system_failed: stops media billing).
-            try { await terminateWhatsAppCall(callId); } catch (err) {
-                console.warn(`[TerminationEventHandler] terminateCall API error for ${callId}: ${err.message}`);
-            }
-
-            await peerRegistry.closePeerConnection(callId);
-
+            // Order after the DB commit: tell clients and free the agent first —
+            // tearing down the WebRTC peers can take over a second, and the agent
+            // must not sit ON_CALL (unofferable) meanwhile — then the provider,
+            // then media.
             EventBus.emit('call:terminated', {
                 callId,
-                businessId: call.business_id,
+                tenantId: call.tenant_id,
                 reason: terminationReason,
                 terminatedBy,
                 source: isSystemFailed ? 'ice_reconnect_exhausted'
                     : isCustomerNetworkLoss ? 'silence_watchdog'
-                        : 'business_socket',
+                        : 'agent_or_api',
             });
 
-            await callLifecycleLogger.logTerminated(callId, call.business_id, call?.user_id ?? null, {
-                reason: terminationReason,
-                terminated_by: terminatedBy,
-                direction: call?.direction,
-            });
-
-            if (call?.user_id) {
+            if (call?.agent_id) {
                 try {
                     if (call.direction === CallDirection.OUTBOUND) {
-                        await agentAssignmentCoordinator.releaseAgentOfflineIfIdle(call.user_id);
+                        await agentAssignmentCoordinator.releaseAgentOfflineIfIdle(call.agent_id);
                     } else {
-                        await agentAssignmentCoordinator.releaseAgentIfIdle(call.user_id);
-                        await agentAssignmentCoordinator.assignOldestUnassignedCall(call.business_id);
+                        await agentAssignmentCoordinator.releaseAgentIfIdle(call.agent_id);
+                        await agentAssignmentCoordinator.assignOldestUnassignedCall(call.tenant_id);
                     }
                 } catch (releaseErr) {
                     console.error(
-                        `[TerminationEventHandler] ⚠️ AGENT STUCK: Failed to release agent ${call.user_id} after call ${callId}:`,
+                        `[TerminationEventHandler] ⚠️ AGENT STUCK: Failed to release agent ${call.agent_id} after call ${callId}:`,
                         releaseErr.message
                     );
                 }
             }
 
+            // Tell the provider (normal path: triggers the authoritative webhook
+            // that patches durations; failures: stops media billing), then close media.
+            try { await terminateWhatsAppCall(callId); } catch (err) {
+                console.warn(`[TerminationEventHandler] terminateCall API error for ${callId}: ${err.message}`);
+            }
+            await peerRegistry.closePeerConnection(callId);
+
+            await callLifecycleLogger.logTerminated(callId, call.tenant_id, call?.agent_id ?? null, {
+                reason: terminationReason,
+                terminated_by: terminatedBy,
+                direction: call?.direction,
+            });
+
             try {
-                await agentAssignmentCoordinator.emitQueueUpdate(call?.business_id);
+                await agentAssignmentCoordinator.emitQueueUpdate(call?.tenant_id, call?.queue_id ?? null);
             } catch (queueErr) {
                 console.error(`[TerminationEventHandler] Failed to emit queue update:`, queueErr.message);
             }

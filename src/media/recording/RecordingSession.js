@@ -20,9 +20,9 @@ import { encodingWorkerBridge } from './encoding/EncodingWorkerBridge.js';
  *   finalizing a corrupt/incomplete OGG file.
  */
 export class RecordingSession {
-    constructor(callId, businessId) {
+    constructor(callId, tenantId) {
         this.callId = callId;
-        this.businessId = businessId;
+        this.tenantId = tenantId;
         this.recordingId = null;
 
         // Single stereo S3 upload stream
@@ -64,10 +64,7 @@ export class RecordingSession {
         if (!encodingWorkerBridge.opusAvailable) {
             console.warn(`[RecordingSession] Opus unavailable — recording skipped for call ${this.callId}`);
             try {
-                const { id } = await RecordingRepository.create({
-                    call_id: this.callId,
-                    business_id: this.businessId,
-                });
+                const { id } = await RecordingRepository.create({ call_id: this.callId });
                 await RecordingRepository.markFailed(id, 'Recording skipped: Opus encoder not available');
             } catch (persistErr) {
                 console.error(`[RecordingSession] Failed to persist Opus-unavailable failure for call ${this.callId}:`, persistErr.message);
@@ -77,15 +74,12 @@ export class RecordingSession {
 
         try {
             // 1. Create database record
-            const { id } = await RecordingRepository.create({
-                call_id: this.callId,
-                business_id: this.businessId,
-            });
+            const { id } = await RecordingRepository.create({ call_id: this.callId });
             this.recordingId = id;
 
             // 2. Open S3 upload stream
             this.uploadStream = await streamUploader.createUploadStream(
-                this.recordingId, this.businessId, this.callId
+                this.recordingId, this.tenantId, this.callId
             );
 
             // 3. Start worker session.  The worker creates the encoder and muxer,

@@ -35,7 +35,7 @@ class WorkerStatsService {
         this._timer = null;
         this._lastCpuUsage = process.cpuUsage();
         this._lastCpuAt = Date.now();
-        this._workerId = config.runtime?.workerId ?? process.env.WORKER_ID ?? 'unknown';
+        this._workerId = config.runtime?.workerId ?? 'unknown';
 
         // Event loop delay monitor — 10 ms resolution histogram.
         // Measures how long the event loop is blocked between iterations.

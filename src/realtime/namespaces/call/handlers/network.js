@@ -19,13 +19,13 @@ export function registerCallNetworkListeners(networkLossTimers) {
         // every frame), so each event here represents a real drop or recovery.
         try {
             const call = await CallRepository.findById(callId);
-            if (!call?.business_id) return; // call already cleaned up — skip silently
+            if (!call?.tenant_id) return; // call already cleaned up — skip silently
 
-            const businessId = call.business_id;
-            const agentId = call.user_id ?? null;
+            const tenantId = call.tenant_id;
+            const agentId = call.agent_id ?? null;
 
             if (state === 'drop') {
-                await callLifecycleLogger.logCustomerNetworkDrop(callId, businessId, agentId, {
+                await callLifecycleLogger.logCustomerNetworkDrop(callId, tenantId, agentId, {
                     detection_method: 'silence_watchdog',
                 });
 
@@ -69,7 +69,7 @@ export function registerCallNetworkListeners(networkLossTimers) {
                     networkLossTimers.delete(key);
                 }
 
-                await callLifecycleLogger.logCustomerNetworkReconnected(callId, businessId, agentId, {
+                await callLifecycleLogger.logCustomerNetworkReconnected(callId, tenantId, agentId, {
                     detection_method: 'silence_watchdog',
                 });
             }

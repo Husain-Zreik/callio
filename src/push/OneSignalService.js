@@ -1,5 +1,5 @@
 import axios from 'axios';
-import NotificationRepository from '../persistence/NotificationRepository.js';
+import pushTokenRepository from '../persistence/PushTokenRepository.js';
 import { config } from '../../config/envConfig.js';
 
 class OneSignalService {
@@ -145,7 +145,7 @@ class OneSignalService {
 
             const userIdsArray = Array.isArray(userIds) ? userIds : [userIds];
 
-            const subscriptionIds = await NotificationRepository.getLoggedInSubscriptionIds(userIdsArray);
+            const subscriptionIds = (await pushTokenRepository.getTokens(userIdsArray, 'ONESIGNAL')).map((t) => t.token);
 
             if (subscriptionIds.length === 0) {
                 return {
@@ -169,97 +169,6 @@ class OneSignalService {
         }
     }
 
-    /**
-     * Send notification to inactive users only
-     * Targets users who are logged in but tabs are in background
-     * @param {number|number[]} userIds - Single user ID or array of user IDs
-     * @param {string} title - Notification title
-     * @param {string} message - Notification message
-     * @param {object} data - Additional data payload
-     * @param {object} options - Additional notification options
-     */
-    async sendToInactiveUsers(userIds, title, message, data = {}, options = {}) {
-        try {
-            if (!this.isConfigured) {
-                return {
-                    success: false,
-                    message: 'OneSignal not configured',
-                    recipients: 0
-                };
-            }
-
-            const userIdsArray = Array.isArray(userIds) ? userIds : [userIds];
-
-            const subscriptionIds = await NotificationRepository.getInactiveSubscriptionIds(userIdsArray);
-
-            if (subscriptionIds.length === 0) {
-                return {
-                    success: false,
-                    message: 'No inactive subscriptions found',
-                    userIds: userIdsArray,
-                    recipients: 0
-                };
-            }
-
-            return await this.sendToSubscriptions(subscriptionIds, title, message, data, options);
-
-        } catch (error) {
-            console.error(`❌ Error sending to inactive users:`, error.message);
-            return {
-                success: false,
-                userIds: Array.isArray(userIds) ? userIds : [userIds],
-                recipients: 0,
-                error: error.message
-            };
-        }
-    }
-
-    /**
-     * Send notification to all logged-in users in a business
-     * @param {number} businessId - Business ID
-     * @param {string} title - Notification title
-     * @param {string} message - Notification message
-     * @param {object} data - Additional data payload
-     * @param {object} options - Additional notification options
-     */
-    async sendToBusiness(businessId, title, message, data = {}, options = {}) {
-        try {
-            if (!this.isConfigured) {
-                return {
-                    success: false,
-                    message: 'OneSignal not configured',
-                    recipients: 0
-                };
-            }
-
-            const subscriptionIds = await NotificationRepository.getBusinessSubscriptionIds(businessId);
-
-            if (subscriptionIds.length === 0) {
-                return {
-                    success: false,
-                    message: 'No logged-in users found for this business',
-                    businessId: businessId,
-                    recipients: 0
-                };
-            }
-
-            const result = await this.sendToSubscriptions(subscriptionIds, title, message, data, options);
-
-            return {
-                ...result,
-                businessId: businessId
-            };
-
-        } catch (error) {
-            console.error(`❌ Error sending to business ${businessId}:`, error.message);
-            return {
-                success: false,
-                businessId: businessId,
-                recipients: 0,
-                error: error.message
-            };
-        }
-    }
     async _postWithRetry(payload, maxRetries = 2) {
         let lastError;
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -333,8 +242,9 @@ class OneSignalService {
      * @private
      */
     _pruneInvalidSubscriptions(invalidIds) {
-        NotificationRepository.deleteBySubscriptionIds(invalidIds)
-            .then((deleted) => {
+        Promise.all(invalidIds.map((id) => pushTokenRepository.removeToken('ONESIGNAL', id)))
+            .then((counts) => {
+                const deleted = counts.reduce((sum, n) => sum + n, 0);
                 if (deleted > 0) {
                     console.log(`[OneSignal] 🧹 Pruned ${deleted} stale subscription(s)`);
                 }

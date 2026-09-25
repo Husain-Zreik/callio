@@ -1,7 +1,7 @@
 import admin from "firebase-admin";
 import { config } from "../../config/envConfig.js";
 import { notifyLog } from "./notificationLogger.js";
-import notificationRepository from "../persistence/NotificationRepository.js";
+import pushTokenRepository from "../persistence/PushTokenRepository.js";
 
 class FcmService {
     constructor() {
@@ -139,7 +139,7 @@ class FcmService {
 
                         if (isInvalidToken) {
                             invalidTokenCount++;
-                            await notificationRepository.removeFcmToken(token).catch(err => {
+                            await pushTokenRepository.removeToken("FCM", token).catch(err => {
                                 console.error(`[FCM] Failed to remove stale token from DB:`, err);
                             });
                         }

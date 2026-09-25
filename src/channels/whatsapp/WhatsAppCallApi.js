@@ -1,9 +1,11 @@
 // src/channels/whatsapp/WhatsAppCallApi.js
 // Pure WhatsApp Graph API adapter — no DB state updates.
-// Fetches credentials internally; all business-logic DB writes belong in callers.
+// Credentials come from the call's channel (channels.provider_account_id is
+// Meta's phone_number_id, channels.credentials holds the access token); all
+// call-state DB writes belong in callers.
 import https from 'https';
 import CallRepository from '../../persistence/CallRepository.js';
-import BusinessRepository from '../../persistence/BusinessRepository.js';
+import ChannelRepository from '../../persistence/ChannelRepository.js';
 import { config } from '../../../config/envConfig.js';
 import axios from 'axios';
 
@@ -54,27 +56,40 @@ async function _metaPost(url, payload, axiosConfig, label) {
     throw formatApiError(lastErr, label);
 }
 
+// Meta's phone_number_id and access token for a channel.
+async function channelAuth(channelId) {
+    const channel = await ChannelRepository.findById(channelId);
+    if (!channel || channel.type !== 'WHATSAPP') throw new Error(`Channel ${channelId} is not a WhatsApp channel`);
+    if (!channel.provider_account_id) throw new Error(`Channel ${channelId} has no phone_number_id`);
+    const credentials = await ChannelRepository.getCredentials(channelId);
+    if (!credentials?.access_token) throw new Error(`Channel ${channelId} has no access token`);
+    return { phoneNumberId: channel.provider_account_id, token: credentials.access_token };
+}
+
+async function callAuth(callId) {
+    const call = await CallRepository.findById(callId);
+    if (!call) throw new Error('Call not found');
+    return { call, ...(await channelAuth(call.channel_id)) };
+}
+
 // ── Outbound call ─────────────────────────────────────────────────────────────
 
+// callData: { channelId, customer: { address, addressType } }
 export const initiateWhatsAppCall = async (callData, sdpOffer) => {
     try {
-        const phoneNumberId = await BusinessRepository.getPhoneNumberId(callData.caller.id);
-        if (!phoneNumberId) throw new Error('Invalid business number');
+        const { phoneNumberId, token: businessToken } = await channelAuth(callData.channelId);
 
-        const businessToken = await BusinessRepository.getBusinessToken(callData.businessId);
-        if (!businessToken) throw new Error('Missing business token');
-
-        const callee = callData.callee;
-        if (!callee.number && !callee.bsuid) {
-            throw new Error('Callee has neither phone number nor bsuid');
-        }
+        const { address, addressType } = callData.customer ?? {};
+        if (!address) throw new Error('Customer has no address');
         const payload = {
             messaging_product: 'whatsapp',
             action: 'connect',
             session: { sdp_type: 'offer', sdp: sdpOffer },
         };
-        if (callee.number) payload.to = callee.number;
-        if (callee.bsuid) payload.recipient = callee.bsuid;
+        // Phone numbers go as digits; customers without one are addressed by
+        // their business-scoped user id.
+        if (addressType === 'WHATSAPP_USER') payload.recipient = address;
+        else payload.to = String(address).replace(/[^d]/g, '');
 
         console.log(`[WhatsApp] Initiating call to=${payload.to ?? 'none'} recipient=${payload.recipient ?? 'none'}`);
 
@@ -86,10 +101,10 @@ export const initiateWhatsAppCall = async (callData, sdpOffer) => {
 
         console.log('[WhatsApp] ✅ API Response:', JSON.stringify(response.data, null, 2));
 
-        const wacid = response.data.calls?.[0]?.id;
-        if (!wacid) throw new Error('Missing wacid in WhatsApp response');
+        const providerCallId = response.data.calls?.[0]?.id;
+        if (!providerCallId) throw new Error('Missing providerCallId in WhatsApp response');
 
-        return wacid;
+        return providerCallId;
     } catch (error) {
         throw formatApiError(error, 'Initiate call');
     }
@@ -98,17 +113,13 @@ export const initiateWhatsAppCall = async (callData, sdpOffer) => {
 // ── Accept inbound call ───────────────────────────────────────────────────────
 
 export const acceptWhatsAppCall = async (callId, sdpAnswer) => {
-    const call = await CallRepository.findById(callId);
-    if (!call) throw new Error('Call not found');
-
-    const phoneNumberId = await BusinessRepository.getPhoneNumberId(call.business_number_id);
-    const businessToken = await BusinessRepository.getBusinessToken(call.business_id);
+    const { call, phoneNumberId, token: businessToken } = await callAuth(callId);
 
     const response = await _metaPost(
         `${graphUrl()}/${phoneNumberId}/calls`,
         {
             messaging_product: 'whatsapp',
-            call_id: call.wacid,
+            call_id: call.provider_call_id,
             action: 'accept',
             session: { sdp_type: 'answer', sdp: sdpAnswer },
         },
@@ -122,15 +133,12 @@ export const acceptWhatsAppCall = async (callId, sdpAnswer) => {
 
 export const rejectWhatsAppCall = async (callId) => {
     try {
-        const call = await CallRepository.findById(callId);
-        if (!call || !call.wacid) throw new Error('Call not found or missing wacid');
-
-        const phoneNumberId = await BusinessRepository.getPhoneNumberId(call.business_number_id);
-        const businessToken = await BusinessRepository.getBusinessToken(call.business_id);
+        const { call, phoneNumberId, token: businessToken } = await callAuth(callId);
+        if (!call.provider_call_id) throw new Error('Call has no provider call id');
 
         await metaAxios.post(
             `${graphUrl()}/${phoneNumberId}/calls`,
-            { messaging_product: 'whatsapp', call_id: call.wacid, action: 'terminate' },
+            { messaging_product: 'whatsapp', call_id: call.provider_call_id, action: 'terminate' },
             { headers: { Authorization: `Bearer ${businessToken}`, 'Content-Type': 'application/json' } }
         );
     } catch (error) {
@@ -142,17 +150,14 @@ export const rejectWhatsAppCall = async (callId) => {
 
 export const terminateWhatsAppCall = async (callId) => {
     console.log('[WhatsApp] Terminating call:', callId);
-    const call = await CallRepository.findById(callId);
-    if (!call || !call.wacid) throw new Error('Call not found or missing wacid');
-
-    const phoneNumberId = await BusinessRepository.getPhoneNumberId(call.business_number_id);
-    const businessToken = await BusinessRepository.getBusinessToken(call.business_id);
+    const { call, phoneNumberId, token: businessToken } = await callAuth(callId);
+    if (!call.provider_call_id) throw new Error('Call has no provider call id');
 
     await _metaPost(
         `${graphUrl()}/${phoneNumberId}/calls`,
         {
             messaging_product: 'whatsapp',
-            call_id: call.wacid,
+            call_id: call.provider_call_id,
             action: 'terminate',
         },
         { headers: { Authorization: `Bearer ${businessToken}`, 'Content-Type': 'application/json' }, timeout: 12000 },

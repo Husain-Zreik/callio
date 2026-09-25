@@ -7,9 +7,9 @@ export class CallContext {
     constructor(callId) {
         if (!callId) throw new Error('CallContext requires callId');
         this.callId     = callId;
-        this.wacid      = null;
+        this.providerCallId      = null;
         this.userId     = null;
-        this.businessId = null;
+        this.tenantId = null;
         this.direction  = null;
         this.caller     = { id: null, name: null, number: null };
         this.callee     = { id: null, name: null, number: null, bsuid: null, username: null };
@@ -17,12 +17,12 @@ export class CallContext {
         // undefined = not yet fetched; null = fetched, no IVR menu.
         // PeerRegistry.checkAndStartBridging caches the first DB result here
         // so subsequent connection-ready events skip the round-trip on non-IVR calls.
-        this.ivrMenuId  = undefined;
+        this.ivrFlowId  = undefined;
     }
 
     /** In-memory only — the DB write happens explicitly in the call site. */
-    setWacid(wacid) {
-        this.wacid = wacid ?? null;
+    setProviderCallId(providerCallId) {
+        this.providerCallId = providerCallId ?? null;
     }
 
     update(data = {}) {

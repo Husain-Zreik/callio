@@ -5,7 +5,6 @@ class RecordingRepository {
     async create(data) {
         const {
             call_id,
-            business_id,
             storage_provider = 's3',
             storage_region = 'eu-central-1',
             format = 'ogg',
@@ -14,7 +13,6 @@ class RecordingRepository {
         const [result] = await connection.execute(`
         INSERT INTO call_recordings (
             call_id,
-            business_id,
             storage_provider,
             storage_region,
             format,
@@ -22,8 +20,8 @@ class RecordingRepository {
             started_at,
             created_at,
             updated_at
-        ) VALUES (?, ?, ?, ?, ?, 'recording', NOW(), NOW(), NOW())
-    `, [call_id, business_id, storage_provider, storage_region, format]);
+        ) VALUES (?, ?, ?, ?, 'recording', NOW(), NOW(), NOW())
+    `, [call_id, storage_provider, storage_region, format]);
 
         return { id: result.insertId };
     }
@@ -36,14 +34,14 @@ class RecordingRepository {
         return rows[0] || null;
     }
 
-    async updateRecordingUrl(recordingId, url, fileSize) {
+    async updateStorageKey(recordingId, storageKey, fileSize) {
         await connection.execute(`
             UPDATE call_recordings
-            SET recording_url    = ?,
+            SET storage_key      = ?,
                 file_size_bytes  = ?,
                 updated_at       = NOW()
             WHERE id = ?
-        `, [url, fileSize, recordingId]);
+        `, [storageKey, fileSize, recordingId]);
     }
 
     async updateStatus(recordingId, status, errorMessage = null) {
@@ -71,6 +69,17 @@ class RecordingRepository {
                 updated_at = NOW()
             WHERE id = ?
         `, [durationSeconds, recordingId]);
+    }
+
+    // Bytes of completed recordings for a tenant — the storage quota check.
+    async getTenantStorageUsageBytes(tenantId) {
+        const [rows] = await connection.execute(`
+            SELECT COALESCE(SUM(r.file_size_bytes), 0) AS used
+            FROM call_recordings r
+            JOIN calls c ON c.id = r.call_id
+            WHERE c.tenant_id = ? AND r.status = 'completed'
+        `, [tenantId]);
+        return Number(rows[0]?.used ?? 0);
     }
 
     async markFailed(recordingId, errorMessage) {

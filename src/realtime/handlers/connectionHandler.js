@@ -1,7 +1,6 @@
 // src/realtime/handlers/connectionHandler.js
 import { presenceService } from "../../core/agents/PresenceService.js";
 import { redisPubSubService } from "../../infra/redis/RedisPubSubService.js";
-import { redisBaseService } from "../../infra/redis/RedisBaseService.js";
 import CallRepository from "../../persistence/CallRepository.js";
 import { callLifecycleLogger } from "../../core/calls/CallLifecycleLogger.js";
 import { EventTypes } from "../../core/events/EventTypes.js";
@@ -11,23 +10,17 @@ import { agentAssignmentCoordinator } from "../../core/routing/AgentAssignmentCo
 export async function handleConnection(socket) {
     const userName = socket.user?.name || "Unknown";
     const userId = socket.user?.id || "Unknown";
-    const businessId = socket.business?.id || "Unknown";
-    // See authMiddleware.js's own doc comment on `connectionPurpose` — a
-    // 'session' connection is the main app; anything else (CallkitWatch's
-    // watcher, the decline-reject socket) is a short-lived auxiliary
-    // connection that authenticates as this same user/device but must not
-    // participate in presence tracking, online/offline broadcasts, or
-    // reconnect-redelivery — all of that logic below assumes exactly one
-    // connection per gate, which an auxiliary connection sharing this
-    // device's identity would otherwise silently violate.
+    const tenantId = socket.tenant?.id || "Unknown";
+    // Only the agent's main 'session' connection takes part in presence,
+    // online/offline broadcasts and reconnect redelivery — see authMiddleware's
+    // note on connectionPurpose.
     const isSessionConnection = (socket.connectionPurpose || 'session') === 'session';
 
     console.log(
-        `[WS] User connected - Name: ${userName}, UserID: ${userId}, BusinessID: ${businessId}, SocketID: ${socket.id}, Purpose: ${socket.connectionPurpose || 'session'}, Worker: ${redisPubSubService.workerId}`,
+        `[WS] Agent connected - Name: ${userName}, AgentID: ${userId}, TenantID: ${tenantId}, SocketID: ${socket.id}, Purpose: ${socket.connectionPurpose || 'session'}, Worker: ${redisPubSubService.workerId}`,
     );
 
-    const tracksPresence = userId !== "Unknown" && businessId !== "Unknown"
-        && businessId !== "SUPER_ADMIN" && isSessionConnection;
+    const tracksPresence = userId !== "Unknown" && tenantId !== "Unknown" && isSessionConnection;
 
     if (tracksPresence) {
         let isFirstSocket = false;
@@ -39,15 +32,15 @@ export async function handleConnection(socket) {
             console.error(`[WS] Failed to handle presence for user ${userId}:`, error.message);
         }
 
-        await _handlePendingCallRedelivery(socket, userId, businessId);
-        agentAssignmentCoordinator.assignOldestUnassignedCall(businessId).catch((err) =>
+        await _handlePendingCallRedelivery(socket, userId, tenantId);
+        agentAssignmentCoordinator.assignOldestUnassignedCall(tenantId).catch((err) =>
             console.error(`[WS] Queue assignment trigger failed on connect for user ${userId}:`, err.message)
         );
 
         // Notify managers that this agent just came online (first socket only —
         // opening a second tab should not re-broadcast).
         if (isFirstSocket) {
-            agentAssignmentCoordinator.emitQueueUpdate(businessId).catch((err) =>
+            agentAssignmentCoordinator.emitQueueUpdate(tenantId).catch((err) =>
                 console.error(`[WS] Queue update failed on agent connect for user ${userId}:`, err.message)
             );
         }
@@ -62,18 +55,11 @@ export async function handleConnection(socket) {
         if (tracksPresence) {
             await presenceService.trackDisconnection(userId, socket.id);
 
-            // Intentional logout — clear the role cache so the next login always
-            // fetches a fresh role from the DB. Transport drops ('transport close',
-            // 'transport error') keep the cache alive to absorb reconnect storms.
-            if (reason === 'client namespace disconnect') {
-                await redisBaseService.del(`auth:role:${businessId}:${userId}`);
-            }
-
             // Notify managers that this agent just went offline (last socket only —
             // closing one tab when another is still open should not flip the indicator).
             const remainingSockets = await presenceService.getUserSocketCount(userId).catch(() => -1);
             if (remainingSockets === 0) {
-                agentAssignmentCoordinator.emitQueueUpdate(businessId).catch((err) =>
+                agentAssignmentCoordinator.emitQueueUpdate(tenantId).catch((err) =>
                     console.error(`[WS] Queue update failed on agent disconnect for user ${userId}:`, err.message)
                 );
             }
@@ -91,9 +77,9 @@ export async function handleConnection(socket) {
 // Uses findPendingInboundCallForUser (not a RINGING-only query) to catch the push-notification
 // race: a mobile agent can accept natively before this connect handler runs, leaving the call
 // already IN_PROGRESS by the time we query — a RINGING-only query would silently miss it.
-async function _handlePendingCallRedelivery(socket, userId, businessId) {
+async function _handlePendingCallRedelivery(socket, userId, tenantId) {
     try {
-        const pendingCall = await CallRepository.findPendingInboundCallForUser(businessId, userId);
+        const pendingCall = await CallRepository.findPendingInboundCallForUser(tenantId, userId);
         if (!pendingCall) return;
 
         const previousSockets = await presenceService.getUserSocketCount(userId);
@@ -106,7 +92,7 @@ async function _handlePendingCallRedelivery(socket, userId, businessId) {
         const shouldLog = !alreadyAccepted || isFirstSocket;
 
         if (shouldLog) {
-            await callLifecycleLogger.logAgentConnected(pendingCall.id, businessId, userId, {
+            await callLifecycleLogger.logAgentConnected(pendingCall.id, tenantId, userId, {
                 socket_id: socket.id,
                 device_id: socket.user?.deviceId || null,
                 user_agent: socket.handshake?.headers?.['user-agent'] || null,
@@ -140,7 +126,7 @@ async function _handlePendingCallRedelivery(socket, userId, businessId) {
             await redisPubSubService.publishCallEvent(
                 pendingCall.id,
                 EventTypes.RINGING_AGENT_RECONNECT,
-                { callId: pendingCall.id, socketId: socket.id, userId, businessId },
+                { callId: pendingCall.id, socketId: socket.id, userId, tenantId },
             );
 
             console.log(

@@ -31,15 +31,21 @@ export const config = {
     },
     whatsapp: {
         apiUrl: process.env.WHATSAPP_API_URL,
+        // Meta app secret used to verify X-Hub-Signature-256 on webhooks Meta
+        // posts to Callio directly. Unset = direct Meta ingress disabled (the
+        // API-key-authenticated forward endpoint still works).
+        appSecret: process.env.WHATSAPP_APP_SECRET || null,
+        // Token Meta echoes during webhook subscription verification (GET).
+        verifyToken: process.env.WHATSAPP_VERIFY_TOKEN || null,
     },
-    jwt: {
-        secret: process.env.JWT_SECRET,
+    security: {
+        // 32-byte key (base64) that encrypts secrets at rest: channel
+        // credentials, consumer signing keys, webhook secrets, push credentials.
+        // Rotating it requires re-encrypting those columns.
+        masterKey: process.env.CALLIO_MASTER_KEY || null,
     },
-    auth: {
-        // Shared secret for server-to-server calls INTO this app (Laravel → node).
-        // Deliberately separate from jwt.secret: different threat model/rotation
-        // cadence, and the JWT is transitively held by client devices.
-        internalApiKey: process.env.INTERNAL_API_KEY || null,
+    paths: {
+        root: resolve(__dirname, ".."),
     },
     redis: {
         host: process.env.REDIS_HOST || "127.0.0.1",
@@ -50,7 +56,7 @@ export const config = {
     },
     runtime: {
         workerId: process.env.WORKER_ID || process.env.pm_id || process.pid,
-        isPM2: !!process.env.pm_id,
+        pmId: process.env.pm_id ?? null,
     },
     firebase: {
         // Own local copy, not shared with Laravel — see storage/firebase/.
@@ -62,25 +68,22 @@ export const config = {
         // APNs Auth Key (token-based auth, .p8) — covers both regular push
         // and VoIP push with one key (unlike the legacy per-type
         // certificate approach, no yearly renewal). Used by ApnsVoipService
-        // for MIDLR_APP's incoming-call VoIP pushes (PushKit/CallKit).
+        // for incoming-call VoIP pushes (PushKit/CallKit).
         apnsKeyPath:
             process.env.APNS_AUTH_KEY_PATH ||
             resolve(__dirname, "../storage/apple/AuthKey.p8"),
         apnsKeyId: process.env.APNS_KEY_ID || null,
         apnsTeamId: process.env.APNS_TEAM_ID || null,
-        // Confirmed via ios/Runner.xcodeproj/project.pbxproj — MIDLR_APP's bundle id.
-        bundleId: process.env.APNS_BUNDLE_ID || "com.pcglobalco.midlr",
+        // The iOS app's bundle id; VoIP pushes go to "<bundleId>.voip".
+        bundleId: process.env.APNS_BUNDLE_ID || null,
         production: process.env.APNS_PRODUCTION === "true",
     },
     storage: {
         local: {
-            // Root for Laravel's 'local'/'public' storage disks. Only needed when
-            // node/ and backend/ are NOT co-located as monorepo siblings on the
-            // same disk — defaults to today's sibling-folder layout for backward
-            // compatibility. See StorageResolver.js.
-            root: process.env.LARAVEL_STORAGE_ROOT
-                ? resolve(process.env.LARAVEL_STORAGE_ROOT)
-                : resolve(__dirname, "../../backend/storage/app"),
+            // Root for audio assets stored on local disk (storage_provider 'local').
+            root: process.env.STORAGE_LOCAL_ROOT
+                ? resolve(process.env.STORAGE_LOCAL_ROOT)
+                : resolve(__dirname, "../storage/app"),
         },
         s3: {
             region: process.env.AWS_DEFAULT_REGION || "eu-central-1",
@@ -88,13 +91,15 @@ export const config = {
             secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
             bucket: process.env.AWS_BUCKET,
             prefix: process.env.S3_RECORDINGS_PREFIX || "recordings/",
-            // Laravel stores media-library files under this prefix (AWS_BUCKET_PREFIX).
-            // Must match the Laravel .env AWS_BUCKET_PREFIX value.
+            // Optional key prefix applied when reading objects (e.g. a shared
+            // bucket partitioned per environment).
             bucketPrefix: process.env.AWS_BUCKET_PREFIX
                 ? process.env.AWS_BUCKET_PREFIX.replace(/\/+$/, '') + '/'
                 : '',
         },
         signedUrlExpiry: parseInt(process.env.S3_SIGNED_URL_EXPIRY) || 3600, // 1 hour default
+        // Public base URL for objects, used when a signed URL can't be generated.
+        publicUrl: process.env.AWS_URL || null,
     },
     logging: {
         enableNotificationLogs: process.env.ENABLE_NOTIFICATION_LOGS === "true",

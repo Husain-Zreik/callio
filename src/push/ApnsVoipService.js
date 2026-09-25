@@ -1,17 +1,12 @@
 import apn from "@parse/node-apn";
 import { config } from "../../config/envConfig.js";
-import notificationRepository from "../persistence/NotificationRepository.js";
+import pushTokenRepository from "../persistence/PushTokenRepository.js";
 
-// flutter_callkit_incoming's native side requires the call `id` to be a
-// real UUID(8-4-4-4-12)-shaped string (see CallManager.swift:
-// `guard let uuid = UUID(uuidString: data.uuid)` — a non-UUID string is
-// silently ignored, no crash, no CallKit call registered). Our callId is a
-// plain auto-increment integer. Deterministic (not random) so the native
-// iOS side (reading this "id" straight off the push payload) and MIDLR_APP's
-// Dart side (CallModel.endCall/setCallConnected, computed independently
-// from the same callId — see lib/utils/callkit_uuid.dart) always agree on
-// the same uuid for the same call, without needing to pass one back and
-// forth. Keep this in sync with that Dart helper if the algorithm ever changes.
+// CallKit needs the call `id` as a UUID-shaped string; Callio's callId is an
+// integer. Deterministic, so the agent app can derive the same UUID from the
+// callId on its own side without it being passed back and forth. Documented
+// in the push payload contract (PLATFORM_ARCHITECTURE.md §3E) — client SDKs
+// must use the same mapping.
 function callKitUuidFor(callId) {
     const digits = String(callId).padStart(12, "0");
     return `00000000-0000-0000-0000-${digits}`;
@@ -52,7 +47,7 @@ class ApnsVoipService {
 
     /**
      * @param {string[]} tokens
-     * @param {object} callData - {callId, businessId, callerId, callerName, callerNumber}
+     * @param {object} callData - { type, callId, tenantId, channel, customerName, customerAddress }
      */
     async sendVoipPush(tokens, callData) {
         if (!tokens || tokens.length === 0) return;
@@ -83,28 +78,22 @@ class ApnsVoipService {
         // loop below, which re-sends a fresh push from our side entirely and
         // isn't affected by this header either way.
         note.expiry = 0;
-        // Field names match exactly what the native AppDelegate.swift reads
-        // straight off payload.dictionaryPayload (id/nameCaller/handle/type) —
-        // see ios/Runner/AppDelegate.swift's didReceiveIncomingPushWith, which
-        // branches on `type` to either report a new call or end an existing
-        // one. nameCaller/handle are irrelevant for the latter but harmless.
-        // callId/businessId/callerId are also included for our own app-side
-        // lookups once Dart picks this up via CallKitParams.extra.
+        // id/type/nameCaller/handle/isVideo are what a CallKit integration
+        // reads to report (type=call.incoming) or end (type=call.cancelled) a
+        // call; the rest is the generic push contract. handle stays a
+        // phone-number-shaped value (or empty) — CallKit treats it as one.
+        const isPhone = /^\+?\d+$/.test(String(callData.customerAddress ?? ""));
         note.payload = {
             id: callKitUuidFor(callData.callId),
-            type: callData.type || "call",
-            // handle is intentionally left as phone-or-empty (not username) —
-            // CallKit's native UI treats it as a phone-number-shaped field;
-            // nameCaller is the safe place for a "@username" fallback.
-            nameCaller: callData.callerName || callData.callerNumber || (callData.callerUsername ? `@${callData.callerUsername}` : "Incoming call"),
-            handle: callData.callerNumber || "",
+            type: callData.type || "call.incoming",
+            nameCaller: callData.customerName || callData.customerAddress || "Incoming call",
+            handle: isPhone ? callData.customerAddress : "",
             isVideo: false,
-            callId: callData.callId,
-            businessId: callData.businessId,
-            callerId: callData.callerId ?? "",
-            callerName: callData.callerName ?? "",
-            callerUsername: callData.callerUsername ?? "",
-            callerNumber: callData.callerNumber ?? "",
+            call_id: callData.callId,
+            tenant_id: callData.tenantId ?? null,
+            channel: callData.channel ?? null,
+            customer_name: callData.customerName ?? null,
+            customer_address: callData.customerAddress ?? null,
         };
 
         // Transport-level failures (e.g. "apn write timeout" — node-apn's
@@ -172,12 +161,8 @@ class ApnsVoipService {
                 if (reason === "Unregistered" || reason === "BadDeviceToken") {
                     invalidTokens.push(failure.device);
                     console.warn(`${logTag} Invalid VoIP token ${tokenPreview}... (${reason}) — removing from DB`);
-                    notificationRepository.removeVoipToken(failure.device).then((owner) => {
-                        if (owner) {
-                            console.warn(`${logTag} Removed VoIP token owned by user=${owner.user_id} device=${owner.device_id} business=${owner.business_id} (reason: ${reason})`);
-                        } else {
-                            console.warn(`${logTag} Removed VoIP token — no matching user_devices row found (already cleared?)`);
-                        }
+                    pushTokenRepository.removeToken("APNS_VOIP", failure.device).then((removed) => {
+                        console.warn(`${logTag} Removed ${removed} VoIP token row(s) (reason: ${reason})`);
                     }).catch((err) =>
                         console.error(`${logTag} Failed to remove stale VoIP token from DB: ${err.message}`)
                     );

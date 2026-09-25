@@ -18,13 +18,11 @@ export function createWebSocketServer(httpServer) {
         path: "/socket.io",
         pingInterval: 15000,
         pingTimeout: 30000,
-        // Allow both WebSocket and HTTP long-polling so clients behind corporate
-        // proxies or restrictive firewalls that block WebSocket upgrades can still
-        // receive real-time events via polling fallback.  The client already has
-        // transports: ['websocket', 'polling'] and will always prefer WebSocket;
-        // polling is only used when the WebSocket handshake is blocked.
-        transports: ["websocket", "polling"],
-        allowEIO3: true,
+        // WebSocket only. Polling needs every request of a session to reach the
+        // same worker, which the load balancer's per-connection routing doesn't
+        // guarantee across PM2 workers — a polling session would break its own
+        // handshake. Media (WebRTC) needs a direct path anyway.
+        transports: ["websocket"],
     });
 
     // ── Redis adapter ──────────────────────────────────────────────────────────

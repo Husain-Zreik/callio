@@ -10,19 +10,15 @@ appLogService.install();
 
 import { config } from "./config/envConfig.js";
 import { createWebSocketServer } from "./src/realtime/server.js";
-import { presenceService } from "./src/core/agents/PresenceService.js";
-import { redisCleanupService } from "./src/infra/cluster/RedisCleanupService.js";
-import { callCleanupService } from "./src/core/calls/CallCleanupService.js";
 import { peerRegistry } from "./src/media/webrtc/PeerRegistry.js";
 import { workerStatsService } from "./src/infra/monitoring/WorkerStatsService.js";
-import { initRedis, initOptionalServices } from "./src/server/bootstrap.js";
+import { initRedis, initOptionalServices, startCoreServices } from "./src/server/bootstrap.js";
 import { shutdown } from "./src/server/shutdown.js";
-import { handleWorkerHealth } from "./src/http/controllers/healthController.js";
-import apiRoutes from "./src/http/routes/apiRoutes.js";
+import registerRoutes from "./src/http/routes/index.js";
 import Fastify from "fastify";
 import fastifyCors from "@fastify/cors";
 
-const fastify = Fastify({ bodyLimit: 10 * 1024 * 1024 }); // 10mb, matches the old express.json({ limit: "10mb" })
+const fastify = Fastify({ bodyLimit: 10 * 1024 * 1024 });
 let server = null;
 let io = null;
 
@@ -35,8 +31,7 @@ async function startServer() {
         await initRedis();
         await initOptionalServices();
 
-        await fastify.register(apiRoutes, { prefix: "/api" });
-        fastify.get("/health", handleWorkerHealth);
+        await fastify.register(registerRoutes);
 
         await fastify.ready();
         server = fastify.server;
@@ -44,9 +39,8 @@ async function startServer() {
         io = createWebSocketServer(server);
 
         // Reject new Socket.IO connections when this worker is at capacity.
-        // The client's built-in reconnect + Nginx least_conn routes the retry to
-        // a less-loaded worker. Error 400 (Socket.IO default) — not 503 because
-        // Nginx cannot intercept Socket.IO upgrade errors.
+        // The client's built-in reconnect + the load balancer route the retry to
+        // a less-loaded worker.
         const MAX_CALLS_PER_WORKER = config.call.workers.maxCallsPerWorker;
         io.use((socket, next) => {
             if (peerRegistry.peerConnections.size >= MAX_CALLS_PER_WORKER) {
@@ -56,9 +50,7 @@ async function startServer() {
             next();
         });
 
-        await presenceService.clearOwnStalePresence();
-        redisCleanupService.start();
-        callCleanupService.start();
+        await startCoreServices();
 
         process.on("SIGINT",  () => shutdown(server, io));
         process.on("SIGTERM", () => shutdown(server, io));
@@ -66,10 +58,10 @@ async function startServer() {
 
         await fastify.listen({ port: config.node.port, host: config.node.host });
         console.log(`🚀 Server running on ${config.node.host}:${config.node.port}`);
-        console.log(`📡 WebSocket: ws://${config.node.host}:${config.node.port}/socket.io`);
-        console.log(`🌐 API: http://${config.node.host}:${config.node.port}/api`);
+        console.log(`📡 Agent gateway: ws://${config.node.host}:${config.node.port}/socket.io`);
+        console.log(`🌐 Management API: http://${config.node.host}:${config.node.port}/v1`);
     } catch (error) {
-        console.error("❌ Server startup failed:", error.message);
+        console.error("❌ Server startup failed:", error);
         process.exit(1);
     }
 }

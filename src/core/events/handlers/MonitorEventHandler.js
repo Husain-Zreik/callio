@@ -14,18 +14,18 @@ import { ConnectionType } from '../../constants/CallConstants.js';
 export class MonitorEventHandler {
 
     async handleMonitorStarted(data) {
-        const { callId, userId, businessId, sdpOffer, socketId } = data;
+        const { callId, userId, tenantId, sdpOffer, socketId } = data;
 
         try {
-            const call = await CallRepository.getInProgressCall(businessId, callId);
+            const call = await CallRepository.getInProgressCall(tenantId, callId);
             if (!call) throw new Error('Call not found or already ended');
 
             if (peerRegistry.getConnectionData(callId, ConnectionType.MONITOR).valid) {
-                throw new Error('Another Manager is monitoring the call right now.');
+                throw new Error('Another supervisor is monitoring this call right now.');
             }
 
             const callConnection = await CallConnectionRepository.findByCallAndType(callId, ConnectionType.MONITOR);
-            if (callConnection) throw new Error('Another Manager is monitoring the call right now.');
+            if (callConnection) throw new Error('Another supervisor is monitoring this call right now.');
 
             iceCoordinator.setConnectionInfo(callId, ConnectionType.MONITOR, socketId);
             const sdpAnswer = await sdpCoordinator.createSDPAnswer(callId, sdpOffer, ConnectionType.MONITOR);
@@ -40,14 +40,13 @@ export class MonitorEventHandler {
 
             const isValidationError =
                 error.message === 'Call not found or already ended' ||
-                error.message === 'Another Manager is monitoring the call right now.';
+                error.message === 'Another supervisor is monitoring this call right now.';
 
             if (!isValidationError) {
                 await peerRegistry.closePeerConnection(callId, ConnectionType.MONITOR);
             }
 
-            const socket = roomManager.io.sockets.sockets.get(socketId);
-            if (socket) { roomManager.leaveCallRoom(socket, callId); socket.isMonitoring = false; }
+            await roomManager.detachSocketFromCall(socketId, callId).catch(() => { });
 
             emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: error.message, socketId });
         }
@@ -102,8 +101,7 @@ export class MonitorEventHandler {
 
             await peerRegistry.closePeerConnection(callId, ConnectionType.MONITOR);
 
-            const socket = roomManager.io.sockets.sockets.get(socketId);
-            if (socket) { roomManager.leaveCallRoom(socket, callId); socket.isMonitoring = false; }
+            await roomManager.detachSocketFromCall(socketId, callId).catch(() => { });
 
             EventBus.emit('call:monitor:ended', { callId, userId, socketId });
 

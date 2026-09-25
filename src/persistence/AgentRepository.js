@@ -1,291 +1,218 @@
 // src/persistence/AgentRepository.js
+// Agents and their live availability (AVAILABLE / ON_CALL / OFFLINE).
 import connection from '../../config/dbConnection.js';
 
+const AGENT_COLUMNS = 'id, tenant_id, external_ref, name, role, availability';
+
+// No other call the agent is on (any active status).
+const NO_ACTIVE_CALL = `NOT EXISTS (
+    SELECT 1 FROM calls c
+    WHERE c.agent_id = agents.id
+    AND c.status IN ('INITIATED', 'RINGING', 'IN_PROGRESS')
+)`;
+
+function emptyStats() {
+    return { total: 0, available: 0, on_call: 0, offline: 0 };
+}
+
+function tallyStats(rows) {
+    const stats = emptyStats();
+    for (const row of rows) {
+        const count = Number(row.cnt);
+        stats.total += count;
+        if (row.availability === 'AVAILABLE') stats.available += count;
+        else if (row.availability === 'ON_CALL') stats.on_call += count;
+        else stats.offline += count;
+    }
+    return stats;
+}
+
 class AgentRepository {
-    // ── Queries ─────────────────────────────────────────────────────────────────
+    // ── Lookups ─────────────────────────────────────────────────────────────────
 
-    async getCallCenterAgents(businessId) {
-        const [rows] = await connection.execute(`
-            SELECT DISTINCT u.id, u.name, u.email, u.call_availability
-            FROM users u
-            JOIN model_has_roles mhr ON mhr.model_id = u.id
-                AND mhr.model_type = 'App\\\\Models\\\\User'
-                AND mhr.business_id = ?
-             JOIN role_has_permissions rhp ON rhp.role_id = mhr.role_id
-             JOIN permissions p ON p.id = rhp.permission_id
-             WHERE u.business_id = ?
-            AND u.deleted_at IS NULL
-            AND p.name = 'call_center_agent_access'
-            ORDER BY u.id ASC
-        `, [businessId, businessId]);
+    async findById(agentId) {
+        const [rows] = await connection.execute(
+            `SELECT ${AGENT_COLUMNS} FROM agents WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+            [agentId]
+        );
+        return rows[0] ?? null;
+    }
+
+    async findByExternalRef(tenantId, externalRef) {
+        const [rows] = await connection.execute(
+            `SELECT ${AGENT_COLUMNS} FROM agents
+             WHERE tenant_id = ? AND external_ref = ? AND deleted_at IS NULL LIMIT 1`,
+            [tenantId, externalRef]
+        );
+        return rows[0] ?? null;
+    }
+
+    async findByIds(agentIds) {
+        if (!agentIds?.length) return [];
+        const placeholders = agentIds.map(() => '?').join(',');
+        const [rows] = await connection.execute(
+            `SELECT ${AGENT_COLUMNS} FROM agents WHERE id IN (${placeholders}) AND deleted_at IS NULL`,
+            agentIds
+        );
         return rows;
     }
 
-    async getCallCenterManagers(businessId) {
-        const [rows] = await connection.execute(`
-            SELECT DISTINCT u.id, u.name, u.email, u.call_availability
-            FROM users u
-            JOIN model_has_roles mhr ON mhr.model_id = u.id
-                AND mhr.model_type = 'App\\\\Models\\\\User'
-                AND mhr.business_id = ?
-             JOIN role_has_permissions rhp ON rhp.role_id = mhr.role_id
-             JOIN permissions p ON p.id = rhp.permission_id
-             WHERE u.business_id = ?
-            AND u.deleted_at IS NULL
-            AND p.name = 'call_center_manager_access'
-        `, [businessId, businessId]);
+    async getTenantAgents(tenantId) {
+        const [rows] = await connection.execute(
+            `SELECT ${AGENT_COLUMNS} FROM agents WHERE tenant_id = ? AND deleted_at IS NULL ORDER BY id ASC`,
+            [tenantId]
+        );
         return rows;
     }
 
-    async getUsersWithCallShowPermission(businessId) {
-        const [rows] = await connection.execute(`
-            SELECT DISTINCT u.id, u.name, u.email, u.call_availability
-            FROM users u
-            JOIN model_has_roles mhr ON mhr.model_id = u.id
-                AND mhr.model_type = 'App\\\\Models\\\\User'
-                AND mhr.business_id = ?
-             JOIN role_has_permissions rhp ON rhp.role_id = mhr.role_id
-             JOIN permissions p ON p.id = rhp.permission_id
-             WHERE u.business_id = ?
-            AND u.deleted_at IS NULL
-            AND p.name = 'call_show'
-        `, [businessId, businessId]);
+    async getSupervisors(tenantId) {
+        const [rows] = await connection.execute(
+            `SELECT ${AGENT_COLUMNS} FROM agents
+             WHERE tenant_id = ? AND role = 'SUPERVISOR' AND deleted_at IS NULL ORDER BY id ASC`,
+            [tenantId]
+        );
         return rows;
     }
 
-    async resolveTransferInitiatorType(businessId, userId) {
-        if (!businessId || !userId) {
-            return 'system';
-        }
-
-        const [rows] = await connection.execute(`
-            SELECT p.name
-            FROM model_has_roles mhr
-            JOIN role_has_permissions rhp ON rhp.role_id = mhr.role_id
-            JOIN permissions p ON p.id = rhp.permission_id
-            WHERE mhr.model_type = 'App\\\\Models\\\\User'
-              AND mhr.business_id = ?
-              AND mhr.model_id = ?
-              AND p.name IN ('call_center_manager_access', 'call_center_agent_access')
-        `, [businessId, userId]);
-
-        const permissionNames = new Set(rows.map((row) => row.name));
-        if (permissionNames.has('call_center_manager_access')) return 'manager';
-        if (permissionNames.has('call_center_agent_access')) return 'agent';
-
-        return 'system';
+    async getTenantId(agentId) {
+        const [rows] = await connection.execute('SELECT tenant_id FROM agents WHERE id = ?', [agentId]);
+        return rows[0]?.tenant_id ?? null;
     }
 
-    async findUserById(userId) {
+    async getNameById(agentId) {
+        const [rows] = await connection.execute('SELECT name FROM agents WHERE id = ?', [agentId]);
+        return rows[0]?.name ?? null;
+    }
+
+    async getNamesByIds(agentIds) {
+        if (!agentIds?.length) return new Map();
+        const placeholders = agentIds.map(() => '?').join(',');
         const [rows] = await connection.execute(
-            'SELECT id, name, email, call_availability FROM users WHERE id = ?',
-            [userId]
+            `SELECT id, name FROM agents WHERE id IN (${placeholders})`,
+            agentIds
         );
-        return rows[0] || null;
+        return new Map(rows.map((r) => [String(r.id), r.name ?? null]));
     }
 
-    async getUserBusinessId(userId) {
+    // ── Provisioning ────────────────────────────────────────────────────────────
+
+    // Create or update an agent by the consumer's reference. `role` is applied
+    // only when given; `restore` un-deletes a soft-deleted agent.
+    async upsert(tenantId, externalRef, { name, role = null }) {
+        await connection.execute(
+            `INSERT INTO agents (tenant_id, external_ref, name, role, availability, created_at, updated_at)
+             VALUES (?, ?, ?, COALESCE(?, 'AGENT'), 'OFFLINE', NOW(), NOW())
+             ON DUPLICATE KEY UPDATE
+                 name = VALUES(name),
+                 role = COALESCE(?, role),
+                 deleted_at = NULL,
+                 updated_at = NOW()`,
+            [tenantId, externalRef, name, role, role]
+        );
         const [rows] = await connection.execute(
-            'SELECT business_id FROM users WHERE id = ? LIMIT 1',
-            [userId]
+            `SELECT ${AGENT_COLUMNS} FROM agents WHERE tenant_id = ? AND external_ref = ? LIMIT 1`,
+            [tenantId, externalRef]
         );
-        return rows[0]?.business_id || null;
+        return rows[0] ?? null;
     }
 
-    async getUserNameById(userId, businessId) {
-        if (!userId) return null;
-        const [rows] = await connection.execute(
-            'SELECT name FROM users WHERE id = ? AND business_id = ? LIMIT 1',
-            [userId, businessId]
-        );
-        return rows[0]?.name || null;
-    }
-
-    async getUserNamesByIds(userIds, businessId) {
-        if (!userIds || userIds.length === 0) return new Map();
-        const placeholders = userIds.map(() => '?').join(',');
-        const [rows] = await connection.execute(
-            `SELECT id, name FROM users WHERE id IN (${placeholders}) AND business_id = ?`,
-            [...userIds, businessId]
-        );
-        return new Map(rows.map(r => [String(r.id), r.name ?? null]));
-    }
-
-    // ── Availability ─────────────────────────────────────────────────────────────
-
-    async updateAgentAvailability(userId, status) {
+    async softDelete(tenantId, externalRef) {
         const [result] = await connection.execute(
-            'UPDATE users SET call_availability = ?, updated_at = NOW() WHERE id = ?',
-            [status, userId]
+            `UPDATE agents SET deleted_at = NOW(), availability = 'OFFLINE', updated_at = NOW()
+             WHERE tenant_id = ? AND external_ref = ? AND deleted_at IS NULL`,
+            [tenantId, externalRef]
         );
         return result.affectedRows > 0;
     }
 
-    async setAgentAvailableIfNoActiveCalls(userId) {
+    // ── Availability ────────────────────────────────────────────────────────────
+
+    async updateAgentAvailability(agentId, availability) {
         const [result] = await connection.execute(
-            `UPDATE users u
-             SET u.call_availability = 'AVAILABLE',
-                 u.updated_at = NOW()
-             WHERE u.id = ?
-             AND u.call_availability = 'ON_CALL'
-             AND NOT EXISTS (
-                 SELECT 1
-                 FROM calls c
-                 WHERE c.user_id = u.id
-                 AND c.status IN ('INITIATED', 'RINGING', 'IN_PROGRESS')
-             )`,
-            [userId]
+            `UPDATE agents SET availability = ?, availability_changed_at = NOW(), updated_at = NOW()
+             WHERE id = ? AND deleted_at IS NULL`,
+            [availability, agentId]
         );
         return result.affectedRows > 0;
     }
 
-    async setAgentOfflineIfNoActiveCalls(userId) {
+    async setAgentAvailableIfNoActiveCalls(agentId) {
         const [result] = await connection.execute(
-            `UPDATE users u
-             SET u.call_availability = 'OFFLINE',
-                 u.updated_at = NOW()
-             WHERE u.id = ?
-             AND u.call_availability = 'ON_CALL'
-             AND NOT EXISTS (
-                 SELECT 1
-                 FROM calls c
-                 WHERE c.user_id = u.id
-                 AND c.status IN ('INITIATED', 'RINGING', 'IN_PROGRESS')
-             )`,
-            [userId]
+            `UPDATE agents
+             SET availability = 'AVAILABLE', availability_changed_at = NOW(), updated_at = NOW()
+             WHERE id = ? AND availability = 'ON_CALL' AND ${NO_ACTIVE_CALL}`,
+            [agentId]
         );
         return result.affectedRows > 0;
     }
 
+    async setAgentOfflineIfNoActiveCalls(agentId) {
+        const [result] = await connection.execute(
+            `UPDATE agents
+             SET availability = 'OFFLINE', availability_changed_at = NOW(), updated_at = NOW()
+             WHERE id = ? AND availability = 'ON_CALL' AND ${NO_ACTIVE_CALL}`,
+            [agentId]
+        );
+        return result.affectedRows > 0;
+    }
+
+    // When releasing to AVAILABLE, skips agents still on another active call —
+    // cleanup may batch-release agents of a stuck RINGING call who are already
+    // on a separate IN_PROGRESS call.
     async batchUpdateAgentAvailability(agentIds, availability) {
         if (!agentIds || agentIds.length === 0) return;
-
-        const uniqueAgentIds = [...new Set(agentIds)];
-        const placeholders = uniqueAgentIds.map(() => '?').join(', ');
-
-        // When releasing to AVAILABLE, skip agents who still have an active call on a
-        // different channel — the cleanup service may batch-release agents after terminating
-        // a stuck RINGING call while those same agents are already on a separate IN_PROGRESS call.
-        const notExistsClause = availability === 'AVAILABLE'
-            ? `AND NOT EXISTS (
-                   SELECT 1 FROM calls c
-                   WHERE c.user_id = users.id
-                   AND c.status IN ('INITIATED', 'RINGING', 'IN_PROGRESS')
-               )`
-            : '';
-
+        const unique = [...new Set(agentIds)];
+        const placeholders = unique.map(() => '?').join(', ');
+        const guard = availability === 'AVAILABLE' ? `AND ${NO_ACTIVE_CALL}` : '';
         await connection.execute(
-            `UPDATE users
-             SET call_availability = ?,
-                 updated_at = NOW()
-             WHERE id IN (${placeholders})
-             ${notExistsClause}`,
-            [availability, ...uniqueAgentIds]
+            `UPDATE agents
+             SET availability = ?, availability_changed_at = NOW(), updated_at = NOW()
+             WHERE id IN (${placeholders}) ${guard}`,
+            [availability, ...unique]
         );
     }
 
-    // Returns availability stats for all call-center agents in the business.
-    // Used by IVR trigger condition evaluation.
-    // Returns { total, available, on_call, offline }.
-    async getAvailabilityStats(businessId) {
+    // Counts by availability over the given agents. Returns { total, available, on_call, offline }.
+    async getAvailabilityStatsForAgentIds(agentIds = []) {
+        const ids = [...new Set((agentIds || []).map(Number).filter(Number.isFinite))];
+        if (!ids.length) return emptyStats();
+        const placeholders = ids.map(() => '?').join(',');
         const [rows] = await connection.execute(
-            `SELECT u.call_availability, COUNT(*) AS cnt
-             FROM users u
-             JOIN model_has_roles mhr
-               ON mhr.model_id = u.id
-              AND mhr.model_type = 'App\\\\Models\\\\User'
-              AND mhr.business_id = ?
-             JOIN role_has_permissions rhp ON rhp.role_id = mhr.role_id
-             JOIN permissions p ON p.id = rhp.permission_id
-             WHERE u.business_id = ?
-               AND u.deleted_at IS NULL
-               AND p.name = 'call_center_agent_access'
-             GROUP BY u.call_availability`,
-            [businessId, businessId]
+            `SELECT availability, COUNT(*) AS cnt FROM agents
+             WHERE id IN (${placeholders}) AND deleted_at IS NULL
+             GROUP BY availability`,
+            ids
         );
-
-        const stats = { total: 0, available: 0, on_call: 0, offline: 0 };
-        for (const row of rows) {
-            const count = Number(row.cnt);
-            stats.total += count;
-            const av = (row.call_availability ?? '').toUpperCase();
-            if (av === 'AVAILABLE')  stats.available += count;
-            else if (av === 'ON_CALL') stats.on_call += count;
-            else                       stats.offline  += count;
-        }
-        return stats;
+        return tallyStats(rows);
     }
 
-    // Returns availability stats for a specific set of agent IDs.
-    // Returns { total, available, on_call, offline }.
-    async getAvailabilityStatsForAgentIds(agentIds = [], businessId = null) {
-        const uniqueAgentIds = [...new Set(
-            (agentIds || [])
-                .map((id) => Number(id))
-                .filter((id) => Number.isFinite(id))
-        )];
-
-        if (!uniqueAgentIds.length) {
-            return { total: 0, available: 0, on_call: 0, offline: 0 };
-        }
-
-        const placeholders = uniqueAgentIds.map(() => '?').join(',');
-        const params = [...uniqueAgentIds];
-        let businessFilter = '';
-
-        if (Number.isFinite(Number(businessId))) {
-            businessFilter = 'AND u.business_id = ?';
-            params.push(Number(businessId));
-        }
-
+    async getTenantAvailabilityStats(tenantId) {
         const [rows] = await connection.execute(
-            `SELECT u.call_availability, COUNT(*) AS cnt
-             FROM users u
-             WHERE u.id IN (${placeholders})
-               AND u.deleted_at IS NULL
-               ${businessFilter}
-             GROUP BY u.call_availability`,
-            params
+            `SELECT availability, COUNT(*) AS cnt FROM agents
+             WHERE tenant_id = ? AND deleted_at IS NULL
+             GROUP BY availability`,
+            [tenantId]
         );
-
-        const stats = { total: 0, available: 0, on_call: 0, offline: 0 };
-        for (const row of rows) {
-            const count = Number(row.cnt);
-            stats.total += count;
-            const av = (row.call_availability ?? '').toUpperCase();
-            if (av === 'AVAILABLE') stats.available += count;
-            else if (av === 'ON_CALL') stats.on_call += count;
-            else stats.offline += count;
-        }
-        return stats;
+        return tallyStats(rows);
     }
 
-    // ── Atomic Operations ────────────────────────────────────────────────────────
+    // ── Atomic claims ───────────────────────────────────────────────────────────
 
-    // Atomically claim an agent and assign a queued call in a single transaction.
-    // Returns { claimed, assigned }:
-    //   claimed=false: agent is not AVAILABLE (give up)
-    //   claimed=true, assigned=false: call was taken by another worker (retry with next call)
-    //   claimed=true, assigned=true: success
-    async claimAgentAndAssignCall(userId, callId) {
+    // Claim an agent and assign a queued call in one transaction.
+    //   { claimed: false }                  agent not AVAILABLE — give up
+    //   { claimed: true, assigned: false }  call taken by another worker — try the next call
+    //   { claimed: true, assigned: true }   success
+    async claimAgentAndAssignCall(agentId, callId) {
         const conn = await connection.getConnection();
         try {
             await conn.beginTransaction();
 
             const [agentResult] = await conn.execute(
-                `UPDATE users
-                 SET call_availability = 'ON_CALL', updated_at = NOW()
-                 WHERE id = ?
-                 AND call_availability = 'AVAILABLE'
-                 AND NOT EXISTS (
-                     SELECT 1
-                     FROM calls c
-                     WHERE c.user_id = users.id
-                     AND c.status IN ('INITIATED', 'RINGING', 'IN_PROGRESS')
-                 )`,
-                [userId]
+                `UPDATE agents
+                 SET availability = 'ON_CALL', availability_changed_at = NOW(), updated_at = NOW()
+                 WHERE id = ? AND availability = 'AVAILABLE' AND deleted_at IS NULL AND ${NO_ACTIVE_CALL}`,
+                [agentId]
             );
-
             if (agentResult.affectedRows === 0) {
                 await conn.rollback();
                 return { claimed: false, assigned: false };
@@ -293,15 +220,14 @@ class AgentRepository {
 
             const [callResult] = await conn.execute(
                 `UPDATE calls
-                 SET user_id = ?, updated_at = NOW()
+                 SET agent_id = ?, updated_at = NOW()
                  WHERE id = ?
-                 AND user_id IS NULL
+                 AND agent_id IS NULL
                  AND status = 'RINGING'
                  AND direction = 'INBOUND'
                  AND (state IS NULL OR state != 'IVR')`,
-                [userId, callId]
+                [agentId, callId]
             );
-
             if (callResult.affectedRows === 0) {
                 await conn.rollback();
                 return { claimed: true, assigned: false };
@@ -317,56 +243,25 @@ class AgentRepository {
         }
     }
 
-    async claimAgentIfAvailable(userId) {
+    async claimAgentIfAvailable(agentId) {
         const [result] = await connection.execute(
-            `UPDATE users
-             SET call_availability = 'ON_CALL', updated_at = NOW()
-             WHERE id = ?
-             AND call_availability = 'AVAILABLE'
-             AND NOT EXISTS (
-                 SELECT 1
-                 FROM calls c
-                 WHERE c.user_id = users.id
-                 AND c.status IN ('INITIATED', 'RINGING', 'IN_PROGRESS')
-             )`,
-            [userId]
+            `UPDATE agents
+             SET availability = 'ON_CALL', availability_changed_at = NOW(), updated_at = NOW()
+             WHERE id = ? AND availability = 'AVAILABLE' AND deleted_at IS NULL AND ${NO_ACTIVE_CALL}`,
+            [agentId]
         );
         return result.affectedRows > 0;
     }
 
-    // Check the availability of an IVR transfer target.
-    // targetType: 'queue'|'agent'|'group'; targetId: null for queue.
-    // Returns 'available' (at least one agent AVAILABLE), 'busy' (all ON_CALL), or 'offline'.
-    async checkTargetAvailability(targetType, targetId, businessId) {
-        let agentIds = [];
-
-        if (targetType === 'queue') {
-            const agents = await this.getCallCenterAgents(businessId);
-            agentIds = agents.map((a) => a.id);
-
-        } else if (targetType === 'agent') {
-            agentIds = targetId ? [Number(targetId)] : [];
-
-        } else if (targetType === 'group') {
-            if (!targetId) return 'offline';
-            const [rows] = await connection.execute(
-                `SELECT user_id FROM user_group_members WHERE group_id = ?`,
-                [Number(targetId)]
-            );
-            agentIds = rows.map((r) => r.user_id);
-        }
-
-        if (agentIds.length === 0) return 'offline';
-
-        const placeholders = agentIds.map(() => '?').join(',');
-        const [statuses] = await connection.execute(
-            `SELECT call_availability FROM users WHERE id IN (${placeholders}) AND deleted_at IS NULL`,
-            agentIds
+    // RING_ALL accept: the call was offered without claiming anyone, so the
+    // accepting agent is flipped ON_CALL here.
+    async markOnCall(agentId) {
+        const [result] = await connection.execute(
+            `UPDATE agents SET availability = 'ON_CALL', availability_changed_at = NOW(), updated_at = NOW()
+             WHERE id = ? AND availability != 'ON_CALL' AND deleted_at IS NULL`,
+            [agentId]
         );
-
-        if (statuses.some((r) => r.call_availability === 'AVAILABLE')) return 'available';
-        if (statuses.some((r) => r.call_availability === 'ON_CALL'))   return 'busy';
-        return 'offline';
+        return result.affectedRows > 0;
     }
 }
 

@@ -3,7 +3,7 @@
 // Lifecycle coordinator for IVR sessions.  Mirrors DTMFCoordinator /
 // RecordingCoordinator in pattern: one singleton, owns state map, clean API.
 //
-// Called from PeerRegistry.checkAndStartBridging when ivr_menu_id is set.
+// Called from PeerRegistry.checkAndStartBridging when ivr_flow_id is set.
 // On 'call:ivr_complete' with action='transfer', delegates to IvrTransferHandler.
 import wrtc from '@roamhq/wrtc';
 import EventBus from '../EventBus.js';
@@ -21,7 +21,7 @@ import { placeholderTrackFactory } from '../../media/bridge/PlaceholderTrackFact
 class IvrCoordinator {
     constructor() {
         // callId → { engine, audioSource, sender, senderTrack, whatsappPeer, whatsappPc,
-        //             sessionId, ivrMenuId, businessId, startedAtMs, completeHandler, terminationHandler }
+        //             sessionId, ivrFlowId, tenantId, startedAtMs, completeHandler, terminationHandler }
         this._sessions = new Map();
 
         // One-way latch: callIds whose IVR session has completed at least once
@@ -61,13 +61,13 @@ class IvrCoordinator {
      * Start an IVR session for an incoming call.
      *
      * @param {string}            callId
-     * @param {number}            ivrMenuId
+     * @param {number}            ivrFlowId
      * @param {RTCPeerConnection} whatsappPc     the WhatsApp peer connection
      * @param {MediaStreamTrack}  customerTrack  the caller's audio track (for DTMF)
-     * @param {object}            callMeta       { businessId, businessNumberId, ... }
+     * @param {object}            callMeta       { tenantId, channelId, queueId }
      * @param {Peer|null}         whatsappPeer
      */
-    async startSession(callId, ivrMenuId, whatsappPc, customerTrack, callMeta = {}, whatsappPeer = null) {
+    async startSession(callId, ivrFlowId, whatsappPc, customerTrack, callMeta = {}, whatsappPeer = null) {
         if (this._sessions.has(callId)) {
             console.warn(`[IvrCoordinator] Session already active for call ${callId}`);
             return;
@@ -92,7 +92,7 @@ class IvrCoordinator {
         this._sessions.set(callId, { _pending: true });
         let sessionEstablished = false;
 
-        console.log(`[IvrCoordinator] Starting session for call ${callId}, menu ${ivrMenuId}`);
+        console.log(`[IvrCoordinator] Starting session for call ${callId}, menu ${ivrFlowId}`);
 
         // Guard against call:terminated firing during the async setup window (menu fetch,
         // audio path resolution / S3 downloads / ffmpeg decode, DB session creation).
@@ -109,17 +109,17 @@ class IvrCoordinator {
 
         try {
             // 1. Fetch menu structure + audio file metadata
-            const menu = await IvrRepository.findMenu(ivrMenuId, callMeta.businessId ?? null);
+            const menu = await IvrRepository.findFlow(ivrFlowId, callMeta.tenantId ?? null);
             if (!menu) {
-                console.error(`[IvrCoordinator] IVR menu ${ivrMenuId} not found for call ${callId}`);
+                console.error(`[IvrCoordinator] IVR menu ${ivrFlowId} not found for call ${callId}`);
                 return;
             }
             const menuMeta = {
-                ivr_menu_id: menu.id,
-                ivr_menu_name: menu.name ?? null,
+                ivr_flow_id: menu.id,
+                ivr_flow_name: menu.name ?? null,
             };
-            const lifecycleBusinessId = Number(callMeta.businessId ?? 0);
-            const canLogLifecycle = Number.isInteger(lifecycleBusinessId) && lifecycleBusinessId > 0;
+            const lifecycleTenantId = Number(callMeta.tenantId ?? 0);
+            const canLogLifecycle = Number.isInteger(lifecycleTenantId) && lifecycleTenantId > 0;
 
             // 2. Resolve audio paths for all nodes that reference an audio file
             const audioPathMap = await this._resolveAudioPaths(menu);
@@ -166,13 +166,13 @@ class IvrCoordinator {
             // 5. Persist session
             const sessionId = await IvrRepository.createSession({
                 callId,
-                ivrMenuId,
-                businessId: callMeta.businessId ?? null,
+                ivrFlowId,
+                tenantId: callMeta.tenantId ?? null,
             });
 
             const logIvrLifecycle = (methodName, payload = {}) => {
                 if (!canLogLifecycle || typeof callLifecycleLogger?.[methodName] !== 'function') return;
-                callLifecycleLogger[methodName](callId, lifecycleBusinessId, {
+                callLifecycleLogger[methodName](callId, lifecycleTenantId, {
                     ...menuMeta,
                     session_id: sessionId,
                     ...payload,
@@ -184,7 +184,7 @@ class IvrCoordinator {
             // 6. Create and start engine — pass only the function it actually needs
             const engine = new IvrEngine({
                 callId,
-                businessId: callMeta.businessId ?? null,
+                tenantId: callMeta.tenantId ?? null,
                 structure: menu.structure,
                 defaultTimeout: menu.timeout_seconds,
                 audioSource,
@@ -258,8 +258,8 @@ class IvrCoordinator {
                 EventBus.off('call:terminated', terminationHandler);
                 EventBus.off('call:ivr_complete', completeHandler);
                 console.log(`[IvrCoordinator] Call ${callId} terminated externally — stopping IVR session`);
-                // Capture businessId before stopSession removes the session entry.
-                const businessId = this._sessions.get(callId)?.businessId ?? null;
+                // Capture tenantId before stopSession removes the session entry.
+                const tenantId = this._sessions.get(callId)?.tenantId ?? null;
                 try {
                     await this.stopSession(callId, 'hung_up');
                 } catch (err) {
@@ -271,7 +271,7 @@ class IvrCoordinator {
                 // Without this, IVR calls that end via caller hang-up never get cleaned up
                 // because there is no Redis subscription and no FRONTEND peer connection
                 // to route the webhook call_terminated event to the cleanup path.
-                EventBus.emit('call:ivr_terminated', { callId, action: 'hung_up', businessId });
+                EventBus.emit('call:ivr_terminated', { callId, action: 'hung_up', tenantId });
             };
 
             // Final guard: if the call terminated during the async menu fetch / audio
@@ -293,8 +293,8 @@ class IvrCoordinator {
                 whatsappPeer,
                 whatsappPc,
                 sessionId,
-                ivrMenuId,
-                businessId: callMeta.businessId ?? null,
+                ivrFlowId,
+                tenantId: callMeta.tenantId ?? null,
                 startedAtMs: Date.now(),
                 completeHandler,
                 terminationHandler,
@@ -358,8 +358,8 @@ class IvrCoordinator {
             whatsappPeer,
             whatsappPc,
             sessionId,
-            ivrMenuId,
-            businessId,
+            ivrFlowId,
+            tenantId,
             startedAtMs,
             completeHandler,
             terminationHandler,
@@ -406,9 +406,9 @@ class IvrCoordinator {
 
         if (sessionId) {
             await IvrRepository.closeSession(sessionId, outcome, endedAt, durationSeconds).catch(() => { });
-            if (outcome !== 'transferred' && businessId) {
-                await callLifecycleLogger.logIvrTerminated(callId, businessId, {
-                    ivr_menu_id: ivrMenuId,
+            if (outcome !== 'transferred' && tenantId) {
+                await callLifecycleLogger.logIvrTerminated(callId, tenantId, {
+                    ivr_flow_id: ivrFlowId,
                     session_id: sessionId,
                     outcome,
                 }).catch(() => { });
@@ -434,8 +434,8 @@ class IvrCoordinator {
 
         EventBus.emit('call:ivr_session_closed', {
             callId,
-            businessId,
-            ivrMenuId,
+            tenantId,
+            ivrFlowId,
             sessionId,
             outcome,
             endedAt: endedAt.toISOString(),
@@ -466,7 +466,7 @@ class IvrCoordinator {
      * (which fail when fetched from within the Node.js process due to HTTPS
      * signing issues).  Local files stay as absolute path strings.
      *
-     * @param {object} menu   result of IvrRepository.findMenu
+     * @param {object} menu   result of IvrRepository.findFlow
      * @returns {Promise<Map<string, string|Buffer>>}
      */
     async _resolveAudioPaths(menu) {

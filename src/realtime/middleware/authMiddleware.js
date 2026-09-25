@@ -1,142 +1,107 @@
 // src/realtime/middleware/authMiddleware.js
+// Agent socket authentication (PLATFORM_ARCHITECTURE.md §3C). The consumer's
+// backend signs a short-lived HS256 JWT with one of its signing keys:
+//   header  { alg: "HS256", kid }
+//   payload { iss: <consumer slug>, sub: <agent_ref>, tnt: <tenant_ref>,
+//             name?, role?: "AGENT"|"SUPERVISOR", exp }
+// The agent is created on first connect (just-in-time provisioning); queue
+// membership is still managed through the Management API.
 import jwt from "jsonwebtoken";
 import { roomManager } from "../managers/RoomManager.js";
 import AgentRepository from "../../persistence/AgentRepository.js";
-import BusinessRepository from "../../persistence/BusinessRepository.js";
-import { redisBaseService } from "../../infra/redis/RedisBaseService.js";
-import { config } from "../../../config/envConfig.js";
+import ConsumerRepository from "../../persistence/ConsumerRepository.js";
+import TenantRepository from "../../persistence/TenantRepository.js";
+import { AgentRole } from "../../core/constants/CallConstants.js";
 
-const ROLE_CACHE_TTL = 5 * 60; // 5 minutes
-const roleKey = (businessId, userId) => `auth:role:${businessId}:${userId}`;
+export const AGENT_PROTOCOL_VERSION = 1;
 
-function validateAndExtractToken(token) {
-    if (!token) {
-        throw new Error("No token provided");
-    }
+// Signing secrets are looked up per connect; a short in-process cache absorbs
+// reconnect storms (e.g. a worker restart) without a DB round trip each.
+const SECRET_CACHE_TTL_MS = 60_000;
+const secretCache = new Map(); // `${consumerId}:${kid}` → { secret, expiresAt }
 
-    const JWT_SECRET = config.jwt.secret;
-    if (!JWT_SECRET) {
-        throw new Error("JWT secret not set in environment");
-    }
+async function signingSecret(consumerId, kid) {
+    const key = `${consumerId}:${kid}`;
+    const hit = secretCache.get(key);
+    if (hit && hit.expiresAt > Date.now()) return hit.secret;
+    const secret = await ConsumerRepository.getSigningSecret(consumerId, kid);
+    if (secret) secretCache.set(key, { secret, expiresAt: Date.now() + SECRET_CACHE_TTL_MS });
+    return secret;
+}
 
-    let decoded;
+export class AgentAuthError extends Error {}
+
+/**
+ * Verifies an agent token and resolves it to Callio's consumer, tenant and
+ * agent rows. Throws AgentAuthError with a client-safe message.
+ */
+export async function authenticateAgentToken(token) {
+    if (!token) throw new AgentAuthError("No token provided");
+
+    const decoded = jwt.decode(token, { complete: true });
+    const kid = decoded?.header?.kid;
+    const iss = decoded?.payload?.iss;
+    if (!kid || !iss) throw new AgentAuthError("Token is missing kid or iss");
+
+    const consumer = await ConsumerRepository.findBySlug(iss);
+    if (!consumer || consumer.status !== "ACTIVE") throw new AgentAuthError("Unknown or suspended consumer");
+
+    const secret = await signingSecret(consumer.id, kid);
+    if (!secret) throw new AgentAuthError("Unknown signing key");
+
+    let claims;
     try {
-        decoded = jwt.verify(token, JWT_SECRET);
-    } catch (err) {
-        throw new Error("Invalid or expired token");
+        claims = jwt.verify(token, secret, { algorithms: ["HS256"], issuer: iss });
+    } catch {
+        throw new AgentAuthError("Invalid or expired token");
     }
+    if (!claims.sub || !claims.tnt) throw new AgentAuthError("Token is missing sub or tnt");
+    if (!claims.exp) throw new AgentAuthError("Token must expire");
 
-    const userId = decoded.user?.id || decoded.sub || decoded.uid || null;
-    const userUUID = decoded.user?.uuid || null;
-    const userName = decoded.user?.name || null;
+    const tenant = await TenantRepository.findByExternalRef(consumer.id, String(claims.tnt));
+    if (!tenant || tenant.status !== "ACTIVE") throw new AgentAuthError("Unknown or suspended tenant");
 
-    const businessId =
-        decoded.business?.id ||
-        decoded.businessId ||
-        decoded.business_id ||
-        null;
-    const businessUUID = decoded.business?.uuid || null;
+    const role = Object.values(AgentRole).includes(claims.role) ? claims.role : null;
+    const agent = await AgentRepository.upsert(tenant.id, String(claims.sub), {
+        name: claims.name ? String(claims.name) : String(claims.sub),
+        role,
+    });
+    if (!agent) throw new AgentAuthError("Agent could not be resolved");
 
-    if (!userId || !userUUID) throw new Error("Token missing user ID/UUID");
-
-    // Tokens without a business belong to super-admin accounts.
-    // Laravel's auth controller sets business: null for admin users.
-    if (!businessId && !businessUUID) {
-        return {
-            user: { id: userId, uuid: userUUID, name: userName, isAdmin: true },
-            business: { id: "SUPER_ADMIN", uuid: "SUPER_ADMIN" },
-        };
-    }
-
-    return {
-        user: { id: userId, uuid: userUUID, name: userName, isAdmin: false },
-        business: { id: businessId, uuid: businessUUID },
-    };
+    return { consumer, tenant, agent };
 }
 
 export async function authMiddleware(socket, next) {
-    const token = socket.handshake.auth?.token;
-
     try {
-        const { user, business } = validateAndExtractToken(token);
-        const deviceId = socket.handshake.auth?.device_id || null;
-
-        // Distinguishes a genuine app session from a throwaway/auxiliary
-        // connection that authenticates with the same token/device_id but
-        // has no business participating in presence tracking or
-        // reconnect-redelivery semantics — see connectionHandler.js's own
-        // use of this field for the bug class it closes (2026-08-24): the
-        // mobile app opens short-lived auxiliary connections (CallkitWatch's
-        // remote-resolution watcher, the native-decline reject socket — see
-        // push_notification_service.dart's `_openAuxiliarySocket`) that
-        // share this device's identity with its main SocketService
-        // connection. Without this tag, the backend has no way to tell such
-        // a connection apart from the main app reconnecting, and previously
-        // treated it as one — up to and including resetting the call's
-        // FRONTEND WebRTC peer on what it read as a fresh agent reconnect.
-        // Defaults to 'session' (the main app's own connection) so every
-        // caller that predates this field behaves exactly as before.
-        const connectionPurpose = socket.handshake.auth?.purpose || 'session';
-
-        user.deviceId = deviceId;
-
-        socket.user = user;
-        socket.business = business;
-        socket.connectionPurpose = connectionPurpose;
-        roomManager.joinBusinessRoom(socket, business.id);
-        roomManager.joinUserRoom(socket, user.id);
-
-        // Resolve the user's call-center role once at connect time and cache it on the
-        // socket so per-request handlers (call:ongoing) can read it without a DB query.
-        // Skip for SUPER_ADMIN — they have no business_id and no call-center permissions.
-        socket.callCenterRole = 'system';
-        if (business.id !== 'SUPER_ADMIN') {
-            try {
-                const cacheKey = roleKey(business.id, user.id);
-                let role = await redisBaseService.get(cacheKey);
-                if (!role) {
-                    role = await AgentRepository.resolveTransferInitiatorType(business.id, user.id);
-                    // Real bug found and fixed (2026-08-22): resolveTransferInitiatorType
-                    // resolves purely from the user's PERSISTENT call_center_agent_access
-                    // permission grant, regardless of whether the business's call-center
-                    // *feature* is currently toggled on. With it off, an inbound call
-                    // routes the "regular business" way (broadcast to everyone, user_id
-                    // left NULL until someone actually accepts it) — but this socket
-                    // still resolved as 'agent', so call:ongoing's handler
-                    // (socketHandlers.js) still scoped this user's resync to
-                    // CallRepository.getOngoingCallsForAgent's strict `user_id = ?`,
-                    // which can never match that NULL row. A cold-start native accept
-                    // (app killed, tapped Accept, app boots and reconnects to resync
-                    // the still-ringing call) was therefore guaranteed to fail whenever
-                    // this exact combination applied — deterministic, not a race.
-                    // Forcing 'system' here (same as a role-less user already correctly
-                    // gets) routes them through the unscoped getOngoingCallsForBusiness
-                    // query instead, which needs no change of its own — a genuinely
-                    // regular-business user already worked correctly, this just extends
-                    // the same treatment to an agent-role user whose business happens
-                    // to have the feature off right now. Manager resolution is
-                    // deliberately left untouched — not implicated in this bug (a
-                    // manager already resolves to the same unscoped query regardless),
-                    // and forcing it to 'system' too would have unrelated, unverified
-                    // effects on monitor/whisper access this fix isn't scoped to touch.
-                    if (role === 'agent') {
-                        const isCallCentered = await BusinessRepository.isCallCentered(business.id);
-                        if (!isCallCentered) role = 'system';
-                    }
-                    if (role) await redisBaseService.set(cacheKey, role, ROLE_CACHE_TTL);
-                }
-                socket.callCenterRole = role || 'system';
-                if (role === 'manager') {
-                    roomManager.joinManagerRoom(socket, business.id);
-                }
-            } catch (err) {
-                // Non-fatal — manager falls back to business-room events only.
-                console.warn(`[Auth] Role resolution failed for user ${user.id}:`, err.message);
-            }
+        const protocol = socket.handshake.auth?.protocol;
+        if (protocol != null && Number(protocol) !== AGENT_PROTOCOL_VERSION) {
+            throw new AgentAuthError(`Unsupported protocol version ${protocol} (server speaks ${AGENT_PROTOCOL_VERSION})`);
         }
+
+        const { tenant, agent } = await authenticateAgentToken(socket.handshake.auth?.token);
+
+        socket.user = {
+            id: agent.id,
+            externalRef: agent.external_ref,
+            name: agent.name,
+            role: agent.role,
+            deviceId: socket.handshake.auth?.device_id || null,
+        };
+        socket.tenant = { id: tenant.id, externalRef: tenant.external_ref };
+
+        // A 'session' connection is the agent's main app connection. Anything
+        // else (e.g. a mobile app's short-lived auxiliary socket used to decline
+        // from the lock screen) shares the same identity but must not take part
+        // in presence tracking or reconnect redelivery.
+        socket.connectionPurpose = socket.handshake.auth?.purpose || "session";
+
+        roomManager.joinTenantRoom(socket, tenant.id);
+        roomManager.joinUserRoom(socket, agent.id);
+        if (agent.role === AgentRole.SUPERVISOR) roomManager.joinSupervisorRoom(socket, tenant.id);
 
         next();
     } catch (err) {
-        next(new Error(`Authentication failed: ${err.message}`));
+        if (!(err instanceof AgentAuthError)) console.error("[Auth] Socket authentication error:", err);
+        next(new Error(`Authentication failed: ${err instanceof AgentAuthError ? err.message : "internal error"}`));
     }
 }

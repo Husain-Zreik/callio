@@ -4,8 +4,8 @@ import { roomManager } from '../../../managers/RoomManager.js';
 
 export function registerCallStateListeners(networkLossTimers) {
     EventBus.on('call:status', (data) => {
-        const { businessId } = data;
-        roomManager.broadcastToBusiness(businessId, 'call:status', data);
+        const { tenantId } = data;
+        roomManager.broadcastToTenant(tenantId, 'call:status', data);
     });
 
     EventBus.on('call:success', (data) => {
@@ -19,9 +19,9 @@ export function registerCallStateListeners(networkLossTimers) {
     });
 
     EventBus.on('call:handled', (data) => {
-        const { callId, businessId, userId, agentName, deviceId, action } = data;
+        const { callId, tenantId, userId, agentName, deviceId, action } = data;
         console.log(`[EventBus] Call ${callId} ${action} by ${agentName} (${userId})`);
-        roomManager.broadcastToBusiness(businessId, 'call:handled', { callId, businessId, userId, agentName, deviceId: deviceId ?? null, action });
+        roomManager.broadcastToTenant(tenantId, 'call:handled', { callId, tenantId, userId, agentName, deviceId: deviceId ?? null, action });
     });
 
     EventBus.on('call:reconnected', (data) => {
@@ -31,7 +31,7 @@ export function registerCallStateListeners(networkLossTimers) {
     });
 
     EventBus.on('call:terminated', (data) => {
-        const { callId, businessId, reason } = data;
+        const { callId, tenantId, reason } = data;
         console.log(`[EventBus] Call terminated: ${callId} reason=${reason}`);
 
         // Cancel any pending network-loss timers so they don't fire a phantom
@@ -44,16 +44,16 @@ export function registerCallStateListeners(networkLossTimers) {
             networkLossTimers.delete(timerKey);
         }
 
-        roomManager.broadcastToBusiness(businessId, 'call:terminated', data);
+        roomManager.broadcastToTenant(tenantId, 'call:terminated', data);
     });
 
     EventBus.on('call:agent_queue', (data) => {
-        const { businessId } = data;
-        roomManager.broadcastToBusiness(businessId, 'call:agent_queue', data);
+        const { tenantId } = data;
+        roomManager.broadcastToTenant(tenantId, 'call:agent_queue', data);
     });
 
     EventBus.on('call:agent_availability', (data) => {
-        const { businessId } = data;
-        roomManager.broadcastToBusiness(businessId, 'call:agent_availability', data);
+        const { tenantId } = data;
+        roomManager.broadcastToTenant(tenantId, 'call:agent_availability', data);
     });
 }

@@ -4,11 +4,10 @@
 // Converts a { storage_disk, storage_key } record to an absolute local path
 // or URL that can be passed directly to ffmpeg or an HTTP client.
 //
-// Supported disks:
-//   'local'  → STORAGE_ROOT/{storage_key}
-//   'public' → STORAGE_ROOT/public/{storage_key}
-//   's3'     → (future) generate a presigned URL via AWS SDK;
-//              currently storage_key is expected to be a full URL already
+// Supported providers (audio_assets.storage_provider):
+//   's3'     → a presigned URL for the object key (a full URL is passed through)
+//   'local'  → STORAGE_LOCAL_ROOT/{storage_key}
+//   'public' → STORAGE_LOCAL_ROOT/public/{storage_key}
 //
 // The function is async so that S3 presigning can be added later without
 // changing any caller.
@@ -17,8 +16,7 @@ import { resolve as resolvePath } from 'path';
 import { storageClient } from './StorageClient.js';
 import { config } from '../../../config/envConfig.js';
 
-// Configurable via LARAVEL_STORAGE_ROOT — see envConfig.js's storage.local.root.
-// Defaults to the monorepo-sibling layout (node/ and backend/ on the same disk).
+// Configurable via STORAGE_LOCAL_ROOT — see envConfig.js's storage.local.root.
 const STORAGE_ROOT = config.storage.local.root;
 
 function isHttpUrl(value) {
@@ -47,7 +45,7 @@ export async function resolveStoragePath({ storage_disk, storage_key }) {
                 return await storageClient.getSignedDownloadUrl(storage_key);
             } catch (err) {
                 // Fallback for deployments exposing public/object URLs via AWS_URL.
-                const base = String(process.env.AWS_URL || '').replace(/\/+$/, '');
+                const base = String(config.storage.s3.publicUrl || '').replace(/\/+$/, '');
                 const key = String(storage_key).replace(/^\/+/, '');
                 if (base) {
                     return `${base}/${key}`;

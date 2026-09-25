@@ -49,7 +49,7 @@ consumer ─┬─ api keys, signing keys, webhook_deliveries
 | `channels` | Customer-facing lines: `WHATSAPP` (a Meta phone number) or `SIP` (a DID), with provider credentials and an inbound queue. |
 | `ivr_flows` | IVR flow graphs and their trigger conditions, tenant-wide or per channel. |
 | `calls` | One row per call between a channel and a customer. |
-| `call_connections` | One row per media leg: `AGENT`, `CUSTOMER`, `MONITOR`. |
+| `call_connections` | One row per media leg type per call: `AGENT`, `CUSTOMER`, `MONITOR` (one supervisor monitors at a time). |
 | `call_lifecycle_events` | Append-only audit trail per call. |
 | `call_transfer_logs` | Transfers to an agent or into a queue. |
 | `ivr_sessions`, `ivr_session_inputs` | IVR runs and DTMF input. |

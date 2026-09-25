@@ -91,7 +91,7 @@ class RedisCleanupService {
 
                 try {
                     // Check if call exists in database
-                    const call = await CallRepository.findByWacid(callId);
+                    const call = await CallRepository.findByProviderCallId(callId);
 
                     if (!call) {
                         // Call doesn't exist - clean up Redis

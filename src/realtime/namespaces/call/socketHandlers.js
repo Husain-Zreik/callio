@@ -1,56 +1,61 @@
 // src/realtime/namespaces/call/socketHandlers.js
+// Agent gateway — client → server call events (docs/agent-protocol.md).
+// Handlers check payload shape, authorize the socket for the call (identity
+// always from the verified token, never the payload), then hand off to the
+// core via Redis to the worker that owns the call's media.
 import { redisPubSubService } from "../../../infra/redis/RedisPubSubService.js";
 import { callQueryService } from "../../../core/calls/CallQueryService.js";
 import { callEventHandler } from "../../../core/events/CallEventHandler.js";
+import { callAccess } from "../../../core/calls/CallAccess.js";
 import { roomManager } from "../../managers/RoomManager.js";
-import { callAgentAssignmentService } from "../../../core/routing/CallAgentAssignmentService.js";
 import { agentAssignmentCoordinator } from "../../../core/routing/AgentAssignmentCoordinator.js";
 import { EventTypes } from "../../../core/events/EventTypes.js";
 import { CallErrorCodes } from "../../../core/events/CallErrorCodes.js";
 import { emitCallError } from "../../../core/events/CallErrorEmitter.js";
+import { AgentRole } from "../../../core/constants/CallConstants.js";
 
 export default function registerCallSocketListeners(socket) {
+    const identity = () => ({
+        agentId: socket.user?.id,
+        tenantId: socket.tenant?.id,
+        role: socket.user?.role,
+    });
+    const isSupervisor = () => socket.user?.role === AgentRole.SUPERVISOR;
+    // Events that only make sense once this socket is bound to the call.
+    const boundTo = (callId) => callId != null && String(socket.callId) === String(callId);
 
     // ── Queries ───────────────────────────────────────────────────────────────
 
-    socket.on('call:ongoing', async () => {
+    const syncCalls = async () => {
         try {
-            const businessId = socket.business?.id ?? null;
-            if (!businessId) {
-                emitCallError({ callId: null, code: CallErrorCodes.MISSING_BUSINESS_CONTEXT, message: 'Business context not found', socket });
+            const tenantId = socket.tenant?.id ?? null;
+            if (!tenantId) {
+                emitCallError({ callId: null, code: CallErrorCodes.MISSING_TENANT_CONTEXT, message: 'Tenant context not found', socket });
                 return;
             }
-
-            const userId = socket.user?.id ?? null;
-            // Role was resolved at auth time and cached on the socket — no DB query here.
-            // Managers see all calls (including IVR-active ones).
-            // Agents only see calls assigned to them — they should never see
-            // IVR calls with user_id=null, which caused spurious "reconnecting" UI.
-            const userRole = socket.callCenterRole ?? 'system';
-            const agentId = userRole === 'agent' ? userId : null;
-
-            const ongoing = await callQueryService.getOngoingCalls(businessId, agentId);
+            // Supervisors see every call (including IVR-active ones); agents only
+            // their own.
+            const agentId = isSupervisor() ? null : socket.user?.id;
+            const ongoing = await callQueryService.getOngoingCalls(tenantId, agentId);
             socket.emit('calls:list', { ongoing });
 
-            const snapshot = await callAgentAssignmentService.getQueueSnapshotForBusiness(businessId);
-            if (snapshot) socket.emit('call:agent_queue', snapshot);
-
+            for (const snapshot of await agentAssignmentCoordinator.getQueueSnapshots(tenantId)) {
+                socket.emit('call:agent_queue', snapshot);
+            }
         } catch (error) {
             console.error('[Socket] Fetch ongoing calls error:', error);
             emitCallError({ callId: null, code: CallErrorCodes.FAILED_FETCH_ACTIVE, message: 'Failed to fetch ongoing calls', socket });
         }
-    });
+    };
+    socket.on('calls:sync', syncCalls);
+    socket.on('call:ongoing', syncCalls);
 
-    socket.on('call:agent-queue:sync', async (data) => {
+    socket.on('call:agent-queue:sync', async () => {
         try {
-            const businessId = socket.business?.id ?? null;
-            if (!businessId) return;
-
-            if (data?.broadcast) {
-                await agentAssignmentCoordinator.emitQueueUpdate(businessId);
-            } else {
-                const snapshot = await callAgentAssignmentService.getQueueSnapshotForBusiness(businessId);
-                if (snapshot) socket.emit('call:agent_queue', snapshot);
+            const tenantId = socket.tenant?.id ?? null;
+            if (!tenantId) return;
+            for (const snapshot of await agentAssignmentCoordinator.getQueueSnapshots(tenantId)) {
+                socket.emit('call:agent_queue', snapshot);
             }
         } catch (error) {
             console.error('[Socket] Fetch agent queue error:', error);
@@ -60,62 +65,72 @@ export default function registerCallSocketListeners(socket) {
 
     socket.on('call:agent-availability:sync', async (data) => {
         try {
-            const businessId = socket.business?.id ?? null;
-            if (!businessId) return;
-
-            const actorUserId = Number(socket.user?.id);
-            const targetUserId = Number(data?.userId);
-
-            await agentAssignmentCoordinator.syncAgentAvailability(businessId, actorUserId, targetUserId);
+            const tenantId = socket.tenant?.id ?? null;
+            if (!tenantId) return;
+            await agentAssignmentCoordinator.syncAgentAvailability(tenantId, socket.user?.id, data?.userId ?? socket.user?.id);
         } catch (error) {
             console.error('[Socket] Agent availability sync error:', error);
             emitCallError({ callId: null, code: CallErrorCodes.AGENT_AVAILABILITY_SYNC_FAILED, message: 'Failed to sync agent availability', socket });
         }
     });
 
-    // ── Outbound call initiation ──────────────────────────────────────────────
-
-    socket.on('call:initiate', async (data) => {
+    // { availability: 'AVAILABLE'|'OFFLINE', agentId? } — agentId only for a
+    // supervisor setting someone else.
+    socket.on('agent:availability:set', async (data) => {
         try {
-            const { calleeId, callerId, sdpOffer } = data;
-            if (!calleeId || !callerId || !sdpOffer) {
-                emitCallError({ callId: null, code: CallErrorCodes.CALL_INITIATION_FAILED, message: 'Missing required fields: calleeId, callerId, sdpOffer', socket });
+            const tenantId = socket.tenant?.id ?? null;
+            if (!tenantId || !data?.availability) return;
+            const target = data.agentId ?? socket.user?.id;
+            const result = await agentAssignmentCoordinator.setAvailability(
+                tenantId, socket.user?.id, target, String(data.availability).toUpperCase()
+            );
+            if (!result) {
+                emitCallError({ callId: null, code: CallErrorCodes.AGENT_AVAILABILITY_SYNC_FAILED, message: 'Availability change not allowed', socket });
+            }
+        } catch (error) {
+            console.error('[Socket] Set availability error:', error);
+            emitCallError({ callId: null, code: CallErrorCodes.AGENT_AVAILABILITY_SYNC_FAILED, message: 'Failed to set availability', socket });
+        }
+    });
+
+    // ── Outbound: start a call the consumer created via the Management API ───
+
+    socket.on('call:start', async (data) => {
+        const { callId, sdpOffer } = data || {};
+        try {
+            if (!callId || !sdpOffer) {
+                emitCallError({ callId: callId ?? null, code: CallErrorCodes.CALL_INITIATION_FAILED, message: 'Missing required fields: callId, sdpOffer', socket });
                 return;
             }
 
-            const initiatePayload = {
-                calleeId,
-                callerId,
+            const callData = await callEventHandler.startCall({
+                callId,
                 sdpOffer,
                 userId: socket.user?.id,
-                businessId: socket.business?.id,
+                tenantId: socket.tenant?.id,
                 socketId: socket.id,
                 deviceId: socket.user?.deviceId ?? null,
-            };
-
-            console.log(`[Socket] Initiating call for business ${initiatePayload.businessId}`);
-
-            const callData = await callEventHandler.initiateCall(initiatePayload);
+            });
 
             socket.callId = callData.callId;
             roomManager.joinCallRoom(socket, callData.callId);
 
-            // Dispatch WhatsApp connection via the standard Redis → CallEventHandler pipeline.
+            // Dial the customer via the standard Redis → CallEventHandler pipeline.
             await redisPubSubService.publishCallEvent(callData.callId, EventTypes.CALL_INITIATE, { callId: callData.callId });
 
-            // Broadcast immediately so the agent gets the sdpAnswer without waiting for Redis round-trip.
-            roomManager.broadcastToBusiness(callData.businessId, 'call:initiated', callData);
+            // The SDP answer goes to this socket only.
+            socket.emit('call:started', callData);
+            roomManager.broadcastToSupervisors(callData.tenantId, 'call:initiated', { ...callData, sdpOffer: undefined, sdpAnswer: undefined });
         } catch (error) {
-            console.error('[Socket] Call initiation error:', error);
-            emitCallError({ callId: null, code: CallErrorCodes.CALL_INITIATION_FAILED, message: error.message || 'Failed to initiate call', socket });
+            console.error('[Socket] Call start error:', error);
+            emitCallError({ callId: callId ?? null, code: CallErrorCodes.CALL_INITIATION_FAILED, message: error.message || 'Failed to start call', socket });
         }
     });
 
-    // ── Inbound call actions (publish to Redis → event handler) ──────────────
+    // ── Inbound call actions ─────────────────────────────────────────────────
 
     socket.on('call:accept', async (data) => {
-        const { callId, sdpAnswer } = data;
-
+        const { callId, sdpAnswer } = data || {};
         try {
             if (!callId) {
                 emitCallError({ callId: null, code: CallErrorCodes.ACCEPT_FAILED, message: 'Missing callId', socket });
@@ -125,6 +140,10 @@ export default function registerCallSocketListeners(socket) {
                 emitCallError({ callId, code: CallErrorCodes.ACCEPT_FAILED, message: 'Missing SDP answer', socket });
                 return;
             }
+            if (!await callAccess.asAgent(callId, identity())) {
+                emitCallError({ callId, code: CallErrorCodes.ACCEPT_FAILED, message: 'This call is not offered to you', socket });
+                return;
+            }
 
             socket.callId = callId;
             roomManager.joinCallRoom(socket, callId);
@@ -132,12 +151,11 @@ export default function registerCallSocketListeners(socket) {
             await redisPubSubService.publishCallEvent(callId, EventTypes.AGENT_JOINED, {
                 callId,
                 userId: socket.user?.id,
-                businessId: socket.business?.id,
+                tenantId: socket.tenant?.id,
                 sdpAnswer,
                 socketId: socket.id,
                 deviceId: socket.user?.deviceId ?? null,
             });
-
         } catch (error) {
             console.error('[Socket] Accept call error:', error);
             roomManager.leaveCallRoom(socket, callId);
@@ -146,91 +164,76 @@ export default function registerCallSocketListeners(socket) {
     });
 
     socket.on('call:reject', async (data) => {
+        const callId = data?.callId;
         try {
-            const { callId } = data;
             if (!callId) {
                 emitCallError({ callId: null, code: CallErrorCodes.REJECT_FAILED, message: 'Missing callId', socket });
+                return;
+            }
+            if (!await callAccess.asAgent(callId, identity())) {
+                emitCallError({ callId, code: CallErrorCodes.REJECT_FAILED, message: 'This call is not offered to you', socket });
                 return;
             }
 
             await redisPubSubService.publishCallEvent(callId, EventTypes.CALL_REJECTED, {
                 callId,
                 userId: socket.user?.id,
-                businessId: socket.business?.id,
+                tenantId: socket.tenant?.id,
                 socketId: socket.id,
                 deviceId: socket.user?.deviceId ?? null,
             });
-
             roomManager.leaveCallRoom(socket, callId);
-
         } catch (error) {
             console.error('[Socket] Reject call error:', error);
-            emitCallError({ callId: data?.callId, code: CallErrorCodes.REJECT_FAILED, message: 'Failed to reject call', socket });
+            emitCallError({ callId, code: CallErrorCodes.REJECT_FAILED, message: 'Failed to reject call', socket });
         }
     });
 
-    socket.on('call:terminate', async (data) => {
+    // Hang up (reason 'system_failed' when the client gave up reconnecting), or
+    // cancel an outbound call before it's answered.
+    const endCall = (errorCode, defaultReason) => async (data) => {
+        const callId = data?.callId;
         try {
-            const { callId, reason } = data;
             if (!callId) {
-                emitCallError({ callId: null, code: CallErrorCodes.TERMINATE_FAILED, message: 'Missing callId', socket });
+                emitCallError({ callId: null, code: errorCode, message: 'Missing callId', socket });
+                return;
+            }
+            const allowed = await callAccess.asAgent(callId, identity())
+                ?? await callAccess.asSupervisor(callId, identity());
+            if (!allowed) {
+                emitCallError({ callId, code: errorCode, message: 'You are not on this call', socket });
                 return;
             }
 
             await redisPubSubService.publishCallEvent(callId, EventTypes.CALL_TERMINATED, {
                 callId,
                 userId: socket.user?.id,
-                businessId: socket.business?.id,
+                tenantId: socket.tenant?.id,
                 socketId: socket.id,
-                reason: reason ?? null,
+                reason: defaultReason ?? data?.reason ?? null,
             });
-
             roomManager.leaveCallRoom(socket, callId);
-            if (reason !== 'system_failed') {
-                socket.emit('call:success', { message: 'Call terminated successfully' });
-            }
-
         } catch (error) {
-            console.error('[Socket] Terminate call error:', error);
-            emitCallError({ callId: data?.callId, code: CallErrorCodes.TERMINATE_FAILED, message: 'Failed to terminate call', socket });
+            console.error('[Socket] End call error:', error);
+            emitCallError({ callId, code: errorCode, message: 'Failed to end call', socket });
         }
-    });
-
-    socket.on('call:cancel', async (data) => {
-        try {
-            const { callId } = data;
-            if (!callId) {
-                emitCallError({ callId: null, code: CallErrorCodes.CANCEL_FAILED, message: 'Missing callId', socket });
-                return;
-            }
-
-            await redisPubSubService.publishCallEvent(callId, EventTypes.CALL_TERMINATED, {
-                callId,
-                userId: socket.user?.id,
-                businessId: socket.business?.id,
-                reason: 'cancelled',
-                socketId: socket.id,
-            });
-
-            roomManager.leaveCallRoom(socket, callId);
-            socket.emit('call:success', { message: 'Call cancelled successfully' });
-
-        } catch (error) {
-            console.error('[Socket] Cancel call error:', error);
-            emitCallError({ callId: data?.callId, code: CallErrorCodes.CANCEL_FAILED, message: 'Failed to cancel call', socket });
-        }
-    });
+    };
+    socket.on('call:terminate', endCall(CallErrorCodes.TERMINATE_FAILED, null));
+    socket.on('call:cancel', endCall(CallErrorCodes.CANCEL_FAILED, 'cancelled'));
 
     socket.on('call:reconnect', async (data) => {
+        const { callId, sdpOffer, reconnectTrigger } = data || {};
         try {
-            const { callId, sdpOffer, reconnectTrigger } = data;
-
             if (!callId) {
                 emitCallError({ callId: null, code: CallErrorCodes.RECONNECT_FAILED, message: 'Missing callId', socket });
                 return;
             }
             if (!sdpOffer) {
                 emitCallError({ callId, code: CallErrorCodes.RECONNECT_FAILED, message: 'Missing SDP offer', socket });
+                return;
+            }
+            if (!await callAccess.asAgent(callId, identity())) {
+                emitCallError({ callId, code: CallErrorCodes.RECONNECT_FAILED, message: 'You are not on this call', socket });
                 return;
             }
 
@@ -240,58 +243,55 @@ export default function registerCallSocketListeners(socket) {
             await redisPubSubService.publishCallEvent(callId, EventTypes.AGENT_RECONNECTED, {
                 callId,
                 userId: socket.user?.id,
-                businessId: socket.business?.id,
+                tenantId: socket.tenant?.id,
                 sdpOffer,
                 socketId: socket.id,
                 deviceId: socket.user?.deviceId ?? null,
                 reconnectTrigger: reconnectTrigger ?? null,
             });
-
         } catch (error) {
             console.error('[Socket] Reconnect call error:', error);
-            emitCallError({ callId: data?.callId, code: CallErrorCodes.RECONNECT_FAILED, message: 'Failed to reconnect call', socket });
+            emitCallError({ callId, code: CallErrorCodes.RECONNECT_FAILED, message: 'Failed to reconnect call', socket });
         }
     });
 
+    // { callId, agentId } or { callId, queueId }
     socket.on('call:transfer', async (data) => {
+        const { callId, agentId, queueId } = data || {};
         try {
-            const { callId, userId, userName, agentId, groupId } = data;
             if (!callId) {
                 emitCallError({ callId: null, code: CallErrorCodes.CALL_TRANSFER_FAILED, message: 'Missing callId', socket });
                 return;
             }
-            if (!agentId && !groupId) {
-                emitCallError({ callId, code: CallErrorCodes.CALL_TRANSFER_FAILED, message: 'Missing transfer target (agent or group)', socket });
+            if (!agentId && !queueId) {
+                emitCallError({ callId, code: CallErrorCodes.CALL_TRANSFER_FAILED, message: 'Missing transfer target (agentId or queueId)', socket });
+                return;
+            }
+            if (!await callAccess.canTransfer(callId, identity())) {
+                emitCallError({ callId, code: CallErrorCodes.CALL_TRANSFER_FAILED, message: 'You may not transfer this call', socket });
                 return;
             }
 
-            const targetType = groupId ? 'group' : 'agent';
-
             await redisPubSubService.publishCallEvent(callId, EventTypes.CALL_TRANSFERRED, {
                 callId,
-                oldAgentId: userId,
-                oldAgentName: userName,
-                newAgentId: agentId,
-                targetType,
-                targetGroupId: groupId || null,
-                businessId: socket.business?.id,
+                newAgentId: agentId ?? null,
+                targetType: queueId ? 'queue' : 'agent',
+                targetQueueId: queueId ?? null,
+                tenantId: socket.tenant?.id,
                 socketId: socket.id,
                 assignorId: socket.user?.id,
-                assignorName: socket.user?.name,
             });
-
         } catch (error) {
             console.error('[Socket] Call transfer error:', error);
-            emitCallError({ callId: data?.callId, code: CallErrorCodes.CALL_TRANSFER_FAILED, message: error.message || 'Failed to transfer the call', socket });
+            emitCallError({ callId, code: CallErrorCodes.CALL_TRANSFER_FAILED, message: error.message || 'Failed to transfer the call', socket });
         }
     });
 
     // ── ICE / Monitor ─────────────────────────────────────────────────────────
 
     socket.on('connection:ice-candidate', async (data) => {
-        const { callId, candidate, connectionType } = data;
-        if (!callId || !candidate) return;
-
+        const { callId, candidate, connectionType } = data || {};
+        if (!callId || !candidate || !boundTo(callId)) return;
         try {
             await redisPubSubService.publishCallEvent(callId, EventTypes.ICE_CANDIDATE, {
                 callId,
@@ -305,8 +305,7 @@ export default function registerCallSocketListeners(socket) {
     });
 
     socket.on('call:monitor', async (data) => {
-        const { callId, sdpOffer } = data;
-
+        const { callId, sdpOffer } = data || {};
         try {
             if (!callId) {
                 emitCallError({ callId: null, code: CallErrorCodes.MONITOR_FAILED, message: 'Missing callId', socket });
@@ -314,6 +313,10 @@ export default function registerCallSocketListeners(socket) {
             }
             if (!sdpOffer) {
                 emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: 'Missing SDP offer', socket });
+                return;
+            }
+            if (!await callAccess.asSupervisor(callId, identity())) {
+                emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: 'Only supervisors can monitor calls', socket });
                 return;
             }
 
@@ -324,11 +327,10 @@ export default function registerCallSocketListeners(socket) {
             await redisPubSubService.publishCallEvent(callId, EventTypes.MONITOR_STARTED, {
                 callId,
                 userId: socket.user?.id,
-                businessId: socket.business?.id,
+                tenantId: socket.tenant?.id,
                 sdpOffer,
                 socketId: socket.id,
             });
-
         } catch (error) {
             console.error('[Socket] Monitor call error:', error);
             roomManager.leaveCallRoom(socket, callId);
@@ -338,82 +340,73 @@ export default function registerCallSocketListeners(socket) {
     });
 
     socket.on('call:monitor:mode', async (data) => {
-        const { callId, mode } = data;
-
+        const { callId, mode } = data || {};
         try {
-            if (!callId) {
-                emitCallError({ callId: null, code: CallErrorCodes.MONITOR_FAILED, message: 'Missing callId', socket });
+            if (!callId || !mode) {
+                emitCallError({ callId: callId ?? null, code: CallErrorCodes.MONITOR_FAILED, message: 'Missing callId or mode', socket });
                 return;
             }
-            if (!mode) {
-                emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: 'Missing mode', socket });
+            if (!socket.isMonitoring || !boundTo(callId)) {
+                emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: 'You are not monitoring this call', socket });
                 return;
             }
-
             await redisPubSubService.publishCallEvent(callId, EventTypes.MONITOR_MODE_CHANGED, {
                 callId,
                 mode,
                 socketId: socket.id,
             });
-
         } catch (error) {
             console.error('[Socket] Monitor mode change error:', error);
             emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: error.message, socket });
         }
     });
 
-    // Agent toggles "whisper back to supervisor" (mute self to customer, keep
-    // talking to the supervisor). Routed to the call-owner worker via Redis.
+    // The agent toggles "talk privately to the supervisor" (muted to the customer).
     socket.on('call:agent:private', async (data) => {
-        const { callId, active } = data;
-
+        const { callId, active } = data || {};
         try {
-            if (!callId) {
-                emitCallError({ callId: null, code: CallErrorCodes.AGENT_PRIVATE_FAILED, message: 'Missing callId', socket });
+            if (!callId || !boundTo(callId) || socket.isMonitoring) {
+                emitCallError({ callId: callId ?? null, code: CallErrorCodes.AGENT_PRIVATE_FAILED, message: 'You are not on this call', socket });
                 return;
             }
-
             await redisPubSubService.publishCallEvent(callId, EventTypes.AGENT_PRIVATE_CHANGED, {
                 callId,
                 active: !!active,
                 socketId: socket.id,
             });
-
         } catch (error) {
             console.error('[Socket] Agent private change error:', error);
             emitCallError({ callId, code: CallErrorCodes.AGENT_PRIVATE_FAILED, message: error.message, socket });
         }
     });
 
-    // Agent mic mute state — purely informational (no audio routing), relayed to
-    // the call room so any supervisor monitoring the call sees it. broadcastToCall
-    // is cross-worker via the Socket.IO Redis adapter, so no owner-worker hop needed.
+    // Agent mic mute state — informational only, relayed to the call room so a
+    // monitoring supervisor sees it.
     socket.on('call:agent:muted', (data) => {
         const { callId, muted } = data || {};
-        if (!callId) return;
+        if (!boundTo(callId) || socket.isMonitoring) return;
         roomManager.broadcastToCall(callId, 'call:agent:muted', { callId, muted: !!muted });
     });
 
     socket.on('call:monitor:stop', async (data) => {
+        const callId = data?.callId;
         try {
-            const { callId } = data;
             if (!callId) {
                 emitCallError({ callId: null, code: CallErrorCodes.STOP_MONITOR_FAILED, message: 'Missing callId', socket });
                 return;
             }
+            if (!socket.isMonitoring || !boundTo(callId)) return;
 
             await redisPubSubService.publishCallEvent(callId, EventTypes.MONITOR_STOPPED, {
                 callId,
                 userId: socket.user?.id,
                 socketId: socket.id,
             });
-
             roomManager.leaveCallRoom(socket, callId);
             socket.isMonitoring = false;
-
         } catch (error) {
             console.error('[Socket] Stop monitoring error:', error);
-            emitCallError({ callId: data?.callId, code: CallErrorCodes.STOP_MONITOR_FAILED, message: error.message, socket });
+            emitCallError({ callId, code: CallErrorCodes.STOP_MONITOR_FAILED, message: error.message, socket });
         }
     });
 
@@ -421,7 +414,6 @@ export default function registerCallSocketListeners(socket) {
 
     socket.on('disconnect', async () => {
         if (!socket.callId) return;
-
         const userId = socket.user?.id;
 
         if (socket.isMonitoring) {
@@ -433,11 +425,11 @@ export default function registerCallSocketListeners(socket) {
                 socketId: socket.id,
             });
         } else {
-            console.log(`[Socket] User ${userId} disconnected from call ${socket.callId}`);
-            await redisPubSubService.publishCallEvent(socket.callId, EventTypes.FRONTEND_DISCONNECTED, {
+            console.log(`[Socket] Agent ${userId} disconnected from call ${socket.callId}`);
+            await redisPubSubService.publishCallEvent(socket.callId, EventTypes.AGENT_DISCONNECTED, {
                 callId: socket.callId,
                 userId,
-                businessId: socket.business?.id,
+                tenantId: socket.tenant?.id,
                 reason: 'disconnect',
                 socketId: socket.id,
             });

@@ -9,6 +9,10 @@ import { redisCleanupService } from '../infra/cluster/RedisCleanupService.js';
 import { storageClient } from '../infra/storage/StorageClient.js';
 import { encodingWorkerBridge } from '../media/recording/encoding/EncodingWorkerBridge.js';
 import { dtmfWorkerBridge } from '../media/dtmf/DTMFWorkerBridge.js';
+import { callCleanupService } from '../core/calls/CallCleanupService.js';
+import { consumerEventPublisher } from '../core/events/ConsumerEventPublisher.js';
+import { ivrTerminationHandler } from '../core/ivr/IvrTerminationHandler.js';
+import { outboxDispatcher } from '../outbox/OutboxDispatcher.js';
 
 function logOptional(label, result, disabledFeature) {
     if (result.status === 'fulfilled')
@@ -43,4 +47,16 @@ export async function initOptionalServices() {
     logOptional('Storage service',  storageResult,  'recording');
     logOptional('Encoding worker',  encodingResult, 'recording');
     logOptional('DTMF worker',      dtmfResult,     'IVR digit detection');
+}
+
+// Core listeners and background loops — after Redis and the socket server
+// exist, before the HTTP listener opens. Each registers once per worker.
+export async function startCoreServices() {
+    consumerEventPublisher.register();
+    ivrTerminationHandler.register();
+
+    await presenceService.clearOwnStalePresence();
+    redisCleanupService.start();
+    callCleanupService.start();
+    outboxDispatcher.start();
 }

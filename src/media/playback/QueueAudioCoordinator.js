@@ -4,7 +4,7 @@
 // the IVR transfers the call to the agent queue.
 //
 // Lifecycle:
-//   startQueueAudio(callId, businessId, sender, whatsappPc)
+//   startQueueAudio(callId, tenantId, sender, customerPc, audioOverridePath, queueId)
 //     → immediately replaces the silent IVR track with a placeholder reconnecting tone
 //       (covers the async decode gap AND the "no audio configured" fallback)
 //     → resolves the configured audio file (business override → platform default → null)
@@ -35,12 +35,12 @@ class QueueAudioCoordinator {
      * from IVR to the agent queue.
      *
      * @param {string}               callId
-     * @param {number}               businessId
+     * @param {number}               tenantId
      * @param {RTCRtpSender}         sender              the placeholder sender on whatsappPc
      * @param {RTCPeerConnection}    whatsappPc
      * @param {string|null}          [audioOverridePath]  resolved path/URL to use instead of business/platform audio
      */
-    async startQueueAudio(callId, businessId, sender, whatsappPc, audioOverridePath = null) {
+    async startQueueAudio(callId, tenantId, sender, whatsappPc, audioOverridePath = null, queueId = null) {
         if (this._active.has(callId)) return; // already running
 
         console.log(`[QueueAudioCoordinator] Starting queue audio for call ${callId}`);
@@ -96,7 +96,7 @@ class QueueAudioCoordinator {
             if (!filePath) {
                 let audioInfo = null;
                 try {
-                    audioInfo = await IvrRepository.getQueueAudio(businessId);
+                    audioInfo = await IvrRepository.getQueueAudio(queueId, tenantId);
                 } catch (err) {
                     console.warn(`[QueueAudioCoordinator] getQueueAudio failed for call ${callId}:`, err.message);
                 }
@@ -104,7 +104,7 @@ class QueueAudioCoordinator {
                 if (!audioInfo) {
                     // No configured audio — interim placeholder tone is already playing.
                     // Fall through to register the session so cleanup handlers fire correctly.
-                    console.log(`[QueueAudioCoordinator] No queue audio configured for business ${businessId} — using built-in tone`);
+                    console.log(`[QueueAudioCoordinator] No hold audio configured for queue ${queueId ?? 'none'} (tenant ${tenantId}) — using built-in tone`);
                 } else {
                     try {
                         filePath = await resolveStoragePath(audioInfo);

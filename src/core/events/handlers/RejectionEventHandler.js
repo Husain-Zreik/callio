@@ -2,7 +2,6 @@
 import { rejectWhatsAppCall, terminateWhatsAppCall } from '../../../channels/whatsapp/WhatsAppCallApi.js';
 import CallRepository from '../../../persistence/CallRepository.js';
 import AgentRepository from '../../../persistence/AgentRepository.js';
-import BusinessRepository from '../../../persistence/BusinessRepository.js';
 import EventBus from '../../EventBus.js';
 import { agentAssignmentCoordinator } from '../../routing/AgentAssignmentCoordinator.js';
 import { callLifecycleLogger } from '../../calls/CallLifecycleLogger.js';
@@ -10,13 +9,14 @@ import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
 import { CallDirection, CallStatus, TerminationReason, TerminatedBy } from '../../constants/CallConstants.js';
 import { emitCallError } from '../CallErrorEmitter.js';
 import { CallErrorCodes } from '../CallErrorCodes.js';
-import { notifyCallResolved } from '../../../realtime/namespaces/call/handlers/delivery.js';
+import { callPushNotifier } from '../../../push/CallPushNotifier.js';
+import { queueRouter } from '../../routing/QueueRouter.js';
 
 export class RejectionEventHandler {
 
     async handleCallRejected(data) {
-        const { callId, userId, businessId, reason, direction, deviceId } = data;
-        const isClientRejected = reason === 'CLIENT_REJECTED';
+        const { callId, userId, tenantId, reason, direction, deviceId } = data;
+        const isClientRejected = reason === 'CUSTOMER_REJECTED';
 
         console.log(`[RejectionEventHandler] ${isClientRejected ? 'Client' : 'Agent'} rejecting call ${callId}`);
 
@@ -39,11 +39,26 @@ export class RejectionEventHandler {
         }
 
         try {
-            if (!isClientRejected) {
-                await callLifecycleLogger.logRejected(callId, businessId, userId, { reason: 'agent_rejected' });
+            const callRecord = await CallRepository.findById(callId);
+            const queue = callRecord?.queue_id ? await queueRouter.getQueue(callRecord.queue_id) : null;
 
-                const callRecord = await CallRepository.findById(callId);
-                if (callRecord?.ivr_menu_id) {
+            // RING_ALL call nobody has taken yet: a decline only dismisses it for
+            // this agent — the others are still being offered it.
+            if (!isClientRejected && callRecord && callRecord.agent_id == null
+                && callRecord.direction === CallDirection.INBOUND && queueRouter.isRingAll(queue)) {
+                await callLifecycleLogger.logRejected(callId, tenantId, userId, { reason: 'agent_declined_offer' });
+                EventBus.emit('call:room:leave', { userId, callId });
+                EventBus.emit('call:offer_declined', { callId, tenantId, userId, deviceId: deviceId ?? null });
+                callPushNotifier.notifyCallResolved(callId, { resolvedAgentId: userId, tenantId })
+                    .catch((err) => console.error(`[RejectionEventHandler] dismiss push failed for call ${callId}:`, err));
+                console.log(`[RejectionEventHandler] Agent ${userId} declined RING_ALL offer for call ${callId}`);
+                return;
+            }
+
+            if (!isClientRejected) {
+                await callLifecycleLogger.logRejected(callId, tenantId, userId, { reason: 'agent_rejected' });
+
+                if (callRecord?.ivr_flow_id) {
                     // IVR-transferred call: WhatsApp session is already accepted (IN_PROGRESS at Meta).
                     // Use terminate (end call) instead of reject to properly close the active session.
                     await terminateWhatsAppCall(callId);
@@ -54,12 +69,12 @@ export class RejectionEventHandler {
                 const assigned = await CallRepository.assignCallToAgentIfEligible(callId, userId);
                 if (!assigned) throw new Error('Call assignment conflict. Call ownership changed.');
 
-                await CallRepository.terminateCall(callId, TerminationReason.REJECTED, TerminatedBy.BUSINESS);
+                await CallRepository.terminateCall(callId, TerminationReason.REJECTED, TerminatedBy.AGENT);
                 if (callRecord?.direction === CallDirection.OUTBOUND) {
                     await agentAssignmentCoordinator.releaseAgentOfflineIfIdle(userId);
                 } else {
                     await agentAssignmentCoordinator.releaseAgentIfIdle(userId);
-                    await agentAssignmentCoordinator.assignOldestUnassignedCall(businessId);
+                    await agentAssignmentCoordinator.assignOldestUnassignedCall(tenantId);
                 }
             }
 
@@ -75,36 +90,38 @@ export class RejectionEventHandler {
                     await agentAssignmentCoordinator.releaseAgentOfflineIfIdle(userId);
                 } else {
                     await agentAssignmentCoordinator.releaseAgentIfIdle(userId);
-                    await agentAssignmentCoordinator.assignOldestUnassignedCall(businessId);
+                    await agentAssignmentCoordinator.assignOldestUnassignedCall(tenantId);
                 }
             }
 
-            if (businessId) {
+            if (tenantId) {
                 // Only broadcast "agent rejected" to the dashboard when the agent
                 // actually pressed the reject button — emitting call:handled for
                 // CLIENT_REJECTED would falsely show the agent as the one who
                 // rejected the call.
                 if (!isClientRejected) {
-                    const agentName = userId ? await AgentRepository.getUserNameById(userId, businessId) : null;
-                    EventBus.emit('call:handled', { callId, userId, businessId, agentName, deviceId: deviceId ?? null, action: 'rejected' });
+                    const agentName = userId ? await AgentRepository.getNameById(userId) : null;
+                    EventBus.emit('call:handled', { callId, userId, tenantId, agentName, deviceId: deviceId ?? null, action: 'rejected' });
 
-                    // Same reasoning as AgentEventHandler's accept path — see
-                    // notifyCallResolved's doc comment for why call:handled
-                    // above doesn't already reach a killed/backgrounded device.
-                    const isCallCenter = await BusinessRepository.isCallCentered(businessId);
-                    notifyCallResolved(callId, businessId, userId, { fanOutToBusiness: !isCallCenter }).catch((err) =>
-                        console.error(`[RejectionEventHandler] notifyCallResolved failed for call ${callId}:`, err.message)
+                    // Same reasoning as AgentEventHandler's accept path: call:handled
+                    // doesn't reach a killed/backgrounded device, a push does.
+                    callPushNotifier.notifyCallResolved(callId, {
+                        resolvedAgentId: userId,
+                        ringAllQueue: queueRouter.isRingAll(queue) ? queue : null,
+                        tenantId,
+                    }).catch((err) =>
+                        console.error(`[RejectionEventHandler] notifyCallResolved failed for call ${callId}:`, err)
                     );
                 } else {
-                    // WhatsApp client declined while still ringing — nothing else in
+                    // The customer declined while still ringing — nothing else in
                     // the codebase emits call:terminated for this path (confirmed by
                     // grepping every emission site), so without this the manager
                     // dashboard's Active Calls row for this call never gets removed.
                     EventBus.emit('call:terminated', {
-                        callId, businessId, reason: TerminationReason.REJECTED, terminatedBy: TerminatedBy.CLIENT,
+                        callId, tenantId, reason: TerminationReason.REJECTED, terminatedBy: TerminatedBy.CUSTOMER,
                     });
                 }
-                await agentAssignmentCoordinator.emitQueueUpdate(businessId);
+                await agentAssignmentCoordinator.emitQueueUpdate(tenantId, callRecord?.queue_id ?? null);
             }
 
             console.log(`[RejectionEventHandler] ✅ Call ${callId} rejected`);

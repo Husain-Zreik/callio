@@ -3,6 +3,7 @@ import { Upload } from '@aws-sdk/lib-storage';
 import { storageClient } from './StorageClient.js';
 import { config } from '../../../config/envConfig.js';
 import RecordingRepository from '../../persistence/RecordingRepository.js';
+import EventBus from '../../core/EventBus.js';
 import { PassThrough } from 'stream';
 
 class StreamUploader {
@@ -23,23 +24,23 @@ class StreamUploader {
 
     /**
      * Generate S3 key for stereo recording file.
-     * Format: recordings/{businessId}/{callId}/{callId}_{timestamp}.ogg
+     * Format: recordings/{tenantId}/{callId}/{callId}_{timestamp}.ogg
      */
-    generateKey(businessId, callId) {
+    generateKey(tenantId, callId) {
         const timestamp = Date.now();
         const prefix = config.storage.s3.prefix;
-        return `${prefix}${businessId}/${callId}/${callId}_${timestamp}.ogg`;
+        return `${prefix}${tenantId}/${callId}/${callId}_${timestamp}.ogg`;
     }
 
     /**
      * Create a single streaming upload to S3 for the stereo recording.
      * @param {number} recordingId - Database recording ID
-     * @param {number} businessId
+     * @param {number} tenantId
      * @param {number} callId
      * @returns {Object} - { write, end, destroy }
      */
-    async createUploadStream(recordingId, businessId, callId) {
-        const key = this.generateKey(businessId, callId);
+    async createUploadStream(recordingId, tenantId, callId) {
+        const key = this.generateKey(tenantId, callId);
         const passThrough = new PassThrough();
 
         console.log(`[StreamUploader] Creating stereo upload stream: ${key}`);
@@ -69,12 +70,17 @@ class StreamUploader {
                     const completion = this.completionData.get(callId);
 
                     console.log(`[StreamUploader] ✅ Upload completed: ${key} (${fileSize} bytes)`);
-                    await RecordingRepository.updateRecordingUrl(recordingId, key, fileSize);
+                    await RecordingRepository.updateStorageKey(recordingId, key, fileSize);
 
                     // Transition to completed only after S3 confirms the upload and the
                     // URL is stored — prevents the "processing" stuck state on crashes.
                     if (completion) {
                         await RecordingRepository.markCompleted(completion.recordingId, completion.durationSeconds);
+                        EventBus.emit('recording:completed', {
+                            callId,
+                            recordingId: completion.recordingId,
+                            durationSeconds: completion.durationSeconds,
+                        });
                         console.log(`[StreamUploader] ✅ Recording ${completion.recordingId} marked completed`);
                     }
                 })

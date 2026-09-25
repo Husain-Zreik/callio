@@ -76,7 +76,7 @@ export class PeerEventManager extends EventEmitter {
             return;
         }
 
-        if (connectionType !== ConnectionType.WHATSAPP) {
+        if (connectionType !== ConnectionType.CUSTOMER) {
             this.iceCoordinator.handleOutboundCandidate(callId, candidate, connectionType);
         }
     }
@@ -118,7 +118,7 @@ export class PeerEventManager extends EventEmitter {
                 await CallConnectionRepository.markReady(callId, connectionType);
                 this.emit('connectionReady', { callId, connectionType });
 
-                if (connectionType === ConnectionType.WHATSAPP) {
+                if (connectionType === ConnectionType.CUSTOMER) {
                     this._setupDTMFReceiver(peerConnection, callId);
                 }
             }

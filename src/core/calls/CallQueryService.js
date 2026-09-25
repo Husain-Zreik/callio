@@ -1,111 +1,73 @@
 // src/core/calls/CallQueryService.js
-// Read query for active call state. Includes lazy cleanup: stale calls
-// discovered during a query are enqueued for background cleanup.
+// Read query for active call state (agent resync). Includes lazy cleanup:
+// stale calls discovered during a query are enqueued for background cleanup.
 import CallRepository from '../../persistence/CallRepository.js';
 import AgentRepository from '../../persistence/AgentRepository.js';
 import CallConnectionRepository from '../../persistence/CallConnectionRepository.js';
 import { callCleanupService } from './CallCleanupService.js';
+import { toCallView } from './CallView.js';
 import { ConnectionType, CallDirection, CallStatus } from '../constants/CallConstants.js';
 
 class CallQueryService {
 
     /**
-     * @param {number} businessId
-     * @param {number|null} agentUserId  Scope to a single agent's calls (agent view).
-     *   Pass null for manager/supervisor views that need all calls including IVR-active ones.
+     * @param {number} tenantId
+     * @param {number|null} agentId  Scope to one agent's calls (agent view). Null for
+     *   supervisor views, which need every call including IVR-active ones.
      */
-    async getOngoingCalls(businessId, agentUserId = null) {
-        try {
-            const calls = agentUserId
-                ? await CallRepository.getOngoingCallsForAgent(businessId, agentUserId)
-                : await CallRepository.getOngoingCallsForBusiness(businessId);
-            const now = Date.now();
+    async getOngoingCalls(tenantId, agentId = null) {
+        const calls = agentId
+            ? await CallRepository.getOngoingCallsForAgent(tenantId, agentId)
+            : await CallRepository.getOngoingCallsForTenant(tenantId);
+        const now = Date.now();
 
-            callCleanupService.processCleanupQueue(businessId);
+        callCleanupService.processCleanupQueue(tenantId);
 
-            // Batch-fetch all agent names in one query instead of N per-call queries.
-            const uniqueUserIds = [...new Set(calls.map(c => c.user_id).filter(Boolean).map(String))];
-            const agentNameMap = uniqueUserIds.length > 0
-                ? await AgentRepository.getUserNamesByIds(uniqueUserIds, businessId)
-                : new Map();
+        const agentIds = [...new Set(calls.map((c) => c.agent_id).filter(Boolean).map(String))];
+        const agentNames = agentIds.length ? await AgentRepository.getNamesByIds(agentIds) : new Map();
 
-            // Batch-fetch all FRONTEND connections (deviceId + sdpOffer source)
-            // in one query instead of N per-call queries.
-            const callIds = calls.map(c => c.id);
-            const frontendConnections = callIds.length > 0
-                ? await CallConnectionRepository.findByCallIdsAndType(callIds, ConnectionType.FRONTEND)
-                : [];
-            const connectionByCallId = new Map(frontendConnections.map(c => [c.call_id, c]));
+        // One query for every call's AGENT leg (device binding + pending offer).
+        const agentLegs = calls.length
+            ? await CallConnectionRepository.findByCallIdsAndType(calls.map((c) => c.id), ConnectionType.AGENT)
+            : [];
+        const legByCallId = new Map(agentLegs.map((leg) => [leg.call_id, leg]));
 
-            const results = await Promise.all(calls.map(async (call) => {
-                try {
-                    const {
-                        id: callId, user_id, wacid,
-                        client_number_id, business_number_id,
-                        caller_name, caller_username, caller_number,
-                        callee_name, callee_username, callee_number,
-                        direction, status, state,
-                        ringing_at: ringingAt, answered_at: startedAt,
-                        termination_reason,
-                    } = call;
-
-                    // QUEUE state calls are intentionally waiting (post-IVR) — skip stale check.
-                    // Assigned RINGING calls past 1 minute: WhatsApp will have dropped them,
-                    // so enqueue cleanup and exclude from the response.
-                    if (
-                        status === CallStatus.RINGING
-                        && state !== 'QUEUE'
-                        && user_id != null
-                        && ringingAt
-                    ) {
-                        const ringingDuration = (now - new Date(ringingAt).getTime()) / 1000 / 60;
-                        if (ringingDuration > 1) {
-                            callCleanupService.enqueue(callId, businessId, 'NO_ANSWER');
-                            return null;
-                        }
-                    }
-
-                    // A call cannot be both IN_PROGRESS and already have a termination reason —
-                    // enqueue cleanup and exclude from the response.
-                    if (status === CallStatus.IN_PROGRESS && termination_reason) {
-                        callCleanupService.enqueue(callId, businessId, termination_reason);
+        const results = calls.map((call) => {
+            try {
+                // Assigned RINGING calls past a minute are already dead at the
+                // provider (QUEUE-state calls are intentionally waiting) — clean up
+                // and leave them out.
+                if (call.status === CallStatus.RINGING && call.state !== 'QUEUE' && call.agent_id != null && call.ringing_at) {
+                    const ringingMinutes = (now - new Date(call.ringing_at).getTime()) / 60000;
+                    if (ringingMinutes > 1) {
+                        callCleanupService.enqueue(call.id, tenantId, 'NO_ANSWER');
                         return null;
                     }
-
-                    const callerId = direction === CallDirection.INBOUND ? client_number_id : business_number_id;
-                    const calleeId = direction === CallDirection.OUTBOUND ? client_number_id : business_number_id;
-
-                    const agentName = user_id ? (agentNameMap.get(String(user_id)) ?? null) : null;
-
-                    // deviceId is needed for any ongoing call a client might consider
-                    // reconnecting to, so a reloaded/resyncing client can tell "bound
-                    // to this exact device" apart from "bound to the same account's
-                    // other device", which userId alone can't distinguish.
-                    const callConnection = connectionByCallId.get(callId) ?? null;
-                    const deviceId = callConnection?.device_id ?? null;
-
-                    let sdpOffer = null;
-                    if (status === CallStatus.RINGING && direction === CallDirection.INBOUND) {
-                        sdpOffer = callConnection?.local_sdp;
-                    }
-
-                    return {
-                        callId, wacid, businessId, userId: user_id, agentName, deviceId,
-                        status, state, direction, callerId, callerName: caller_name, callerUsername: caller_username, callerNumber: caller_number,
-                        calleeId, calleeName: callee_name, calleeUsername: callee_username, calleeNumber: callee_number,
-                        ringingAt, startedAt, sdpOffer,
-                    };
-                } catch (err) {
-                    console.error(`[CallQueryService] ❌ Failed to process call ${call.id}:`, err);
+                }
+                // IN_PROGRESS with a termination reason is a contradiction — clean up.
+                if (call.status === CallStatus.IN_PROGRESS && call.termination_reason) {
+                    callCleanupService.enqueue(call.id, tenantId, call.termination_reason);
                     return null;
                 }
-            }));
 
-            return results.filter(Boolean);
-        } catch (err) {
-            console.error('[CallQueryService] ❌ getOngoingCalls error:', err);
-            throw err;
-        }
+                const leg = legByCallId.get(call.id) ?? null;
+                const view = toCallView(call, {
+                    agentName: call.agent_id ? (agentNames.get(String(call.agent_id)) ?? null) : null,
+                    // Lets a reloaded client tell "bound to this device" from
+                    // "bound to my other device".
+                    deviceId: leg?.device_id ?? null,
+                });
+                view.sdpOffer = (call.status === CallStatus.RINGING && call.direction === CallDirection.INBOUND)
+                    ? (leg?.local_sdp ?? null)
+                    : null;
+                return view;
+            } catch (err) {
+                console.error(`[CallQueryService] Failed to process call ${call.id}:`, err);
+                return null;
+            }
+        });
+
+        return results.filter(Boolean);
     }
 }
 

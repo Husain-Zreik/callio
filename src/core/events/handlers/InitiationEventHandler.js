@@ -1,197 +1,198 @@
 // src/core/events/handlers/InitiationEventHandler.js
-// Self-contained handler for outbound call initiation.
+// Outbound calls, in two steps (PLATFORM_ARCHITECTURE.md §5.2):
+//   1. createOutboundIntent — the consumer's backend asks for a call (it owns
+//      consent) → a calls row in INITIATED, bound to one agent.
+//   2. handleCallStart — that agent's client connects its media leg with
+//      call:start; Callio then dials the customer through the channel.
 import CallRepository from '../../../persistence/CallRepository.js';
 import CallConnectionRepository from '../../../persistence/CallConnectionRepository.js';
 import AgentRepository from '../../../persistence/AgentRepository.js';
-import BusinessRepository from '../../../persistence/BusinessRepository.js';
-import ClientRepository from '../../../persistence/ClientRepository.js';
 import { initiateWhatsAppCall } from '../../../channels/whatsapp/WhatsAppCallApi.js';
 import { redisPubSubService } from '../../../infra/redis/RedisPubSubService.js';
 import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
 import { sdpCoordinator } from '../../../media/webrtc/SDPCoordinator.js';
 import { callLifecycleLogger } from '../../calls/CallLifecycleLogger.js';
+import { consumerEventPublisher } from '../ConsumerEventPublisher.js';
 import { CallErrorCodes } from '../CallErrorCodes.js';
 import { emitCallError } from '../CallErrorEmitter.js';
 import EventBus from '../../EventBus.js';
 import { iceCoordinator } from '../../../media/webrtc/ice/ICECandidateCoordinator.js';
 import { agentAssignmentCoordinator } from '../../routing/AgentAssignmentCoordinator.js';
-import { ConnectionType, CallDirection, CallStatus, AgentAvailability } from '../../constants/CallConstants.js';
+import { toCallView } from '../../calls/CallView.js';
+import {
+    ConnectionType, CallDirection, CallStatus, AgentAvailability, Channel, CustomerAddressType,
+} from '../../constants/CallConstants.js';
+
+export class OutboundCallError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.code = code;
+    }
+}
 
 export class InitiationEventHandler {
-    // ── Outbound call creation ────────────────────────────────────────────────
+    // ── Step 1: intent (Management API) ───────────────────────────────────────
 
-    async handleCallInitiate(data, subscriptionCallback) {
-        const { userId, businessId, calleeId, callerId, sdpOffer, socketId, deviceId } = data;
-
-        const isCallCenter = await BusinessRepository.isCallCentered(businessId);
-        if (!isCallCenter) {
-            const activeExists = await CallRepository.hasActiveCall(businessId);
-            if (activeExists) throw new Error('A call is already active for this business.');
+    async createOutboundIntent({ tenantId, channel, agent, customerAddress, customerAddressType, customerName = null,
+        externalRef = null, consumerMetadata = null }) {
+        if (String(channel.tenant_id) !== String(tenantId)) throw new OutboundCallError('invalid_channel', 'Channel does not belong to this tenant');
+        if (channel.status !== 'ACTIVE') throw new OutboundCallError('channel_disabled', 'Channel is not active');
+        if (channel.type !== Channel.WHATSAPP) {
+            throw new OutboundCallError('unsupported_channel', `Outbound calls are not supported on ${channel.type} channels yet`);
+        }
+        if (String(agent.tenant_id) !== String(tenantId)) throw new OutboundCallError('invalid_agent', 'Agent does not belong to this tenant');
+        if (await CallRepository.hasAgentActiveCall(agent.id, 0)) {
+            throw new OutboundCallError('agent_busy', 'Agent already has an active call');
         }
 
-        const caller = await BusinessRepository.getBusinessNumberById(callerId);
-        if (!caller) throw new Error('Invalid business number ID');
-
-        const callee = await ClientRepository.findById(calleeId);
-        if (!callee) throw new Error('Invalid client ID');
-
-        if (!InitiationEventHandler.hasCallPermission(callee, caller.id)) {
-            throw new Error('No call permission for this client.');
-        }
+        const addressType = customerAddressType
+            ?? (/^\+?\d{6,15}$/.test(String(customerAddress)) ? CustomerAddressType.E164 : CustomerAddressType.WHATSAPP_USER);
+        const address = addressType === CustomerAddressType.E164
+            ? `+${String(customerAddress).replace(/[^\d]/g, '')}`
+            : String(customerAddress);
 
         const callId = await CallRepository.create({
-            user_id: userId,
-            business_id: businessId,
+            tenant_id: tenantId,
+            channel_id: channel.id,
+            channel: channel.type,
+            channel_address: channel.address,
+            agent_id: agent.id,
+            customer_address: address,
+            customer_address_type: addressType,
+            customer_name: customerName,
+            external_ref: externalRef,
+            consumer_metadata: consumerMetadata,
             direction: CallDirection.OUTBOUND,
-            business_number_id: caller.id,
-            caller_name: caller.display_name,
-            caller_number: caller.phone_number,
-            client_number_id: callee.id,
-            callee_name: callee.name,
-            callee_username: callee.username,
-            callee_number: callee.phone_number,
-            // Seed ringing_at at creation so ringing_duration is always computable
-            // even if Meta's RINGING webhook arrives after the call terminates.
-            // The RINGING webhook handler overwrites this with Meta's authoritative
-            // timestamp when it arrives, so accuracy is not sacrificed.
-            ringing_at: new Date(),
+            status: CallStatus.INITIATED,
         });
+        consumerEventPublisher.publishForCall(callId, 'call.created');
+        return CallRepository.findById(callId);
+    }
 
-        const startedAt = new Date().toISOString();
+    // ── Step 2: the agent connects (socket call:start) ────────────────────────
 
-        // Subscribe before creating peer connection so events arrive immediately
-        await redisPubSubService.subscribeToCallEvents(callId, subscriptionCallback);
+    async handleCallStart(data, subscriptionCallback) {
+        const { callId, userId, tenantId, sdpOffer, socketId, deviceId } = data;
 
-        // Tell the ICE dispatcher which socket to deliver outbound candidates to,
-        // then mark the client ready to flush any buffered candidates.
-        iceCoordinator.setConnectionInfo(callId, ConnectionType.FRONTEND, socketId);
-        const sdpAnswer = await sdpCoordinator.createSDPAnswer(callId, sdpOffer, ConnectionType.FRONTEND);
-        iceCoordinator.markClientReady(callId);
-
-        // Same durable-device bookkeeping as the inbound accept path
-        // (AgentEventHandler.handleAgentJoined) — without this, an outbound
-        // call's FRONTEND row never gets a device_id at all, and a reload
-        // resync would incorrectly treat the initiating device's own
-        // still-ringing/in-progress outbound call as "bound to no device"
-        // and fail to auto-resume it.
-        CallConnectionRepository.updateDeviceId(callId, ConnectionType.FRONTEND, deviceId ?? null)
-            .catch((err) => console.error(`[InitiationEventHandler] Failed to persist deviceId for call ${callId}:`, err.message));
-
-        await AgentRepository.updateAgentAvailability(userId, AgentAvailability.ON_CALL);
-        const agentName = await AgentRepository.getUserNameById(userId, businessId);
-
-        if (!callee.phone_number && callee.bsuid) {
-            console.log(`[InitiationEventHandler] Outbound call to phone-less callee=${callee.id} via bsuid=${callee.bsuid}`);
+        const call = await CallRepository.findById(callId);
+        if (!call || String(call.tenant_id) !== String(tenantId)) throw new Error('Call not found');
+        if (call.direction !== CallDirection.OUTBOUND) throw new Error('Not an outbound call');
+        if (String(call.agent_id) !== String(userId)) throw new Error('This call belongs to another agent');
+        if (call.status !== CallStatus.INITIATED) throw new Error(`Call is already ${call.status.toLowerCase()}`);
+        if (await CallConnectionRepository.findByCallAndType(callId, ConnectionType.AGENT)) {
+            throw new Error('Call was already started');
+        }
+        if (await CallRepository.hasAgentActiveCall(userId, callId)) {
+            throw new Error('Agent already has an active call');
         }
 
-        // Seed the shared CallContext so triggerWhatsAppConnection can use it
-        const connResult = peerRegistry.getConnectionData(callId, ConnectionType.FRONTEND);
+        // Seed ringing_at now so ringing_duration is always computable even if
+        // the provider's RINGING status arrives after the call ends; the
+        // RINGING webhook overwrites it with the provider's timestamp.
+        await CallRepository.updateTimestamp(callId, 'ringing_at', new Date());
+
+        // Subscribe before creating the peer so events arrive immediately.
+        await redisPubSubService.subscribeToCallEvents(callId, subscriptionCallback);
+
+        iceCoordinator.setConnectionInfo(callId, ConnectionType.AGENT, socketId);
+        const sdpAnswer = await sdpCoordinator.createSDPAnswer(callId, sdpOffer, ConnectionType.AGENT);
+        iceCoordinator.markClientReady(callId);
+
+        // Durable device bookkeeping, same as the inbound accept path: a reload
+        // resync must see which device this call is bound to.
+        CallConnectionRepository.updateDeviceId(callId, ConnectionType.AGENT, deviceId ?? null)
+            .catch((err) => console.error(`[InitiationEventHandler] Failed to persist deviceId for call ${callId}:`, err));
+        CallConnectionRepository.updateAgentId(callId, ConnectionType.AGENT, userId)
+            .catch((err) => console.error(`[InitiationEventHandler] Failed to persist agent for call ${callId}:`, err));
+
+        await AgentRepository.updateAgentAvailability(userId, AgentAvailability.ON_CALL);
+        EventBus.emit('call:agent_availability', {
+            tenantId, userId, availability: AgentAvailability.ON_CALL, updatedAt: new Date().toISOString(),
+        });
+        const agentName = await AgentRepository.getNameById(userId);
+
+        // Shared CallContext, read by triggerCustomerConnection on this worker.
+        const connResult = peerRegistry.getConnectionData(callId, ConnectionType.AGENT);
         if (connResult.valid) {
             connResult.data.context.update({
-                userId, businessId, direction: CallDirection.OUTBOUND,
-                caller: { id: caller.id, name: caller.display_name, number: caller.phone_number },
-                callee: { id: callee.id, name: callee.name, number: callee.phone_number, bsuid: callee.bsuid, username: callee.username },
+                userId,
+                tenantId,
+                direction: CallDirection.OUTBOUND,
+                channelId: call.channel_id,
+                customer: { address: call.customer_address, addressType: call.customer_address_type, name: call.customer_name },
             });
         }
 
-        callLifecycleLogger.logOutboundInitiated(callId, businessId, userId, {
-            caller_id: caller.id, caller_number: caller.phone_number,
-            callee_id: callee.id, callee_number: callee.phone_number,
+        callLifecycleLogger.logOutboundInitiated(callId, tenantId, userId, {
+            channel_id: call.channel_id,
+            customer_address: call.customer_address,
         }).catch(() => { });
 
-        return {
-            wacid: null, callId, userId, agentName, businessId,
-            direction: CallDirection.OUTBOUND, status: CallStatus.INITIATED,
-            caller: { id: caller.id, name: caller.display_name, number: caller.phone_number },
-            callee: { id: callee.id, name: callee.name, username: callee.username, number: callee.phone_number },
-            sdpOffer, sdpAnswer, startedAt,
-        };
+        return { ...toCallView(call, { agentName }), sdpOffer, sdpAnswer };
     }
 
-    // ── Post-creation continuation (called via Redis → CallEventHandler) ─────
+    // ── Post-start continuation (via Redis → CallEventHandler) ───────────────
 
     async handleCallInitiated({ callId }) {
-        await this.triggerWhatsAppConnection(callId);
+        await this.triggerCustomerConnection(callId);
     }
 
-    // ── WhatsApp side connection ───────────────────────────────────────────────
+    // ── Customer side connection ──────────────────────────────────────────────
 
-    async triggerWhatsAppConnection(callId) {
-        const frontendResult = peerRegistry.getConnectionData(callId, ConnectionType.FRONTEND);
-        if (!frontendResult.valid) {
-            console.error(`[InitiationEventHandler] Cannot trigger WhatsApp for call ${callId}: no FRONTEND connection`);
+    async triggerCustomerConnection(callId) {
+        const agentResult = peerRegistry.getConnectionData(callId, ConnectionType.AGENT);
+        if (!agentResult.valid) {
+            console.error(`[InitiationEventHandler] Cannot dial customer for call ${callId}: no AGENT connection`);
             return;
         }
-        const frontendConn = frontendResult.data;
-        frontendConn.setWhatsappTriggering(true);
-        frontendConn.setWhatsappTriggered(true);
-        const agentId = frontendConn.context?.userId ?? null;
+        const agentConn = agentResult.data;
+        agentConn.setWhatsappTriggering(true);
+        agentConn.setWhatsappTriggered(true);
+        const agentId = agentConn.context?.userId ?? null;
 
         try {
-            const whatsappSdpOffer = await sdpCoordinator.createSDPOffer(callId, ConnectionType.WHATSAPP);
-            const wacid = await initiateWhatsAppCall(frontendConn.context, whatsappSdpOffer);
+            const customerSdpOffer = await sdpCoordinator.createSDPOffer(callId, ConnectionType.CUSTOMER);
+            const providerCallId = await initiateWhatsAppCall(agentConn.context, customerSdpOffer);
 
-            frontendConn.context.setWacid(wacid);
-            await CallRepository.updateWacid(callId, wacid);
+            agentConn.context.setProviderCallId(providerCallId);
+            await CallRepository.updateProviderCallId(callId, providerCallId);
 
-            console.log(`[InitiationEventHandler] WhatsApp connection triggered successfully for call ${callId}`);
+            console.log(`[InitiationEventHandler] Customer dialed for call ${callId} (providerCallId=${providerCallId})`);
         } catch (error) {
-            console.error(`[InitiationEventHandler] WhatsApp trigger failed for call ${callId}:`, error.message);
-            const businessId = frontendConn.context.businessId;
+            console.error(`[InitiationEventHandler] Dialing the customer failed for call ${callId}:`, error);
+            const tenantId = agentConn.context.tenantId;
 
-            callLifecycleLogger.logOutboundFailed(callId, businessId, agentId, {
+            callLifecycleLogger.logOutboundFailed(callId, tenantId, agentId, {
                 error: error.message,
             }).catch(() => { });
 
             await peerRegistry.closePeerConnection(callId);
 
-            emitCallError({ callId, code: CallErrorCodes.WHATSAPP_TRIGGER_FAILED, message: error.message });
-            EventBus.emit('call:terminated', { callId, businessId, reason: 'WHATSAPP_TRIGGER_FAILED' });
-            await CallRepository.markCallFailed(callId, [{ code: CallErrorCodes.WHATSAPP_TRIGGER_FAILED, title: error.message }]);
+            emitCallError({ callId, code: CallErrorCodes.PROVIDER_TRIGGER_FAILED, message: error.message });
+            await CallRepository.markCallFailed(
+                callId,
+                [{ code: CallErrorCodes.PROVIDER_TRIGGER_FAILED, title: error.message }],
+                null,
+                'PROVIDER_TRIGGER_FAILED',
+                'PROVIDER'
+            );
+            EventBus.emit('call:terminated', { callId, tenantId, reason: 'PROVIDER_TRIGGER_FAILED' });
 
-            // Release the agent — otherwise they stay stuck ON_CALL despite the call
-            // being FAILED. Outbound so we drop them to OFFLINE (safer than AVAILABLE:
-            // avoids auto-queueing them into inbound routing after a failed outbound).
-            // Release primitives are idempotent + guarded by NOT EXISTS active calls.
+            // Release the agent, else they stay stuck ON_CALL on a FAILED call.
+            // Outbound → OFFLINE (safer than auto-queueing them into inbound).
             if (agentId) {
                 try {
                     await agentAssignmentCoordinator.releaseAgentOfflineIfIdle(agentId);
                 } catch (releaseErr) {
                     console.error(
-                        `[InitiationEventHandler] ⚠️ AGENT STUCK: Failed to release agent ${agentId} after trigger failure on call ${callId}:`,
-                        releaseErr.message
+                        `[InitiationEventHandler] AGENT STUCK: failed to release agent ${agentId} after dial failure on call ${callId}:`,
+                        releaseErr
                     );
                 }
             }
         } finally {
-            frontendConn.setWhatsappTriggering(false);
-            frontendConn.setWhatsappConnected(true);
+            agentConn.setWhatsappTriggering(false);
+            agentConn.setWhatsappConnected(true);
         }
-    }
-
-    // ── Call permission gate ──────────────────────────────────────────────────
-    // Mirrors the shape client_numbers.call_permission is written in (Laravel's
-    // WebhookController::handleCallPermissionReply): a JSON map keyed by
-    // business_number_id, each entry {status, permanent, expires_at}. Previously
-    // this was only enforced by disabling the "Direct Call" button in the
-    // frontend (CallActionsDropdown.jsx's canDirectCall) — nothing stopped a
-    // call initiated by any other route (e.g. calling window.CallManager
-    // directly) from bypassing it, since this handler is the one place all
-    // outbound calls actually go through server-side.
-    static hasCallPermission(callee, businessNumberId) {
-        const raw = callee.call_permission;
-        if (!raw) return false;
-
-        let permissionMap;
-        try {
-            permissionMap = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        } catch {
-            return false;
-        }
-
-        const permission = permissionMap?.[String(businessNumberId)];
-        if (!permission || permission.status !== 'accepted') return false;
-        if (permission.permanent) return true;
-        return Boolean(permission.expires_at) && new Date(permission.expires_at) > new Date();
     }
 }

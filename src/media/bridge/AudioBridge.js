@@ -125,15 +125,15 @@ export class AudioBridge {
             return;
         }
 
-        const toType = connectionType === ConnectionType.FRONTEND
-            ? ConnectionType.WHATSAPP
-            : ConnectionType.FRONTEND;
+        const toType = connectionType === ConnectionType.AGENT
+            ? ConnectionType.CUSTOMER
+            : ConnectionType.AGENT;
 
         this.relayTrack(track, stream, connectionType, toType);
     }
 
     relayTrack(track, stream, fromType, toType) {
-        const targetConnection = toType === ConnectionType.FRONTEND
+        const targetConnection = toType === ConnectionType.AGENT
             ? this.frontendConnection
             : this.whatsappConnection;
 
@@ -143,7 +143,7 @@ export class AudioBridge {
         }
 
         // Store real track references so mixing relays can restore direct wires on deactivation.
-        if (fromType === ConnectionType.FRONTEND) {
+        if (fromType === ConnectionType.AGENT) {
             this._agentTrack = track;
 
             // When a new FRONTEND track arrives (agent reconnected), refresh the monitor's
@@ -154,13 +154,13 @@ export class AudioBridge {
 
             // In barge mode the WhatsApp relay's RTCAudioSink was bound to the previous
             // (now-ended) FRONTEND track.  Rebuild it so the customer still hears the mix.
-            if (this._whatsappMixingRelay && toType === ConnectionType.WHATSAPP) {
+            if (this._whatsappMixingRelay && toType === ConnectionType.CUSTOMER) {
                 this._rebuildWhatsappRelay(track);
                 return; // relay output is already on the WhatsApp sender — skip deliverTrack
             }
         }
 
-        if (fromType === ConnectionType.WHATSAPP) {
+        if (fromType === ConnectionType.CUSTOMER) {
             this._customerTrack = track;
             if (!this._silenceWatchdog || this._silenceWatchdog.trackId !== track.id) {
                 if (this._silenceWatchdog) this._silenceWatchdog.destroy();
@@ -189,7 +189,7 @@ export class AudioBridge {
         // If the agent was whispering privately (muted to the customer) before the
         // reconnect, the deliverTrack above just un-muted them.  Re-apply the silence
         // track so the customer does not accidentally hear the agent.
-        if (fromType === ConnectionType.FRONTEND && this._agentPrivate) {
+        if (fromType === ConnectionType.AGENT && this._agentPrivate) {
             this._reapplyAgentPrivate(); // async fire-and-forget — see method below
         }
     }
@@ -507,7 +507,7 @@ export class AudioBridge {
                     this._rebuildFrontendRelay(track);
                 } else {
                     console.log(`[AudioBridge] Re-relaying WhatsApp track to new frontend for call ${this.callId}: ${track.id}`);
-                    this.relayTrack(track, null, ConnectionType.WHATSAPP, ConnectionType.FRONTEND);
+                    this.relayTrack(track, null, ConnectionType.CUSTOMER, ConnectionType.AGENT);
                 }
                 return;
             }
@@ -523,10 +523,10 @@ export class AudioBridge {
         if (frontendBuffer.length > 0) {
             console.log(`[AudioBridge] Flushing ${frontendBuffer.length} buffered frontend tracks for call ${this.callId}`);
             frontendBuffer.forEach(({ track, stream }) => {
-                this.relayTrack(track, stream, ConnectionType.FRONTEND, ConnectionType.WHATSAPP);
+                this.relayTrack(track, stream, ConnectionType.AGENT, ConnectionType.CUSTOMER);
             });
             this.whatsappTracks.forEach(({ track, stream }) => {
-                this.relayTrack(track, stream, ConnectionType.WHATSAPP, ConnectionType.FRONTEND);
+                this.relayTrack(track, stream, ConnectionType.CUSTOMER, ConnectionType.AGENT);
             });
             this.frontendTracks = [...frontendBuffer];
             this.frontendConnection.audio.clearTrackBuffer();
@@ -535,10 +535,10 @@ export class AudioBridge {
         if (whatsappBuffer.length > 0) {
             console.log(`[AudioBridge] Flushing ${whatsappBuffer.length} buffered WhatsApp tracks for call ${this.callId}`);
             whatsappBuffer.forEach(({ track, stream }) => {
-                this.relayTrack(track, stream, ConnectionType.WHATSAPP, ConnectionType.FRONTEND);
+                this.relayTrack(track, stream, ConnectionType.CUSTOMER, ConnectionType.AGENT);
             });
             this.frontendTracks.forEach(({ track, stream }) => {
-                this.relayTrack(track, stream, ConnectionType.FRONTEND, ConnectionType.WHATSAPP);
+                this.relayTrack(track, stream, ConnectionType.AGENT, ConnectionType.CUSTOMER);
             });
             this.whatsappTracks = [...whatsappBuffer];
             this.whatsappConnection.audio.clearTrackBuffer();

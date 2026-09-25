@@ -41,7 +41,7 @@ export class ConnectionEventHandler {
         // wrongfully terminating a healthy call and releasing the wrong agent.
         if (userId) {
             const call = await CallRepository.findById(callId);
-            if (!call || String(call.user_id) !== String(userId)) {
+            if (!call || String(call.agent_id) !== String(userId)) {
                 console.log(`[ConnectionEventHandler] Ignoring stale FRONTEND_DISCONNECTED for call ${callId} — user ${userId} is not the current assigned agent`);
                 return;
             }
@@ -49,7 +49,7 @@ export class ConnectionEventHandler {
 
         console.log(`[ConnectionEventHandler] Frontend disconnected for call ${callId}`);
 
-        callLifecycleLogger.logDisconnected(callId, data.businessId, userId ?? null, {
+        callLifecycleLogger.logDisconnected(callId, data.tenantId, userId ?? null, {
             reason: data.reason ?? 'disconnect',
         }).catch(() => {});
 
@@ -91,10 +91,10 @@ export class ConnectionEventHandler {
                     // Previously the webhook's unconditional EventBus.emit served this role,
                     // but that path is now gated on finalizedByThisWebhook. The notification
                     // must be explicit here so the frontend closes the call UI promptly.
-                    if (data.businessId) {
+                    if (data.tenantId) {
                         EventBus.emit('call:terminated', {
                             callId,
-                            businessId: data.businessId,
+                            tenantId: data.tenantId,
                             reason: TerminationReason.AGENT_DISCONNECTED,
                             terminatedBy: TerminatedBy.SYSTEM,
                         });

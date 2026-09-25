@@ -1,118 +1,107 @@
 // src/persistence/CallRepository.js
 import connection from '../../config/dbConnection.js';
 
-function normalizeNumber(num) {
-    if (!num) return null;
-    return num.startsWith('+') ? num.slice(1) : num;
-}
+// A call is "active" for an agent while it is in any of these statuses.
+const ACTIVE_STATUSES = "('INITIATED', 'RINGING', 'IN_PROGRESS')";
+
+// A call is waiting for an agent in its queue: inbound, ringing, nobody
+// assigned, and not being handled by IVR (IVR-transferred calls are back in
+// state QUEUE and count as waiting).
+const WAITING_IN_QUEUE = `
+    status = 'RINGING'
+    AND agent_id IS NULL
+    AND direction = 'INBOUND'
+    AND (state IS NULL OR state = 'QUEUE')`;
 
 class CallRepository {
     // ── Queries ─────────────────────────────────────────────────────────────────
 
     async create(data) {
         const {
-            wacid = null,
-            user_id = null,
-            business_id,
-            business_number_id,
-            client_number_id = null,
-            ivr_menu_id = null,
+            tenant_id,
+            channel_id = null,
+            channel,
+            channel_address = null,
+            provider_call_id = null,
+            queue_id = null,
+            agent_id = null,
+            ivr_flow_id = null,
             state = null,
-            caller_number,
-            caller_name = null,
-            caller_username = null,
-            callee_number,
-            callee_name = null,
-            callee_username = null,
+            customer_address = null,
+            customer_address_type = null,
+            customer_name = null,
+            external_ref = null,
+            consumer_metadata = null,
             direction,
             type = 'AUDIO',
             status = 'INITIATED',
             ringing_at = null,
-            is_billable = true,
-            is_billed = false,
-            metadata = null
+            metadata = null,
         } = data;
 
-        const normalizedFrom = normalizeNumber(caller_number);
-        const normalizedTo = normalizeNumber(callee_number);
-
         const [result] = await connection.execute(`
-        INSERT INTO calls (
-            wacid,
-            business_id,
-            user_id,
-            business_number_id,
-            client_number_id,
-            ivr_menu_id,
-            state,
-            caller_number,
-            caller_name,
-            caller_username,
-            callee_number,
-            callee_name,
-            callee_username,
-            direction,
-            type,
-            status,
-            ringing_at,
-            is_billable,
-            is_billed,
-            metadata,
-            created_at,
-            updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
-    `, [
-            wacid,
-            business_id,
-            user_id,
-            business_number_id,
-            client_number_id,
-            ivr_menu_id,
-            state,
-            normalizedFrom,
-            caller_name,
-            caller_username,
-            normalizedTo,
-            callee_name,
-            callee_username,
-            direction,
-            type,
-            status,
-            ringing_at,
-            is_billable,
-            is_billed,
-            metadata ? JSON.stringify(metadata) : null
+            INSERT INTO calls (
+                tenant_id, channel_id, channel, channel_address, provider_call_id,
+                queue_id, agent_id, ivr_flow_id, state,
+                customer_address, customer_address_type, customer_name,
+                external_ref, consumer_metadata,
+                direction, type, status, ringing_at, metadata,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+        `, [
+            tenant_id, channel_id, channel, channel_address, provider_call_id,
+            queue_id, agent_id, ivr_flow_id, state,
+            customer_address, customer_address_type, customer_name,
+            external_ref, consumer_metadata ? JSON.stringify(consumer_metadata) : null,
+            direction, type, status, ringing_at, metadata ? JSON.stringify(metadata) : null,
         ]);
 
         return result.insertId;
     }
 
     async findById(callId) {
+        const [rows] = await connection.execute('SELECT * FROM calls WHERE id = ?', [callId]);
+        return rows[0] || null;
+    }
+
+    async findByProviderCallId(providerCallId, channel = 'WHATSAPP') {
         const [rows] = await connection.execute(
-            'SELECT * FROM calls WHERE id = ?',
-            [callId]
+            'SELECT * FROM calls WHERE channel = ? AND provider_call_id = ?',
+            [channel, providerCallId]
         );
         return rows[0] || null;
     }
 
-    async findByWacid(wacid) {
+    async findActiveInboundByCustomer(tenantId, customerAddress) {
+        if (!customerAddress) return null;
         const [rows] = await connection.execute(
-            'SELECT * FROM calls WHERE wacid = ?',
-            [wacid]
-        );
-        return rows[0] || null;
-    }
-
-    async findActiveInboundByClient(clientNumberId, businessId) {
-        const [rows] = await connection.execute(
-            `SELECT id, wacid FROM calls
-             WHERE client_number_id = ? AND business_id = ? AND direction = 'INBOUND'
+            `SELECT id, provider_call_id FROM calls
+             WHERE tenant_id = ? AND customer_address = ? AND direction = 'INBOUND'
                AND status IN ('RINGING', 'IN_PROGRESS')
              ORDER BY created_at DESC LIMIT 1`,
-            [clientNumberId, businessId]
+            [tenantId, customerAddress]
         );
         return rows[0] || null;
+    }
+
+    // Management API listing. Filters: status, agentId, externalRef, direction,
+    // from/to (created_at). Keyset pagination on id, newest first.
+    async listForTenant(tenantId, { status, agentId, externalRef, direction, from, to, beforeId, limit = 50 } = {}) {
+        const where = ['tenant_id = ?'];
+        const params = [tenantId];
+        if (status) { where.push('status = ?'); params.push(status); }
+        if (agentId) { where.push('agent_id = ?'); params.push(agentId); }
+        if (externalRef) { where.push('external_ref = ?'); params.push(externalRef); }
+        if (direction) { where.push('direction = ?'); params.push(direction); }
+        if (from) { where.push('created_at >= ?'); params.push(new Date(from)); }
+        if (to) { where.push('created_at < ?'); params.push(new Date(to)); }
+        if (beforeId) { where.push('id < ?'); params.push(beforeId); }
+        const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200));
+        const [rows] = await connection.execute(
+            `SELECT * FROM calls WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ${safeLimit}`,
+            params
+        );
+        return rows;
     }
 
     async findByIds(callIds) {
@@ -126,201 +115,185 @@ class CallRepository {
     }
 
     async getStatus(callId) {
-        const [rows] = await connection.execute(
-            'SELECT status FROM calls WHERE id = ?',
-            [callId]
-        );
+        const [rows] = await connection.execute('SELECT status FROM calls WHERE id = ?', [callId]);
         return rows[0]?.status || null;
     }
 
-    async getUserActiveCall(businessId, callId, userId) {
+    async getUserActiveCall(tenantId, callId, agentId) {
         const [rows] = await connection.execute(
             `SELECT * FROM calls
-             WHERE business_id = ?
+             WHERE tenant_id = ?
              AND id = ?
-             AND user_id = ?
+             AND agent_id = ?
              AND (
                  (status = 'IN_PROGRESS' AND state = 'ACTIVE')
                  OR (status IN ('INITIATED', 'RINGING') AND direction = 'OUTBOUND')
-                 -- An INBOUND call already claimed by this exact user_id (the WHERE
-                 -- clause above already guarantees that) but still RINGING — the
-                 -- "accept in flight" window in AgentEventHandler.handleAgentJoined:
-                 -- it claims the call and persists the FRONTEND connection's device_id
-                 -- well before waiting for the agent's audio track + the WhatsApp
-                 -- Accept API round-trip, which can take anywhere from ~0.5s up to
-                 -- several seconds. A reconnect/switch-here attempt landing in that
-                 -- window is legitimate (this user_id really does own this call) and
-                 -- must not be rejected just because status hasn't flipped to
-                 -- IN_PROGRESS yet.
+                 -- An INBOUND call already claimed by this agent but still RINGING —
+                 -- the accept-in-flight window in AgentEventHandler.handleAgentJoined
+                 -- (claim + device_id persisted before the agent's audio track and the
+                 -- provider accept round-trip complete). A reconnect landing there is
+                 -- legitimate and must not be rejected.
                  OR (status = 'RINGING' AND direction = 'INBOUND')
              )
              ORDER BY created_at DESC
              LIMIT 1`,
-            [businessId, callId, userId]
+            [tenantId, callId, agentId]
         );
         return rows[0] || null;
     }
 
-    async getInProgressCall(businessId, callId) {
+    async getInProgressCall(tenantId, callId) {
         const [rows] = await connection.execute(
-            `SELECT *
-             FROM calls
-             WHERE business_id = ?
-             AND id = ?
-             AND (status = 'IN_PROGRESS' AND state = 'ACTIVE')
-             ORDER BY created_at DESC
+            `SELECT * FROM calls
+             WHERE tenant_id = ? AND id = ? AND status = 'IN_PROGRESS' AND state = 'ACTIVE'
              LIMIT 1`,
-            [businessId, callId]
+            [tenantId, callId]
         );
         return rows[0] || null;
     }
 
-    async getOngoingCallsForBusiness(businessId) {
+    async getOngoingCallsForTenant(tenantId) {
         const [rows] = await connection.execute(
             `SELECT * FROM calls
-             WHERE business_id = ?
-             AND status IN ('INITIATED', 'RINGING', 'IN_PROGRESS')
+             WHERE tenant_id = ? AND status IN ${ACTIVE_STATUSES}
              ORDER BY created_at DESC`,
-            [businessId]
+            [tenantId]
         );
         return rows;
     }
 
-    async getOngoingCallsForAgent(businessId, userId) {
+    async getOngoingCallsForAgent(tenantId, agentId) {
         const [rows] = await connection.execute(
             `SELECT * FROM calls
-             WHERE business_id = ?
-               AND user_id = ?
-               AND status IN ('INITIATED', 'RINGING', 'IN_PROGRESS')
+             WHERE tenant_id = ? AND agent_id = ? AND status IN ${ACTIVE_STATUSES}
              ORDER BY created_at DESC`,
-            [businessId, userId]
+            [tenantId, agentId]
         );
         return rows;
     }
 
-    async hasUnassignedCalls(businessId) {
-        // Only counts regular (non-IVR) queued calls. IVR-transferred calls
-        // (ivr_menu_id IS NOT NULL AND state='QUEUE') are excluded because they
-        // have their own handler (assignTransferredCall) and should not block
-        // new PRIORITY/RECEPTIONIST calls from claiming an agent synchronously.
-        // Including them caused the coordinator to race with assignTransferredCall
-        // and attempt FRONTEND SDP creation on the wrong worker.
+    // Regular (non-IVR) calls waiting in a queue. IVR-transferred calls are
+    // excluded: they have their own assignment path (assignTransferredCall) and
+    // must not block a new call from claiming an agent synchronously.
+    async hasUnassignedCalls(queueId) {
         const [rows] = await connection.execute(
             `SELECT 1 FROM calls
-             WHERE business_id = ?
+             WHERE queue_id = ?
                AND status = 'RINGING'
-               AND user_id IS NULL
+               AND agent_id IS NULL
                AND direction = 'INBOUND'
-               AND ivr_menu_id IS NULL
-               AND (state IS NULL OR state NOT IN ('IVR'))
+               AND ivr_flow_id IS NULL
+               AND (state IS NULL OR state != 'IVR')
              LIMIT 1`,
-            [businessId]
+            [queueId]
         );
         return rows.length > 0;
     }
 
-    // Same WHERE shape as findOldestUnassignedCalls (both regular-queued and
-    // IVR-transferred-to-QUEUE calls) — used to surface a "N calls waiting"
-    // count to a plain agent, who otherwise has no visibility into calls
-    // unassigned to anyone (calls:list is scoped to their own userId only).
-    // Deliberately not hasUnassignedCalls's narrower IVR-excluding shape,
-    // which exists for a different, internal race-avoidance purpose — this
-    // count is a user-facing total, so it should count every call actually
-    // waiting for an agent, IVR-originated or not.
-    async countUnassignedCalls(businessId) {
+    // Every call waiting in a queue, IVR-originated or not — the user-facing
+    // "N calls waiting" count.
+    async countUnassignedCalls(queueId) {
         const [rows] = await connection.execute(
-            `SELECT COUNT(*) AS count FROM calls
-             WHERE business_id = ?
-               AND status = 'RINGING'
-               AND user_id IS NULL
-               AND direction = 'INBOUND'
-               AND (
-                     (ivr_menu_id IS NULL AND (state IS NULL OR state NOT IN ('IVR')))
-                  OR (ivr_menu_id IS NOT NULL AND state = 'QUEUE')
-               )`,
-            [businessId]
+            `SELECT COUNT(*) AS count FROM calls WHERE queue_id = ? AND ${WAITING_IN_QUEUE}`,
+            [queueId]
         );
         return Number(rows[0]?.count ?? 0);
     }
 
-    async findOldestUnassignedCalls(businessId, limit = 20) {
+    async findOldestUnassignedCalls(queueId, limit = 20) {
         const safeLimit = Math.max(1, Math.min(Number(limit) || 20, 100));
         const [rows] = await connection.execute(
-            `SELECT * FROM calls
-             WHERE business_id = ?
-               AND status = 'RINGING'
-               AND user_id IS NULL
-               AND direction = 'INBOUND'
-               AND (
-                     (ivr_menu_id IS NULL AND (state IS NULL OR state NOT IN ('IVR')))
-                  OR (ivr_menu_id IS NOT NULL AND state = 'QUEUE')
-               )
+            `SELECT * FROM calls WHERE queue_id = ? AND ${WAITING_IN_QUEUE}
              ORDER BY ringing_at ASC
              LIMIT ${safeLimit}`,
-            [businessId]
+            [queueId]
         );
         return rows;
     }
 
-    // Finds a RINGING call for the agent, with a 30-second IN_PROGRESS window to
-    // handle the push-notification race: a mobile agent can accept natively and
-    // send the accept event before the WebSocket connect handler queries. In that
-    // case the call has already flipped to IN_PROGRESS and a RINGING-only query
-    // would silently miss it. The 30-second cap prevents false positives for
-    // long-running active calls (e.g. agent reopens a browser tab mid-call).
-    async findPendingInboundCallForUser(businessId, userId) {
+    // A tenant's queues that have calls waiting, longest wait first — the order
+    // a freed agent should drain them in.
+    async findQueuesWithWaitingCalls(tenantId) {
+        const [rows] = await connection.execute(
+            `SELECT queue_id, MIN(ringing_at) AS oldest
+             FROM calls
+             WHERE tenant_id = ? AND queue_id IS NOT NULL AND ${WAITING_IN_QUEUE}
+             GROUP BY queue_id
+             ORDER BY oldest ASC`,
+            [tenantId]
+        );
+        return rows.map((r) => r.queue_id);
+    }
+
+    // Calls in a queue that count toward queues.max_active_calls: answered
+    // calls plus outbound calls still setting up, excluding one call.
+    async countOtherActiveCallsInQueue(queueId, excludeCallId = 0) {
+        const [rows] = await connection.execute(
+            `SELECT COUNT(*) AS count FROM calls
+             WHERE queue_id = ?
+               AND id != ?
+               AND (
+                   (status = 'IN_PROGRESS' AND state = 'ACTIVE')
+                   OR (status IN ('INITIATED', 'RINGING') AND direction = 'OUTBOUND')
+               )`,
+            [queueId, excludeCallId]
+        );
+        return Number(rows[0]?.count ?? 0);
+    }
+
+    // Finds a RINGING call for the agent, with a 30-second IN_PROGRESS window for
+    // the push-notification race: a mobile agent can accept natively before the
+    // socket connect handler queries, leaving the call already IN_PROGRESS.
+    async findPendingInboundCallForUser(tenantId, agentId) {
         const [rows] = await connection.execute(
             `SELECT *
              FROM calls
-             WHERE business_id = ?
-               AND user_id     = ?
-               AND direction   = 'INBOUND'
+             WHERE tenant_id = ?
+               AND agent_id  = ?
+               AND direction = 'INBOUND'
                AND (
                    status = 'RINGING'
                    OR (status = 'IN_PROGRESS' AND answered_at >= NOW() - INTERVAL 30 SECOND)
                )
              ORDER BY created_at ASC
              LIMIT 1`,
-            [businessId, userId]
+            [tenantId, agentId]
         );
         return rows[0] || null;
     }
 
-    // Returns calls that were IVR-transferred to an agent but the agent has not
-    // accepted within the per-menu timeout (default 60 s, per-menu via
-    // ivr_menus.agent_ring_timeout). Only RINGING calls with state=QUEUE and a
-    // non-null ivr_menu_id are considered — this is the exact state produced by
-    // IvrTransferHandler after a successful IVR-to-agent transfer.
+    // IVR-transferred calls whose assigned agent hasn't accepted within the
+    // flow's agent_ring_timeout (default 60 s) — exactly the state
+    // IvrTransferHandler leaves after a transfer to an agent.
     async findStuckIvrTransferredCalls() {
         const [rows] = await connection.execute(
-            `SELECT c.id, c.business_id, c.user_id, c.ivr_menu_id, c.ringing_at,
-                    COALESCE(im.agent_ring_timeout, 60) AS agent_ring_timeout
+            `SELECT c.id, c.tenant_id, c.agent_id, c.queue_id, c.ivr_flow_id, c.ringing_at,
+                    COALESCE(f.agent_ring_timeout, 60) AS agent_ring_timeout
              FROM calls c
-             LEFT JOIN ivr_menus im ON c.ivr_menu_id = im.id
+             LEFT JOIN ivr_flows f ON c.ivr_flow_id = f.id
              WHERE c.status  = 'RINGING'
                AND c.state   = 'QUEUE'
                AND c.direction = 'INBOUND'
-               AND c.user_id IS NOT NULL
-               AND c.ivr_menu_id IS NOT NULL
+               AND c.agent_id IS NOT NULL
+               AND c.ivr_flow_id IS NOT NULL
                AND c.ringing_at IS NOT NULL
-               AND c.ringing_at < DATE_SUB(NOW(), INTERVAL COALESCE(im.agent_ring_timeout, 60) SECOND)`
+               AND c.ringing_at < DATE_SUB(NOW(), INTERVAL COALESCE(f.agent_ring_timeout, 60) SECOND)`
         );
         return rows;
     }
 
     async findAllStuckCalls(ringingMinutes = 1) {
         const cutoff = new Date(Date.now() - ringingMinutes * 60 * 1000);
-
         const [rows] = await connection.execute(
-            `SELECT id, business_id, user_id, status, termination_reason
+            `SELECT id, tenant_id, agent_id, queue_id, status, termination_reason
              FROM calls
              WHERE (
                  (status = 'RINGING' AND ringing_at < ?
-                  -- IVR calls waiting for auto-accept: still in IVR state with no agent
-                  AND NOT (direction = 'INBOUND' AND user_id IS NULL AND state = 'IVR')
-                  -- IVR-transferred RINGING calls: handled exclusively by _runIvrRingCleanup
-                  -- to preserve the IVR_AGENT_NO_ANSWER termination reason regardless of timeout
-                  AND NOT (direction = 'INBOUND' AND user_id IS NOT NULL AND ivr_menu_id IS NOT NULL AND state = 'QUEUE')
+                  -- IVR calls waiting for auto-accept: still in IVR with no agent
+                  AND NOT (direction = 'INBOUND' AND agent_id IS NULL AND state = 'IVR')
+                  -- IVR-transferred RINGING calls: handled only by _runIvrRingCleanup,
+                  -- to keep the IVR_AGENT_NO_ANSWER reason regardless of timeout
+                  AND NOT (direction = 'INBOUND' AND agent_id IS NOT NULL AND ivr_flow_id IS NOT NULL AND state = 'QUEUE')
                  )
                  OR
                  (status = 'IN_PROGRESS' AND termination_reason IS NOT NULL)
@@ -331,31 +304,36 @@ class CallRepository {
         return rows;
     }
 
-    // Same predicate as findAllStuckCalls, scoped to one agent. Used by the
-    // on-demand /internal/calls/release-stale endpoint (see
-    // CallCleanupService.releaseStaleCallsForUser) so a stale call blocking an
-    // agent's availability toggle can be cleared immediately instead of
-    // waiting up to 30s for the next periodic scan. The IVR-auto-accept
-    // exclusion from findAllStuckCalls is omitted here since it only applies
-    // to user_id IS NULL rows, which can never match a user-scoped query.
-    async findStuckCallsForUser(userId, ringingMinutes = 1) {
+    // Same predicate as findAllStuckCalls, scoped to one agent, so a stale call
+    // blocking an agent can be released immediately.
+    async findStuckCallsForUser(agentId, ringingMinutes = 1) {
         const cutoff = new Date(Date.now() - ringingMinutes * 60 * 1000);
-
         const [rows] = await connection.execute(
-            `SELECT id, business_id, user_id, status, termination_reason
+            `SELECT id, tenant_id, agent_id, queue_id, status, termination_reason
              FROM calls
-             WHERE user_id = ?
+             WHERE agent_id = ?
                AND (
                    (status = 'RINGING' AND ringing_at < ?
-                    -- IVR-transferred RINGING calls: handled exclusively by _runIvrRingCleanup
-                    -- to preserve the IVR_AGENT_NO_ANSWER termination reason regardless of timeout
-                    AND NOT (direction = 'INBOUND' AND ivr_menu_id IS NOT NULL AND state = 'QUEUE')
+                    AND NOT (direction = 'INBOUND' AND ivr_flow_id IS NOT NULL AND state = 'QUEUE')
                    )
                    OR
                    (status = 'IN_PROGRESS' AND termination_reason IS NOT NULL)
                )
                AND status NOT IN ('TERMINATED', 'FAILED')`,
-            [userId, cutoff]
+            [agentId, cutoff]
+        );
+        return rows;
+    }
+
+    // Outbound intents never started by their agent (call:start seeds ringing_at).
+    async findExpiredOutboundIntents(minutes = 2) {
+        const cutoff = new Date(Date.now() - minutes * 60 * 1000);
+        const [rows] = await connection.execute(
+            `SELECT id, tenant_id, agent_id FROM calls
+             WHERE direction = 'OUTBOUND' AND status = 'INITIATED'
+               AND ringing_at IS NULL AND provider_call_id IS NULL
+               AND created_at < ?`,
+            [cutoff]
         );
         return rows;
     }
@@ -363,10 +341,7 @@ class CallRepository {
     // ── Updates ─────────────────────────────────────────────────────────────────
 
     async updateStatus(callId, status) {
-        await connection.execute(
-            'UPDATE calls SET status = ?, updated_at = NOW() WHERE id = ?',
-            [status, callId]
-        );
+        await connection.execute('UPDATE calls SET status = ?, updated_at = NOW() WHERE id = ?', [status, callId]);
     }
 
     // Returns true if the transition succeeded (row had expected status).
@@ -379,24 +354,13 @@ class CallRepository {
     }
 
     async updateState(callId, state) {
-        await connection.execute(
-            'UPDATE calls SET state = ?, updated_at = NOW() WHERE id = ?',
-            [state, callId]
-        );
+        await connection.execute('UPDATE calls SET state = ?, updated_at = NOW() WHERE id = ?', [state, callId]);
     }
 
-    // Marks a call IN_PROGRESS/IVR right after Meta's accept API call returns.
-    // Guarded (state = 'IVR') instead of the blind updateStatus+updateState pair it
-    // replaces, because acceptWhatsAppCall is a real ~400-600ms HTTP round-trip to
-    // Meta. For a trivial IVR menu (start node wired straight to a transfer node,
-    // no audio) the entire session — start, navigate, transfer to queue — can finish
-    // in single-digit milliseconds once the WHATSAPP peer connects, which happens
-    // BEFORE acceptWhatsAppCall's response comes back. An unguarded write here would
-    // then land after IvrTransferHandler already set state='QUEUE'/status='RINGING'
-    // and blindly revert the call back to IN_PROGRESS/IVR — stuck permanently,
-    // because no cleanup query matches status=IN_PROGRESS + state=IVR +
-    // termination_reason=NULL. The guard makes this a no-op once the call has
-    // already moved past IVR, instead of undoing that transition.
+    // Marks a call IN_PROGRESS/IVR right after the provider accept returns.
+    // Guarded on state='IVR': for a trivial flow the whole IVR session can finish
+    // (and move the call to QUEUE) before the ~0.5s accept round-trip returns; an
+    // unguarded write would then revert it to IN_PROGRESS/IVR permanently.
     async markIvrAutoAccepted(callId) {
         const [result] = await connection.execute(
             `UPDATE calls SET status = 'IN_PROGRESS', state = 'IVR', updated_at = NOW()
@@ -406,39 +370,32 @@ class CallRepository {
         return result.affectedRows > 0;
     }
 
-    async updateWacid(callId, wacid) {
+    async updateProviderCallId(callId, providerCallId) {
         await connection.execute(
-            'UPDATE calls SET wacid = ?, updated_at = NOW() WHERE id = ?',
-            [wacid, callId]
+            'UPDATE calls SET provider_call_id = ?, updated_at = NOW() WHERE id = ?',
+            [providerCallId, callId]
         );
     }
 
+    async updateQueue(callId, queueId) {
+        await connection.execute('UPDATE calls SET queue_id = ?, updated_at = NOW() WHERE id = ?', [queueId, callId]);
+    }
+
     async updateTimestamp(callId, field, timestamp = null) {
-        const validFields = ['connected_at', 'ringing_at', 'answered_at', 'ended_at'];
+        const validFields = ['ringing_at', 'answered_at', 'ended_at'];
         if (!validFields.includes(field)) {
             throw new Error(`Invalid timestamp field: ${field}`);
         }
         const value = timestamp || new Date();
-        await connection.execute(
-            `UPDATE calls SET ${field} = ?, updated_at = NOW() WHERE id = ?`,
-            [value, callId]
-        );
+        await connection.execute(`UPDATE calls SET ${field} = ?, updated_at = NOW() WHERE id = ?`, [value, callId]);
 
-        // answered_at can legitimately arrive from several independent writers (local
-        // accept flow, Meta's ACCEPTED webhook, IVR handoff) — any of them can land
-        // after another writer already finalized the call as NO_ANSWER. NO_ANSWER
-        // must never coexist with a non-null answered_at, so self-heal here once,
-        // covering every current and future caller instead of each call site
-        // remembering to check.
-        //
-        // .catch() is deliberate: several callers (e.g. AgentEventHandler's accept
-        // flow) run important logic — releasing agents, emitting call:success — right
-        // after this call, with no try/catch of their own around it. This correction
-        // is best-effort cosmetic cleanup; it must never be the reason a real accept
-        // or webhook-processing flow gets treated as failed.
+        // answered_at can arrive from several independent writers, any of which can
+        // land after another already finalized the call as NO_ANSWER. NO_ANSWER must
+        // never coexist with answered_at, so self-heal here. Best-effort: callers run
+        // important logic right after this without their own try/catch.
         if (field === 'answered_at') {
             await this.correctNoAnswerIfAnswered(callId).catch((err) =>
-                console.error(`[CallRepository] correctNoAnswerIfAnswered failed for call ${callId}:`, err.message)
+                console.error(`[CallRepository] correctNoAnswerIfAnswered failed for call ${callId}:`, err)
             );
         }
     }
@@ -448,24 +405,18 @@ class CallRepository {
         if (!validFields.includes(field)) {
             throw new Error(`Invalid duration field: ${field}`);
         }
+        await connection.execute(`UPDATE calls SET ${field} = ?, updated_at = NOW() WHERE id = ?`, [value, callId]);
+    }
+
+    async updateFailureDetails(callId, failureDetails) {
         await connection.execute(
-            `UPDATE calls SET ${field} = ?, updated_at = NOW() WHERE id = ?`,
-            [value, callId]
+            'UPDATE calls SET failure_details = ?, updated_at = NOW() WHERE id = ?',
+            [JSON.stringify(failureDetails), callId]
         );
     }
 
-    async updateCallbackData(callId, callbackData) {
-        await connection.execute(
-            `UPDATE calls SET callback_data = ?, updated_at = NOW() WHERE id = ?`,
-            [JSON.stringify(callbackData), callId]
-        );
-    }
-
-    // Patches terminated_by on an already-FAILED row when Meta's termination webhook
-    // arrives after a local detection path (e.g. CUSTOMER_NETWORK_LOSS) already set
-    // the status to FAILED. Phase 2 of finalizeCallAsFailed is blocked for FAILED rows,
-    // so terminated_by would otherwise stay as SYSTEM even though Meta's error code
-    // tells us whether the client or WhatsApp's relay was at fault.
+    // Patches terminated_by on an already-FAILED row when the provider's terminate
+    // webhook arrives after a local detection path already set FAILED.
     async updateTerminatedByIfFailed(callId, terminatedBy) {
         await connection.execute(
             `UPDATE calls SET terminated_by = ?, updated_at = NOW() WHERE id = ? AND status = 'FAILED'`,
@@ -474,10 +425,25 @@ class CallRepository {
     }
 
     async updateMetadata(callId, metadata = null) {
-        const serialized = metadata ? JSON.stringify(metadata) : null;
         const [result] = await connection.execute(
             'UPDATE calls SET metadata = ?, updated_at = NOW() WHERE id = ?',
-            [serialized, callId]
+            [metadata ? JSON.stringify(metadata) : null, callId]
+        );
+        return result.affectedRows > 0;
+    }
+
+    async updateConsumerFields(callId, { externalRef, consumerMetadata }) {
+        const sets = [];
+        const params = [];
+        if (externalRef !== undefined) { sets.push('external_ref = ?'); params.push(externalRef); }
+        if (consumerMetadata !== undefined) {
+            sets.push('consumer_metadata = ?');
+            params.push(consumerMetadata == null ? null : JSON.stringify(consumerMetadata));
+        }
+        if (!sets.length) return false;
+        const [result] = await connection.execute(
+            `UPDATE calls SET ${sets.join(', ')}, updated_at = NOW() WHERE id = ?`,
+            [...params, callId]
         );
         return result.affectedRows > 0;
     }
@@ -485,10 +451,10 @@ class CallRepository {
     async updateCallAgentIfCurrent(callId, oldAgentId, newAgentId) {
         const [result] = await connection.execute(
             `UPDATE calls
-             SET user_id = ?, updated_at = NOW()
+             SET agent_id = ?, updated_at = NOW()
              WHERE id = ?
-             AND user_id <=> ?
-             AND status IN ('INITIATED', 'RINGING', 'IN_PROGRESS')
+             AND agent_id <=> ?
+             AND status IN ${ACTIVE_STATUSES}
              AND (state IS NULL OR state != 'IVR')`,
             [newAgentId, callId, oldAgentId]
         );
@@ -497,88 +463,50 @@ class CallRepository {
 
     // ── Assignment ───────────────────────────────────────────────────────────────
 
-    async assignCallToAgentIfUnassigned(callId, userId) {
+    async assignCallToAgentIfUnassigned(callId, agentId) {
         const [result] = await connection.execute(
             `UPDATE calls
-             SET user_id = ?, updated_at = NOW()
+             SET agent_id = ?, updated_at = NOW()
              WHERE id = ?
-             AND user_id IS NULL
+             AND agent_id IS NULL
              AND status = 'RINGING'
              AND direction = 'INBOUND'
              AND (state IS NULL OR state != 'IVR')`,
-            [userId, callId]
+            [agentId, callId]
         );
         return result.affectedRows > 0;
     }
 
-    async assignCallToAgentIfEligible(callId, userId) {
+    async assignCallToAgentIfEligible(callId, agentId) {
         const [result] = await connection.execute(
             `UPDATE calls
-             SET user_id = ?, updated_at = NOW()
+             SET agent_id = ?, updated_at = NOW()
              WHERE id = ?
-             AND status IN ('INITIATED', 'RINGING', 'IN_PROGRESS')
-             AND (user_id IS NULL OR user_id = ?)
+             AND status IN ${ACTIVE_STATUSES}
+             AND (agent_id IS NULL OR agent_id = ?)
              AND (state IS NULL OR state != 'IVR')`,
-            [userId, callId, userId]
+            [agentId, callId, agentId]
         );
         return result.affectedRows > 0;
-    }
-
-    async hasActiveCall(businessId) {
-        const [rows] = await connection.execute(
-            `SELECT 1
-             FROM calls
-             WHERE business_id = ?
-             AND (
-                 (status = 'IN_PROGRESS' AND state = 'ACTIVE')
-                 OR (status IN ('INITIATED', 'RINGING') AND direction = 'OUTBOUND')
-             )
-             LIMIT 1`,
-            [businessId]
-        );
-        return rows.length > 0;
-    }
-
-    async hasOtherActiveCall(businessId, excludeCallId) {
-        const [rows] = await connection.execute(
-            `SELECT 1
-             FROM calls
-             WHERE business_id = ?
-             AND id != ?
-             AND (
-                 (status = 'IN_PROGRESS' AND state = 'ACTIVE')
-                 OR (status IN ('INITIATED', 'RINGING') AND direction = 'OUTBOUND')
-             )
-             LIMIT 1`,
-            [businessId, excludeCallId]
-        );
-        return rows.length > 0;
     }
 
     async hasAgentActiveCall(agentId, excludeCallId) {
         const [rows] = await connection.execute(
-            `SELECT 1
-             FROM calls
-             WHERE user_id = ?
-             AND id != ?
-             AND status IN ('INITIATED', 'RINGING', 'IN_PROGRESS')
+            `SELECT 1 FROM calls
+             WHERE agent_id = ? AND id != ? AND status IN ${ACTIVE_STATUSES}
              LIMIT 1`,
             [agentId, excludeCallId]
         );
         return rows.length > 0;
     }
 
-    // Returns the ID of an older RINGING call already assigned to this agent (id < excludeCallId).
-    // Used by the delivery handler to detect race-condition double-assignments: if a prior
-    // ringing call exists, the current one is the late/wrong assignment and should be suppressed.
+    // An older RINGING call already assigned to this agent (id < excludeCallId) —
+    // used by delivery to detect a race double-assignment and suppress the later one.
     async getConflictingRingingCallId(agentId, excludeCallId) {
         const [rows] = await connection.execute(
             `SELECT id FROM calls
-             WHERE user_id = ?
-             AND id < ?
-             AND status = 'RINGING'
-             ORDER BY id DESC
-             LIMIT 1`,
+             WHERE agent_id = ? AND id < ? AND status = 'RINGING'
+             ORDER BY id DESC LIMIT 1`,
             [agentId, excludeCallId]
         );
         return rows.length > 0 ? rows[0].id : null;
@@ -586,123 +514,73 @@ class CallRepository {
 
     // ── Termination & Finalization ───────────────────────────────────────────────
 
-    async markCallFailed(callId, errors = null, biz_opaque_callback_data = null, reason = 'PROVIDER_ERROR', terminatedBy = 'SYSTEM') {
-        const callbackData = {};
-        if (errors) callbackData.errors = errors;
-        if (biz_opaque_callback_data) callbackData.biz_opaque_callback_data = biz_opaque_callback_data;
+    #failureDetails(errors, providerCallbackData) {
+        const details = {};
+        if (errors) details.errors = errors;
+        if (providerCallbackData) details.provider_callback_data = providerCallbackData;
+        return Object.keys(details).length ? JSON.stringify(details) : null;
+    }
 
+    async markCallFailed(callId, errors = null, providerCallbackData = null, reason = 'PROVIDER_ERROR', terminatedBy = 'SYSTEM') {
         await connection.execute(
             `UPDATE calls
-             SET status = ?,
-                 state = ?,
-                 termination_reason = ?,
-                 terminated_by = ?,
-                 callback_data = ?,
-                 ended_at = COALESCE(ended_at, NOW()),
-                 updated_at = NOW()
+             SET status = 'FAILED', state = NULL,
+                 termination_reason = ?, terminated_by = ?, failure_details = ?,
+                 ended_at = COALESCE(ended_at, NOW()), updated_at = NOW()
              WHERE id = ?`,
-            [
-                'FAILED', null, reason, terminatedBy,
-                Object.keys(callbackData).length ? JSON.stringify(callbackData) : null,
-                callId
-            ]
+            [reason, terminatedBy, this.#failureDetails(errors, providerCallbackData), callId]
         );
     }
 
-    async markCallFailedIfNotFinal(callId, errors = null, biz_opaque_callback_data = null, reason = 'PROVIDER_ERROR', terminatedBy = 'SYSTEM') {
-        const callbackData = {};
-        if (errors) callbackData.errors = errors;
-        if (biz_opaque_callback_data) callbackData.biz_opaque_callback_data = biz_opaque_callback_data;
-
+    async markCallFailedIfNotFinal(callId, errors = null, providerCallbackData = null, reason = 'PROVIDER_ERROR', terminatedBy = 'SYSTEM') {
         const [result] = await connection.execute(
             `UPDATE calls
-             SET status = ?,
-                 state = ?,
-                 termination_reason = ?,
-                 terminated_by = ?,
-                 callback_data = ?,
-                 ended_at = COALESCE(ended_at, NOW()),
-                 updated_at = NOW()
-             WHERE id = ?
-               AND status NOT IN ('TERMINATED', 'FAILED')`,
-            [
-                'FAILED', null, reason, terminatedBy,
-                Object.keys(callbackData).length ? JSON.stringify(callbackData) : null,
-                callId
-            ]
+             SET status = 'FAILED', state = NULL,
+                 termination_reason = ?, terminated_by = ?, failure_details = ?,
+                 ended_at = COALESCE(ended_at, NOW()), updated_at = NOW()
+             WHERE id = ? AND status NOT IN ('TERMINATED', 'FAILED')`,
+            [reason, terminatedBy, this.#failureDetails(errors, providerCallbackData), callId]
         );
         return result.affectedRows > 0;
     }
 
-    async terminateCall(callId, terminationReason = null, terminatedBy = 'BUSINESS', endedAt = null) {
-        await connection.execute(
-            `UPDATE calls
-             SET status = ?,
-                 state = ?,
-                 termination_reason = ?,
-                 terminated_by = ?,
-                 ended_at = COALESCE(?, NOW()),
-                 updated_at = NOW()
-             WHERE id = ?
-               AND status NOT IN ('TERMINATED', 'FAILED')`,
-            ['TERMINATED', null, terminationReason, terminatedBy, endedAt, callId]
-        );
+    async terminateCall(callId, terminationReason = null, terminatedBy = 'AGENT', endedAt = null) {
+        await this.terminateCallIfNotTerminated(callId, terminationReason, terminatedBy, endedAt);
     }
 
-    // Same as terminateCall but returns true if this call caused the status transition.
-    // Use when the caller needs to know whether it "won" the race to terminate the call.
-    async terminateCallIfNotTerminated(callId, terminationReason = null, terminatedBy = 'BUSINESS', endedAt = null) {
+    // Returns true if this call caused the status transition — for callers that
+    // need to know whether they "won" the race to terminate the call.
+    async terminateCallIfNotTerminated(callId, terminationReason = null, terminatedBy = 'AGENT', endedAt = null) {
         const [result] = await connection.execute(
             `UPDATE calls
-             SET status = ?,
-                 state = ?,
-                 termination_reason = ?,
-                 terminated_by = ?,
-                 ended_at = COALESCE(?, NOW()),
-                 updated_at = NOW()
-             WHERE id = ?
-               AND status NOT IN ('TERMINATED', 'FAILED')`,
-            ['TERMINATED', null, terminationReason, terminatedBy, endedAt, callId]
+             SET status = 'TERMINATED', state = NULL,
+                 termination_reason = ?, terminated_by = ?,
+                 ended_at = COALESCE(?, NOW()), updated_at = NOW()
+             WHERE id = ? AND status NOT IN ('TERMINATED', 'FAILED')`,
+            [terminationReason, terminatedBy, endedAt, callId]
         );
         return result.affectedRows > 0;
     }
 
-    // Self-healing correction: a call can be locally marked NO_ANSWER (terminated
-    // before our own accept flow observed answered_at) and then have Meta's ACCEPTED
-    // webhook arrive afterward, proving the call was in fact answered. NO_ANSWER
-    // with a non-null answered_at is a contradiction — flip it to COMPLETED so
-    // reporting/billing reflects what actually happened. Scoped tightly (only
-    // touches rows currently mislabeled) so it can't affect any other outcome.
+    // NO_ANSWER with a non-null answered_at is a contradiction (a late ACCEPTED
+    // proved the call was answered) — flip it to COMPLETED.
     async correctNoAnswerIfAnswered(callId) {
         const [result] = await connection.execute(
             `UPDATE calls
-             SET termination_reason = 'COMPLETED',
-                 updated_at = NOW()
-             WHERE id = ?
-               AND status = 'TERMINATED'
-               AND termination_reason = 'NO_ANSWER'
-               AND answered_at IS NOT NULL`,
+             SET termination_reason = 'COMPLETED', updated_at = NOW()
+             WHERE id = ? AND status = 'TERMINATED'
+               AND termination_reason = 'NO_ANSWER' AND answered_at IS NOT NULL`,
             [callId]
         );
         return result.affectedRows > 0;
     }
 
-    // Idempotent finalization driven by Meta's termination webhook.
-    //
-    // Two phases, deliberately separate:
-    //
-    //   Phase 1 — always fill missing timestamps/durations (COALESCE preserves any
-    //   value already there). Safe to re-run; webhook can deliver durations LATE
-    //   (e.g. after the row was already marked TERMINATED by an IVR or system path)
-    //   and still patch them in.
-    //
-    //   Phase 2 — guarded status transition. Only flips TERMINATED/FAILED when the
-    //   row isn't already terminal, so side-effect fan-out (agent release, lifecycle
-    //   log, redis event) fires exactly once across racing handlers.
-    //
-    // `terminated_by` is COALESCE'd: preserve whoever stamped it first (the business
-    // socket path sets BUSINESS; the webhook otherwise sets CLIENT/SYSTEM).
-    //
+    // Idempotent finalization driven by the provider's terminate event.
+    //   Phase 1 always fills missing timestamps/durations (COALESCE) — late
+    //   durations can still be patched onto an already-terminated row.
+    //   Phase 2 is the guarded status flip, so side effects fire exactly once
+    //   across racing handlers. terminated_by is COALESCE'd: whoever stamped it
+    //   first (the agent hang-up path) wins.
     // Returns true iff THIS call caused the status transition.
     async finalizeFromWebhook(callId, {
         status = 'TERMINATED',
@@ -713,7 +591,6 @@ class CallRepository {
         callDuration = null,
         ringingDuration = null,
     } = {}) {
-        // Phase 1: always fill missing details (idempotent, no status guard)
         await connection.execute(
             `UPDATE calls
              SET ended_at         = COALESCE(?, ended_at),
@@ -725,7 +602,6 @@ class CallRepository {
             [endedAt, answeredAt, callDuration, ringingDuration, callId]
         );
 
-        // Phase 2: guarded status flip (only fires side effects once)
         const [result] = await connection.execute(
             `UPDATE calls
              SET status             = ?,
@@ -734,47 +610,23 @@ class CallRepository {
                  terminated_by      = COALESCE(terminated_by, ?),
                  ended_at           = COALESCE(ended_at, NOW()),
                  updated_at = NOW()
-             WHERE id = ?
-               AND status NOT IN ('TERMINATED', 'FAILED')`,
+             WHERE id = ? AND status NOT IN ('TERMINATED', 'FAILED')`,
             [status, terminationReason, terminatedBy, callId]
         );
 
-        // Phase 1 writes answered_at unconditionally (no status guard) — if the call
-        // was already finalized as NO_ANSWER by a local path before this webhook
-        // arrived, Phase 2 just preserved that reason via COALESCE (it only guards
-        // against re-finalizing, not against this exact contradiction). Meta's
-        // answeredAt now proves the call WAS answered, so correct it here — this
-        // writer bypasses updateTimestamp()'s own self-heal, hence the direct call.
-        //
-        // .catch() is deliberate: every caller of finalizeFromWebhook uses this
-        // return value (or the side effects gated on it — agent release, call
-        // reassignment, queue updates) with no wrapping try/catch at the call site.
-        // This correction is best-effort; it must never turn an otherwise-successful
-        // finalize into a rejected promise that skips that downstream logic.
+        // Phase 1 may have just written answered_at onto a row a local path already
+        // finalized as NO_ANSWER — correct that contradiction. Best-effort.
         await this.correctNoAnswerIfAnswered(callId).catch((err) =>
-            console.error(`[CallRepository] correctNoAnswerIfAnswered failed for call ${callId}:`, err.message)
+            console.error(`[CallRepository] correctNoAnswerIfAnswered failed for call ${callId}:`, err)
         );
 
         return result.affectedRows > 0;
     }
 
-    // Finalize a call as FAILED with PROVIDER_ERROR termination reason.
-    //
-    // Intentionally distinct from finalizeFromWebhook because FAILED has
-    // different semantics:
-    //
-    //   • termination_reason is FORCE-written as PROVIDER_ERROR — never
-    //     COALESCE'd. A previously-stored COMPLETED or NO_ANSWER reason
-    //     must be corrected when Meta later reports a provider failure.
-    //
-    //   • FAILED can UPGRADE a row that is already TERMINATED. Meta's
-    //     ordering is not guaranteed: a FAILED status event may arrive
-    //     after the call was already closed as TERMINATED/COMPLETED. The
-    //     final truth is FAILED — that is what must be persisted.
-    //
-    //   • FAILED is idempotent: a row that is already FAILED is left
-    //     untouched (affectedRows = 0 → returns false).
-    //
+    // Finalize as FAILED/PROVIDER_ERROR. Distinct from finalizeFromWebhook:
+    // the reason is force-written (a provider failure must not be masked by an
+    // earlier COMPLETED/NO_ANSWER), and FAILED may upgrade a TERMINATED row since
+    // the provider's ordering isn't guaranteed. Idempotent on already-FAILED rows.
     // Returns true iff this call caused the status transition.
     async finalizeCallAsFailed(callId, {
         terminatedBy = null,
@@ -783,7 +635,6 @@ class CallRepository {
         callDuration = null,
         ringingDuration = null,
     } = {}) {
-        // Phase 1: fill missing timing details (same idempotent COALESCE logic)
         await connection.execute(
             `UPDATE calls
              SET ended_at         = COALESCE(?, ended_at),
@@ -795,8 +646,6 @@ class CallRepository {
             [endedAt, answeredAt, callDuration, ringingDuration, callId]
         );
 
-        // Phase 2: upgrade to FAILED — allowed even from TERMINATED, blocked only
-        // when already FAILED (idempotency).
         const [result] = await connection.execute(
             `UPDATE calls
              SET status             = 'FAILED',
@@ -805,8 +654,7 @@ class CallRepository {
                  terminated_by      = COALESCE(terminated_by, ?),
                  ended_at           = COALESCE(ended_at, NOW()),
                  updated_at = NOW()
-             WHERE id = ?
-               AND status != 'FAILED'`,
+             WHERE id = ? AND status != 'FAILED'`,
             [terminatedBy, callId]
         );
         return result.affectedRows > 0;
@@ -814,42 +662,12 @@ class CallRepository {
 
     // ── Batch ────────────────────────────────────────────────────────────────────
 
-    // Guard against overwriting calls already correctly finalized as FAILED
-    // (e.g. calls where Meta reported PROVIDER_ERROR and finalizeCallAsFailed
-    // already force-wrote that reason). Without this guard, the periodic
-    // cleanup would downgrade FAILED+PROVIDER_ERROR to TERMINATED+NO_ANSWER.
-    //
-    // Real bug found and fixed (2026-09-01, live-reported: a mobile agent's
-    // call ended itself moments after they accepted it). This function's own
-    // WHERE clause never re-checked status beyond "not already terminal" —
-    // it terminated whatever the caller listed, unconditionally, even if a
-    // call had since moved on. The periodic stuck-call sweep
-    // (CallCleanupService._runPeriodicCleanup → findAllStuckCalls) selects
-    // stale-RINGING calls by `ringing_at` age, tags them reason=NO_ANSWER,
-    // and queues them — but nothing re-verified a call was STILL ringing by
-    // the time this UPDATE actually ran. A genuine agent accept
-    // (RINGING → IN_PROGRESS) landing in that window got silently wiped back
-    // to TERMINATED/NO_ANSWER right after succeeding — indistinguishable,
-    // from the client's side, from "the business ended the call." Made
-    // measurably more likely by the recent tightening of the sweep's poll
-    // interval/cutoff to sit much closer to the real accept-latency window
-    // this same call flow can take on a cold client start.
-    //
-    // [requireStatus]: opt-in, not a blanket restriction — this function is
-    // also used for whole-batch termination where "the call's exact current
-    // status" is deliberately irrelevant (server shutdown draining every
-    // live call regardless of state; a business disabling call-center mode
-    // and ending everything). Only CallCleanupService's NO_ANSWER path
-    // (the one actually racing against a real accept) passes this.
-    // Returns the subset of `callIds` that actually ended up TERMINATED —
-    // i.e. excluding any that `requireStatus` protected from this specific
-    // call (see this function's own doc comment above). Callers that go on
-    // to emit a `call:terminated` event or release resources per-call MUST
-    // use this returned list, not the original `callIds` — emitting that
-    // event for a call this UPDATE didn't actually touch is exactly the
-    // "silent no-op" restated as a "silent wrong event" instead, which would
-    // leave the underlying bug's user-visible symptom unfixed even with the
-    // DB-level race closed.
+    // Terminates a batch of calls. Never overwrites calls already finalized.
+    // `requireStatus` (opt-in) additionally requires each call to still be in
+    // that status — the periodic NO_ANSWER sweep passes 'RINGING' so a genuine
+    // accept landing between its scan and this UPDATE isn't wiped back to
+    // TERMINATED. Returns the ids that actually ended up TERMINATED; callers
+    // emitting per-call events must use that list, not the input.
     async batchTerminateCalls(callIds, terminationReason, terminatedBy, requireStatus = null) {
         if (!callIds || callIds.length === 0) return [];
 
@@ -858,12 +676,9 @@ class CallRepository {
 
         await connection.execute(
             `UPDATE calls
-             SET status = 'TERMINATED',
-                 state = NULL,
-                 termination_reason = ?,
-                 terminated_by = ?,
-                 ended_at = COALESCE(ended_at, NOW()),
-                 updated_at = NOW()
+             SET status = 'TERMINATED', state = NULL,
+                 termination_reason = ?, terminated_by = ?,
+                 ended_at = COALESCE(ended_at, NOW()), updated_at = NOW()
              WHERE id IN (${placeholders})
                AND status NOT IN ('TERMINATED', 'FAILED')
                ${statusGuard}`,
@@ -872,11 +687,7 @@ class CallRepository {
                 : [terminationReason, terminatedBy, ...callIds]
         );
 
-        if (!requireStatus) {
-            // No guard was applied, so nothing could have been excluded —
-            // skip the extra round trip and trust the original list.
-            return callIds;
-        }
+        if (!requireStatus) return callIds;
 
         const [rows] = await connection.execute(
             `SELECT id FROM calls WHERE id IN (${placeholders}) AND status = 'TERMINATED'`,

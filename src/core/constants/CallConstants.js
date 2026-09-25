@@ -2,10 +2,28 @@
 // Single source of truth for all call-domain enumerations.
 // Import from here — never use raw string literals for these values.
 
+// What a media leg is for. The customer leg's transport is Channel, not this.
 export const ConnectionType = Object.freeze({
-    FRONTEND: 'FRONTEND',
-    WHATSAPP: 'WHATSAPP',
+    AGENT: 'AGENT',
+    CUSTOMER: 'CUSTOMER',
     MONITOR: 'MONITOR',
+});
+
+// How the customer is connected (calls.channel / channels.type).
+export const Channel = Object.freeze({
+    WHATSAPP: 'WHATSAPP',
+    SIP: 'SIP',
+});
+
+export const CustomerAddressType = Object.freeze({
+    E164: 'E164',
+    WHATSAPP_USER: 'WHATSAPP_USER',
+    SIP_URI: 'SIP_URI',
+});
+
+export const AgentRole = Object.freeze({
+    AGENT: 'AGENT',
+    SUPERVISOR: 'SUPERVISOR',
 });
 
 export const CallStatus = Object.freeze({
@@ -35,13 +53,12 @@ export const AssignmentType = Object.freeze({
     IVR: 'IVR',
 });
 
-export const RoutingStrategy = Object.freeze({
-    QUEUE: 'QUEUE',
-    PRIORITY: 'PRIORITY',
-    RECEPTIONIST: 'RECEPTIONIST',
-    // IVR is NOT a routing strategy — it is a per-number overlay that activates
-    // alongside any of the above strategies when an active IVR menu exists for
-    // the called business number.
+// queues.strategy — which member is offered the next call. IVR is not a
+// strategy: it's an overlay chosen per channel before the call reaches a queue.
+export const QueueStrategy = Object.freeze({
+    RING_ALL: 'RING_ALL',       // every available member at once; first accept wins
+    ROUND_ROBIN: 'ROUND_ROBIN', // one available member at a time, rotating
+    PRIORITY: 'PRIORITY',       // lowest queue_members.priority first, then agent id
 });
 
 export const TerminationReason = Object.freeze({
@@ -69,15 +86,15 @@ export const TerminationReason = Object.freeze({
     // entry with status=FAILED). Always paired with CallStatus.FAILED.
     PROVIDER_ERROR: 'PROVIDER_ERROR',
     // IVR transferred the call to an agent but the agent did not accept within
-    // the configured ring timeout (default 60 s, per-menu via ivr_menus.agent_ring_timeout).
+    // the configured ring timeout (default 60 s, per-flow via ivr_flows.agent_ring_timeout).
     IVR_AGENT_NO_ANSWER: 'IVR_AGENT_NO_ANSWER',
 });
 
 export const TerminatedBy = Object.freeze({
-    BUSINESS: 'BUSINESS',
-    SYSTEM: 'SYSTEM',   // our infrastructure caused the failure (agent disconnect, cleanup, IVR error)
-    CLIENT: 'CLIENT',   // the WhatsApp end-user caused it (hang-up, rejected, no answer)
-    WHATSAPP: 'WHATSAPP', // WhatsApp/Meta reported a provider-level failure via webhook errors array
+    AGENT: 'AGENT',       // an agent or supervisor ended it
+    SYSTEM: 'SYSTEM',     // our infrastructure caused the failure (agent disconnect, cleanup, IVR error)
+    CUSTOMER: 'CUSTOMER', // the customer caused it (hang-up, rejected, no answer)
+    PROVIDER: 'PROVIDER', // the channel provider (Meta, SIP carrier) reported a failure
 });
 
 export const InitiatorType = Object.freeze({
@@ -86,9 +103,9 @@ export const InitiatorType = Object.freeze({
     SYSTEM: 'system',
 });
 
-// Internal error objects written to callback_data.errors when our server detects
+// Internal error objects written to failure_details.errors when our server detects
 // a call failure before Meta's termination webhook arrives. Follow the same
-// { code, title, details } shape as Meta error objects so callback_data.errors
+// { code, title, details } shape as Meta error objects so failure_details.errors
 // is a uniform array regardless of whether the error came from us or Meta.
 // Codes use the 90000 range — Meta uses 1380xx — so the source is unambiguous.
 export const InternalErrorCodes = Object.freeze({
@@ -100,8 +117,8 @@ export const InternalErrorCodes = Object.freeze({
     }),
     CUSTOMER_NETWORK_LOSS: Object.freeze({
         code: 90002,
-        title: 'Customer network loss — no incoming audio from WhatsApp client',
-        details: 'Server-side silence watchdog detected sustained RTP silence from the WhatsApp client beyond the configured threshold.',
+        title: 'Customer network loss — no incoming audio from the customer',
+        details: 'Server-side silence watchdog detected sustained RTP silence from the customer leg beyond the configured threshold.',
         source: 'SYSTEM',
     }),
 });

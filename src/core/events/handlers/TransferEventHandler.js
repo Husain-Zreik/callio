@@ -1,17 +1,17 @@
 // src/core/events/handlers/TransferEventHandler.js
+// Moves a live call to another agent — named directly, or picked from a queue
+// by the queue's strategy. Also used by supervisors to assign an unassigned call.
 import CallRepository from '../../../persistence/CallRepository.js';
 import AgentRepository from '../../../persistence/AgentRepository.js';
-import UserGroupRepository from '../../../persistence/UserGroupRepository.js';
+import QueueRepository from '../../../persistence/QueueRepository.js';
 import CallConnectionRepository from '../../../persistence/CallConnectionRepository.js';
-import OneSignalService from '../../../push/OneSignalService.js';
-import { NotificationPresets, NotificationIcons, absoluteUrl } from '../../../push/notificationPresets.js';
 import EventBus from '../../EventBus.js';
 import { agentAssignmentCoordinator } from '../../routing/AgentAssignmentCoordinator.js';
-import { callAgentAssignmentService } from '../../routing/CallAgentAssignmentService.js';
+import { queueRouter } from '../../routing/QueueRouter.js';
 import { callLifecycleLogger } from '../../calls/CallLifecycleLogger.js';
 import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
 import { sdpCoordinator } from '../../../media/webrtc/SDPCoordinator.js';
-import { ConnectionType, CallDirection, AssignmentType } from '../../constants/CallConstants.js';
+import { ConnectionType, AssignmentType, AgentRole, InitiatorType } from '../../constants/CallConstants.js';
 import { IncomingCallPayload } from '../../calls/IncomingCallPayload.js';
 
 export class TransferEventHandler {
@@ -19,236 +19,134 @@ export class TransferEventHandler {
     async handleCallTransferred(data) {
         const {
             callId,
-            oldAgentId,
             newAgentId,
-            oldAgentName,
-            businessId,
+            tenantId,
             assignorId,
-            assignorName,
             targetType = 'agent',
-            targetGroupId = null,
+            targetQueueId = null,
         } = data;
 
-        console.log(
-            `[TransferEventHandler] Transferring call ${callId} from ${oldAgentId} ` +
-            `using targetType=${targetType}`
-        );
+        console.log(`[TransferEventHandler] Transferring call ${callId} using targetType=${targetType}`);
 
         try {
             const call = await CallRepository.findById(callId);
-            if (!call) throw new Error('Call not found');
+            if (!call || String(call.tenant_id) !== String(tenantId)) throw new Error('Call not found');
 
-            const resolvedTarget = await this._resolveTransferTarget({
-                businessId,
-                targetType,
-                targetGroupId,
-                newAgentId,
+            // The current agent comes from the call row, never from the client.
+            const oldAgentId = call.agent_id ?? null;
+            const [oldAgent, assignor] = await Promise.all([
+                oldAgentId ? AgentRepository.findById(oldAgentId) : null,
+                assignorId ? AgentRepository.findById(assignorId) : null,
+            ]);
+
+            const resolved = await this._resolveTransferTarget({
+                tenantId, targetType, targetQueueId, newAgentId, excludeAgentId: oldAgentId,
             });
 
-            if (String(call.user_id) === String(resolvedTarget.newAgentId)) {
+            if (oldAgentId && String(oldAgentId) === String(resolved.newAgentId)) {
+                await agentAssignmentCoordinator.releaseAgentIfIdle(resolved.newAgentId);
                 throw new Error('Call is already assigned to this agent');
             }
-            if (oldAgentId && String(oldAgentId) === String(resolvedTarget.newAgentId)) {
-                throw new Error('Cannot transfer call to the same agent');
-            }
 
-            const moved = call.user_id == null
-                ? await CallRepository.assignCallToAgentIfUnassigned(callId, resolvedTarget.newAgentId)
-                : await CallRepository.updateCallAgentIfCurrent(callId, call.user_id, resolvedTarget.newAgentId);
+            const moved = oldAgentId == null
+                ? await CallRepository.assignCallToAgentIfUnassigned(callId, resolved.newAgentId)
+                : await CallRepository.updateCallAgentIfCurrent(callId, oldAgentId, resolved.newAgentId);
             if (!moved) {
-                await agentAssignmentCoordinator.releaseAgentIfIdle(resolvedTarget.newAgentId);
+                await agentAssignmentCoordinator.releaseAgentIfIdle(resolved.newAgentId);
                 throw new Error('Call transfer conflict: call state changed during transfer');
             }
-            await callAgentAssignmentService.markAgentAsLastAssigned(businessId, resolvedTarget.newAgentId);
-
-            if (call.user_id) await agentAssignmentCoordinator.releaseAgentIfIdle(call.user_id);
-
-            // Close old FRONTEND, create new SDP offer for new agent
-            await peerRegistry.closePeerConnection(callId, ConnectionType.FRONTEND);
-            await CallConnectionRepository.cleanupConnection(callId, ConnectionType.FRONTEND);
-            const sdpOffer = await sdpCoordinator.createSDPOffer(callId, ConnectionType.FRONTEND);
-
-            const wasUnassigned = call.user_id == null;
-            const transferredFrom = wasUnassigned
-                ? { id: assignorId, name: assignorName, isAssignment: true }
-                : { id: oldAgentId, name: oldAgentName, isAssignment: false };
-            const assignedBy = (!wasUnassigned && String(assignorId) !== String(oldAgentId))
-                ? { id: assignorId, name: assignorName }
-                : null;
-
-            const initiatorType = await AgentRepository.resolveTransferInitiatorType(businessId, assignorId);
-
-            const transferData = {
-                callId,
-                wacid: call.wacid,
-                businessId,
-                oldAgentId: wasUnassigned ? null : oldAgentId,
-                userId: resolvedTarget.newAgentId,
-                agentName: resolvedTarget.newAgent?.name,
-                agentEmail: resolvedTarget.newAgent?.email,
-                assignmentType: AssignmentType.TRANSFERRED,
-                transferredFrom,
-                assignedBy,
-                transferTarget: {
-                    type: resolvedTarget.targetType,
-                    groupId: resolvedTarget.targetGroupId,
-                },
-                callerId: call.direction === CallDirection.INBOUND ? call.client_number_id : call.business_number_id,
-                callerName: call.caller_name,
-                callerUsername: call.caller_username,
-                callerNumber: call.caller_number,
-                calleeId: call.direction === CallDirection.OUTBOUND ? call.client_number_id : call.business_number_id,
-                calleeName: call.callee_name,
-                calleeUsername: call.callee_username,
-                calleeNumber: call.callee_number,
-                status: call.status,
-                direction: call.direction,
-                startedAt: call.created_at,
-                ringingAt: call.ringing_at,
-                answeredAt: call.answered_at,
-                sdpOffer,
-            };
-
-            try {
-                // Mirrors mobile's ringing-screen phrasing exactly: when a
-                // manager (someone other than the previous agent) triggered
-                // the transfer, credit both — "by {manager} from {previous
-                // agent}"; when the previous agent transferred their own
-                // call, `assignedBy` is null and naming them twice would be
-                // redundant, so just "from {previous agent}". Replaces the
-                // old hardcoded `oldAgentName`, which was also flatly wrong
-                // for a manager-initiated transfer and undefined for a plain
-                // queue pickup (no previous agent at all in that case).
-                const transferText = assignedBy?.name
-                    ? `has been transferred to you by ${assignedBy.name} from ${transferredFrom.name}`
-                    : `has been transferred to you from ${transferredFrom.name}`;
-                // A phone-less (bsuid-only) caller has no caller_number —
-                // prefer their WhatsApp username over the literal "(null)" a
-                // bare number interpolation would otherwise render.
-                const callerLabel = call.caller_number
-                    ? `${call.caller_name} (${call.caller_number})`
-                    : call.caller_username
-                        ? `${call.caller_name} (@${call.caller_username})`
-                        : call.caller_name;
-                const notificationResult = await OneSignalService.sendToUsers(
-                    resolvedTarget.newAgentId,
-                    'Call Transferred to You',
-                    `Call from ${callerLabel} ${transferText}`,
-                    {
-                        type: 'call_transfer', callId: call.wacid,
-                        callerName: call.caller_name, callerUsername: call.caller_username, callerNumber: call.caller_number,
-                        businessId, assignedUserId: resolvedTarget.newAgentId,
-                        transferredFrom, assignedBy,
-                        isCallCenter: true, timestamp: new Date().toISOString(),
-                    },
-                    {
-                        url: absoluteUrl('/call-center'),
-                        icon: NotificationIcons.call,
-                        payload: {
-                            ...NotificationPresets.transferredCall,
-                            buttons: [
-                                { id: 'answer',  text: 'Answer'  },
-                                { id: 'decline', text: 'Decline' },
-                            ],
-                        },
-                    }
-                );
-                console.log(`[TransferEventHandler] ✅ Notification sent: ${notificationResult.recipients} device(s)`);
-            } catch (notificationError) {
-                console.error(`[TransferEventHandler] ❌ Notification error:`, notificationError.message);
+            if (resolved.queueId && String(resolved.queueId) !== String(call.queue_id)) {
+                await CallRepository.updateQueue(callId, resolved.queueId);
             }
 
-            // Room management delegated to serverListeners via EventBus
-            // (keeps the service layer free of WebSocket transport dependencies).
-            EventBus.emit('call:room:broadcast', { callId, event: 'call:terminated', data: { callId, reason: 'Reconnected on another device.' } });
-            EventBus.emit('call:room:leave', { userId: oldAgentId, callId });
-            EventBus.emit('call:room:join', { userId: resolvedTarget.newAgentId, callId });
+            if (oldAgentId) await agentAssignmentCoordinator.releaseAgentIfIdle(oldAgentId);
+
+            // Replace the AGENT leg: close the old agent's peer, offer a fresh one to the new agent.
+            await peerRegistry.closePeerConnection(callId, ConnectionType.AGENT);
+            await CallConnectionRepository.cleanupConnection(callId, ConnectionType.AGENT);
+            const sdpOffer = await sdpCoordinator.createSDPOffer(callId, ConnectionType.AGENT);
+
+            const wasUnassigned = oldAgentId == null;
+            const transferredFrom = wasUnassigned
+                ? { id: assignor?.id ?? null, name: assignor?.name ?? null, isAssignment: true }
+                : { id: oldAgentId, name: oldAgent?.name ?? null, isAssignment: false };
+            const assignedBy = (!wasUnassigned && assignor && String(assignor.id) !== String(oldAgentId))
+                ? { id: assignor.id, name: assignor.name }
+                : null;
+            const initiatorType = !assignor ? InitiatorType.SYSTEM
+                : assignor.role === AgentRole.SUPERVISOR ? InitiatorType.SUPERVISOR : InitiatorType.AGENT;
+
+            // The old agent's clients drop the call; the new agent's join its room.
+            EventBus.emit('call:room:broadcast', { callId, event: 'call:terminated', data: { callId, reason: 'transferred' } });
+            if (oldAgentId) EventBus.emit('call:room:leave', { userId: oldAgentId, callId });
+            EventBus.emit('call:room:join', { userId: resolved.newAgentId, callId });
 
             await callLifecycleLogger.logTransferred(
-                callId, businessId,
-                wasUnassigned ? null : oldAgentId, resolvedTarget.newAgentId,
+                callId, tenantId,
+                oldAgentId, resolved.newAgentId,
                 {
-                    assignor_id: assignorId,
-                    assignor_name: assignorName,
+                    assignor_id: assignor?.id ?? null,
+                    assignor_name: assignor?.name ?? null,
                     assignor_type: initiatorType,
                     was_unassigned: wasUnassigned,
-                    target_type: resolvedTarget.targetType,
-                    target_group_id: resolvedTarget.targetGroupId,
+                    target_type: resolved.targetType,
+                    to_queue_id: resolved.queueId,
                 },
-                { userId: assignorId ?? null, type: initiatorType }
+                { userId: assignor?.id ?? null, type: initiatorType }
             );
-            await callLifecycleLogger.logAssigned(callId, businessId, resolvedTarget.newAgentId, {
+            await callLifecycleLogger.logAssigned(callId, tenantId, resolved.newAgentId, {
                 assignment_type: wasUnassigned ? AssignmentType.DIRECT : AssignmentType.TRANSFERRED,
             });
 
-            EventBus.emit('call:incoming', new IncomingCallPayload(transferData));
-            EventBus.emit('call:transferred', transferData);
-            await agentAssignmentCoordinator.emitQueueUpdate(businessId);
+            const updatedCall = await CallRepository.findById(callId);
+            const payload = IncomingCallPayload.fromCall(updatedCall, {
+                agentId: resolved.newAgentId,
+                agentName: resolved.newAgent?.name ?? null,
+                sdpOffer,
+                assignmentType: AssignmentType.TRANSFERRED,
+                transferredFrom,
+                assignedBy,
+            });
+            EventBus.emit('call:incoming', payload);
+            EventBus.emit('call:transferred', {
+                ...payload,
+                tenantId,
+                oldAgentId,
+                userId: resolved.newAgentId,
+                targetQueueId: resolved.queueId,
+                transferTarget: { type: resolved.targetType, queueId: resolved.queueId },
+            });
+            await agentAssignmentCoordinator.emitQueueUpdate(tenantId);
 
-            console.log(`[TransferEventHandler] ✅ Call ${callId} transferred successfully`);
+            console.log(`[TransferEventHandler] ✅ Call ${callId} transferred to agent ${resolved.newAgentId}`);
         } catch (error) {
             console.error(`[TransferEventHandler] Failed to transfer call ${callId}:`, error.message);
             throw error;
         }
     }
 
-    async _resolveTransferTarget({ businessId, targetType, targetGroupId, newAgentId }) {
-        if (targetType === 'group' || (!newAgentId && targetGroupId)) {
-            if (!targetGroupId) {
-                throw new Error('Missing target group');
-            }
+    // Claims the target agent (AVAILABLE → ON_CALL). Returns
+    // { targetType, queueId, newAgentId, newAgent }.
+    async _resolveTransferTarget({ tenantId, targetType, targetQueueId, newAgentId, excludeAgentId }) {
+        if (targetType === 'queue' || (!newAgentId && targetQueueId)) {
+            if (!targetQueueId) throw new Error('Missing target queue');
+            const queue = await QueueRepository.findForTenant(targetQueueId, tenantId);
+            if (!queue || queue.status !== 'ACTIVE') throw new Error('Target queue not found for this tenant');
 
-            const group = await UserGroupRepository.findByIdForBusiness(targetGroupId, businessId);
-            if (!group) {
-                throw new Error('Target group not found for this business');
-            }
-
-            const availableGroupAgents = await UserGroupRepository.getAvailableCallCenterAgentsForGroup(
-                businessId,
-                targetGroupId
-            );
-            if (!availableGroupAgents.length) {
-                throw new Error('No available call-center agents in the selected group');
-            }
-
-            const selectedAgent = await callAgentAssignmentService.pickAgentForGroup(
-                businessId,
-                Number(targetGroupId),
-                availableGroupAgents,
-                async (agentId) => AgentRepository.claimAgentIfAvailable(agentId)
-            );
-            if (!selectedAgent) {
-                throw new Error('Could not claim an available group agent');
-            }
-
-            return {
-                targetType: 'group',
-                targetGroupId: Number(targetGroupId),
-                newAgentId: selectedAgent.id,
-                newAgent: selectedAgent,
-            };
+            const agent = await queueRouter.claimMemberForTransfer(queue, excludeAgentId);
+            if (!agent) throw new Error('No available agents in the selected queue');
+            return { targetType: 'queue', queueId: queue.id, newAgentId: agent.id, newAgent: agent };
         }
 
-        if (!newAgentId) {
-            throw new Error('Missing target agent');
-        }
+        if (!newAgentId) throw new Error('Missing target agent');
 
-        const targetAgentBusinessId = await AgentRepository.getUserBusinessId(newAgentId);
-        if (!targetAgentBusinessId || String(targetAgentBusinessId) !== String(businessId)) {
-            throw new Error('Target agent does not belong to this business');
+        const target = await AgentRepository.findById(newAgentId);
+        if (!target || String(target.tenant_id) !== String(tenantId)) {
+            throw new Error('Target agent does not belong to this tenant');
         }
-
-        const claimed = await AgentRepository.claimAgentIfAvailable(newAgentId);
-        if (!claimed) {
+        if (!await AgentRepository.claimAgentIfAvailable(newAgentId)) {
             throw new Error('Target agent is not available');
         }
-
-        const newAgent = await AgentRepository.findUserById(newAgentId);
-        return {
-            targetType: 'agent',
-            targetGroupId: null,
-            newAgentId,
-            newAgent,
-        };
+        return { targetType: 'agent', queueId: null, newAgentId: target.id, newAgent: target };
     }
 }

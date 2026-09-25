@@ -12,6 +12,8 @@ import EventBus from '../EventBus.js';
 import IvrRepository from '../../persistence/IvrRepository.js';
 import CallRepository from '../../persistence/CallRepository.js';
 import AgentRepository from '../../persistence/AgentRepository.js';
+import QueueRepository from '../../persistence/QueueRepository.js';
+import { queueRouter } from '../routing/QueueRouter.js';
 import { callLifecycleLogger } from '../calls/CallLifecycleLogger.js';
 import { IvrAudioPlayer } from '../../media/playback/IvrAudioPlayer.js';
 import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinator.js';
@@ -19,7 +21,7 @@ import { callEventHandler } from '../events/CallEventHandler.js';
 import { queueAudioCoordinator } from '../../media/playback/QueueAudioCoordinator.js';
 import { sdpCoordinator } from '../../media/webrtc/SDPCoordinator.js';
 import { resolveStoragePath } from '../../infra/storage/StorageResolver.js';
-import { RoutingStrategy, ConnectionType } from '../constants/CallConstants.js';
+import { ConnectionType, AgentAvailability } from '../constants/CallConstants.js';
 
 class IvrTransferHandler {
 
@@ -27,23 +29,28 @@ class IvrTransferHandler {
      * Execute the full transfer flow after IVR completes with action='transferred'.
      *
      * @param {string}   callId
-     * @param {object}   callMeta       { businessId, businessNumberId }
+     * @param {object}   callMeta       { tenantId, channelId, queueId }
      * @param {object}   transferData   node data from the ivr_transfer node
      * @param {object}   sessionSnap    { sender, whatsappPc, audioSource }
      * @param {Function} stopSession    (outcome: string) => Promise<void>  bound to the active session
      */
     async handle(callId, callMeta, transferData, sessionSnap, stopSession) {
         const { sender, whatsappPc, audioSource } = sessionSnap;
-        const businessId = callMeta.businessId ?? null;
-        const targetType = transferData?.targetType ?? 'queue';
-        const targetId = transferData?.targetId ? Number(transferData.targetId) : null;
+        const tenantId = callMeta.tenantId ?? null;
+        // Transfer targets are an agent or a queue ('group' is accepted as a queue
+        // for flows authored before queues existed). A queue node with no target
+        // means the channel's inbound queue.
+        const rawTargetType = String(transferData?.targetType ?? 'queue').toLowerCase();
+        const targetType = rawTargetType === 'agent' ? 'agent' : 'queue';
+        const rawTargetId = transferData?.targetId ? Number(transferData.targetId) : null;
+        const targetId = targetType === 'queue' ? (rawTargetId ?? callMeta.queueId ?? null) : rawTargetId;
 
         // ── 1. Availability check ──────────────────────────────────────────────
         let availability = 'available';
         try {
-            availability = await AgentRepository.checkTargetAvailability(targetType, targetId, businessId);
+            availability = await this._targetAvailability(targetType, targetId, tenantId);
         } catch (err) {
-            console.error(`[IvrTransferHandler] checkTargetAvailability failed for call ${callId}:`, err.message);
+            console.error(`[IvrTransferHandler] Target availability check failed for call ${callId}:`, err);
         }
         console.log(`[IvrTransferHandler] Target availability for call ${callId}: ${availability}`);
 
@@ -55,13 +62,13 @@ class IvrTransferHandler {
 
         // ── 3. Handle offline target ───────────────────────────────────────────
         if (availability === 'offline' && offlineAction !== 'queue') {
-            await this._playOnceAndAct(callId, offlineAudioFileId, offlineAction, audioSource, stopSession, businessId);
+            await this._playOnceAndAct(callId, offlineAudioFileId, offlineAction, audioSource, stopSession, tenantId);
             return;
         }
 
         // ── 4. Handle busy target with non-queue action ────────────────────────
         if (availability === 'busy' && (busyAction === 'hangup' || busyAction === 'replay')) {
-            await this._playOnceAndAct(callId, busyAudioFileId, busyAction, audioSource, stopSession, businessId);
+            await this._playOnceAndAct(callId, busyAudioFileId, busyAction, audioSource, stopSession, tenantId);
             return;
         }
 
@@ -74,7 +81,7 @@ class IvrTransferHandler {
         // could open a window where DB state='IVR' but the session was already gone.
         //
         // That also means this call becomes visible to assignOldestUnassignedCall's
-        // queue scan (findOldestUnassignedCalls matches state='QUEUE', user_id IS NULL,
+        // queue scan (findOldestUnassignedCalls matches state='QUEUE', agent_id IS NULL,
         // ordered by ringing_at) from this point on. Three things it expects to
         // already reflect this transfer if it grabs the call before we assign it
         // ourselves below:
@@ -92,12 +99,14 @@ class IvrTransferHandler {
         await CallRepository.updateTimestamp(callId, 'ringing_at').catch((err) =>
             console.error(`[IvrTransferHandler] Failed to reset ringing_at for call ${callId}:`, err.message)
         );
-        await this._persistTransferRoutingScope(callId, targetType, targetId).catch((err) =>
-            console.warn(`[IvrTransferHandler] Failed to persist transfer routing scope for call ${callId}:`, err.message)
-        );
+        if (targetType === 'queue' && targetId && String(targetId) !== String(callMeta.queueId)) {
+            await CallRepository.updateQueue(callId, targetId).catch((err) =>
+                console.warn(`[IvrTransferHandler] Failed to move call ${callId} to queue ${targetId}:`, err)
+            );
+        }
         await sdpCoordinator.createSDPOffer(
             callId,
-            ConnectionType.FRONTEND,
+            ConnectionType.AGENT,
             callEventHandler.handleCallEvent,
         ).catch((err) =>
             console.error(`[IvrTransferHandler] FRONTEND SDP pre-creation failed for call ${callId}:`, err.message)
@@ -105,11 +114,11 @@ class IvrTransferHandler {
 
         // For busy+wait: play the node's busyAudio as the queue hold music override
         const busyAudioOverridePath = (availability === 'busy' && busyAudioFileId)
-            ? await this._resolveAudioFileId(busyAudioFileId, businessId).catch(() => null)
+            ? await this._resolveAudioFileId(busyAudioFileId, tenantId).catch(() => null)
             : null;
 
-        if (businessId) {
-            await callLifecycleLogger.logIvrTransferred(callId, businessId, {
+        if (tenantId) {
+            await callLifecycleLogger.logIvrTransferred(callId, tenantId, {
                 target_type: targetType,
                 target_id: targetId,
                 availability,
@@ -118,9 +127,10 @@ class IvrTransferHandler {
             }).catch(() => { });
         }
 
-        if (sender && whatsappPc && businessId) {
+        if (sender && whatsappPc && tenantId) {
             queueAudioCoordinator.startQueueAudio(
-                callId, businessId, sender, whatsappPc, busyAudioOverridePath,
+                callId, tenantId, sender, whatsappPc, busyAudioOverridePath,
+                targetType === 'queue' ? targetId : (callMeta.queueId ?? null),
             ).catch((err) =>
                 console.warn(`[IvrTransferHandler] QueueAudioCoordinator start failed for call ${callId}:`, err.message)
             );
@@ -131,22 +141,37 @@ class IvrTransferHandler {
         // Notify dashboards
         EventBus.emit('call:ivr_transferred', {
             callId,
-            businessId,
-            businessNumberId: callMeta.businessNumberId ?? null,
+            tenantId,
+            channelId: callMeta.channelId ?? null,
         });
 
         // Fetch full call record for the agent assignment payload
         const callRecord = await IvrRepository.findCallRecord(callId).catch(() => null);
 
-        if (businessId && callRecord) {
+        if (tenantId && callRecord) {
             await agentAssignmentCoordinator.assignTransferredCall(
-                callId, callRecord, businessId, targetType, targetId,
+                callId, callRecord, tenantId, targetType, targetId,
             ).catch((err) =>
                 console.error(`[IvrTransferHandler] assignTransferredCall error for call ${callId}:`, err.message)
             );
-        } else if (businessId) {
-            await agentAssignmentCoordinator.emitQueueUpdate(businessId).catch(() => { });
+        } else if (tenantId) {
+            await agentAssignmentCoordinator.emitQueueUpdate(tenantId).catch(() => { });
         }
+    }
+
+    // 'available' (someone can take it now), 'busy' (members exist but all
+    // ON_CALL) or 'offline'.
+    async _targetAvailability(targetType, targetId, tenantId) {
+        if (targetType === 'agent') {
+            const agent = targetId ? await AgentRepository.findById(targetId) : null;
+            if (!agent || String(agent.tenant_id) !== String(tenantId)) return 'offline';
+            if (agent.availability === AgentAvailability.AVAILABLE) return 'available';
+            return agent.availability === AgentAvailability.ON_CALL ? 'busy' : 'offline';
+        }
+        const queue = targetId ? await QueueRepository.findForTenant(targetId, tenantId) : null;
+        const stats = await queueRouter.availabilityStats(queue, tenantId);
+        if (stats.available > 0) return 'available';
+        return stats.on_call > 0 ? 'busy' : 'offline';
     }
 
     // ── Internals ──────────────────────────────────────────────────────────────
@@ -161,9 +186,9 @@ class IvrTransferHandler {
      * @param {object}   audioSource   RTCAudioSource
      * @param {Function} stopSession
      */
-    async _playOnceAndAct(callId, audioFileId, nextAction, audioSource, stopSession, businessId = null) {
+    async _playOnceAndAct(callId, audioFileId, nextAction, audioSource, stopSession, tenantId = null) {
         if (audioFileId && audioSource) {
-            const audioPath = await this._resolveAudioFileId(audioFileId, businessId);
+            const audioPath = await this._resolveAudioFileId(audioFileId, tenantId);
             if (audioPath) {
                 try {
                     const player = new IvrAudioPlayer(audioSource);
@@ -187,53 +212,10 @@ class IvrTransferHandler {
      * @param {number} audioFileId
      * @returns {Promise<string|null>}
      */
-    async _resolveAudioFileId(audioFileId, businessId = null) {
-        const file = await IvrRepository.findAudioFile(Number(audioFileId), businessId);
+    async _resolveAudioFileId(audioFileId, tenantId = null) {
+        const file = await IvrRepository.findAudioFile(Number(audioFileId), tenantId);
         if (!file?.storage_key) return null;
         return resolveStoragePath(file);
-    }
-
-    async _persistTransferRoutingScope(callId, targetType, targetId) {
-        const call = await CallRepository.findById(callId);
-        if (!call) return;
-
-        let metadata = null;
-        if (call.metadata && typeof call.metadata === 'object') {
-            metadata = call.metadata;
-        } else if (typeof call.metadata === 'string') {
-            try { metadata = JSON.parse(call.metadata); } catch { metadata = null; }
-        }
-        if (!metadata || typeof metadata !== 'object') metadata = {};
-
-        const normalizedTargetType = String(targetType || 'queue').toLowerCase();
-        const normalizedTargetId = Number.isFinite(Number(targetId)) ? Number(targetId) : null;
-
-        const routing = normalizedTargetType === 'agent' || normalizedTargetType === 'group'
-            ? {
-                strategy: RoutingStrategy.RECEPTIONIST,
-                assignmentStrategy: RoutingStrategy.RECEPTIONIST,
-                receptionistTargetType: normalizedTargetType,
-                receptionistTargetId: normalizedTargetId,
-                receptionistAgentId: normalizedTargetType === 'agent' ? normalizedTargetId : null,
-                receptionistGroupId: normalizedTargetType === 'group' ? normalizedTargetId : null,
-                priorityMode: null,
-                priorityGroupId: null,
-                priorityAgentIds: [],
-            }
-            : {
-                strategy: RoutingStrategy.QUEUE,
-                assignmentStrategy: RoutingStrategy.QUEUE,
-                receptionistTargetType: null,
-                receptionistTargetId: null,
-                receptionistAgentId: null,
-                receptionistGroupId: null,
-                priorityMode: null,
-                priorityGroupId: null,
-                priorityAgentIds: [],
-            };
-
-        metadata.routing = routing;
-        await CallRepository.updateMetadata(callId, metadata);
     }
 }
 

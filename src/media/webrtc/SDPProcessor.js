@@ -1,4 +1,8 @@
 // src/media/webrtc/SDPProcessor.js
+// SDP handling per leg. The customer leg gets the provider-specific munging
+// (today WhatsApp: telephone-event kept for DTMF, codec trimming); agent and
+// monitor legs are plain browser WebRTC.
+import { ConnectionType } from "../../core/constants/CallConstants.js";
 
 export class SDPProcessor {
     async createOffer(peerConnection, connectionType) {
@@ -6,7 +10,7 @@ export class SDPProcessor {
         await peerConnection.setLocalDescription(offer);
 
         let sdp = peerConnection.localDescription.sdp;
-        if (connectionType === 'WHATSAPP') {
+        if (connectionType === ConnectionType.CUSTOMER) {
             sdp = this.processWhatsAppSDP(sdp, { optimize: true });
         }
 
@@ -14,18 +18,18 @@ export class SDPProcessor {
     }
 
     async createAnswer(peerConnection, sdpOffer, connectionType) {
-        if (connectionType === 'WHATSAPP') {
+        if (connectionType === ConnectionType.CUSTOMER) {
             const telLines = sdpOffer.split(/\r?\n/).filter(l =>
                 /telephone-event|^m=audio/i.test(l)
             );
             console.log(`[SDP:sanitize] WhatsApp offer audio/tel lines:\n  ${telLines.join('\n  ')}`);
         }
 
-        const sanitizedOffer = connectionType === 'WHATSAPP'
+        const sanitizedOffer = connectionType === ConnectionType.CUSTOMER
             ? this.processWhatsAppSDP(sdpOffer, { sanitize: true })
             : sdpOffer;
 
-        if (connectionType === 'WHATSAPP') {
+        if (connectionType === ConnectionType.CUSTOMER) {
             const telLines = sanitizedOffer.split(/\r?\n/).filter(l =>
                 /telephone-event|^m=audio/i.test(l)
             );
@@ -42,7 +46,7 @@ export class SDPProcessor {
 
     async processAnswer(peerConnection, sdpAnswer, connectionType) {
         try {
-            const processedSdp = connectionType === 'WHATSAPP'
+            const processedSdp = connectionType === ConnectionType.CUSTOMER
                 ? this.processWhatsAppSDP(sdpAnswer)
                 : sdpAnswer;
 

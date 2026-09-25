@@ -14,7 +14,10 @@ class RoomManager {
         // every other worker's lookup below is just a harmless no-op miss.
         this.io.on('call:clear_socket_binding', (socketId, callId) => {
             const socket = this.io.sockets.sockets.get(socketId);
-            if (socket && String(socket.callId) === String(callId)) delete socket.callId;
+            if (socket && String(socket.callId) === String(callId)) {
+                delete socket.callId;
+                socket.isMonitoring = false;
+            }
         });
     }
 
@@ -25,7 +28,10 @@ class RoomManager {
     _clearRemoteSocketCallId(socketId, callId) {
         const localSocket = this.io.sockets.sockets.get(socketId);
         if (localSocket) {
-            if (String(localSocket.callId) === String(callId)) delete localSocket.callId;
+            if (String(localSocket.callId) === String(callId)) {
+                delete localSocket.callId;
+                localSocket.isMonitoring = false;
+            }
             return;
         }
         this.io.serverSideEmit('call:clear_socket_binding', socketId, callId);
@@ -56,12 +62,23 @@ class RoomManager {
 
     // ── Business broadcasts ───────────────────────────────────────────────────
 
-    broadcastToBusiness(businessId, event, data) {
-        this.io.to(`business:${businessId}`).emit(event, data);
+    broadcastToTenant(tenantId, event, data) {
+        this.io.to(`tenant:${tenantId}`).emit(event, data);
     }
 
-    broadcastToManagers(businessId, event, data) {
-        this.io.to(`managers:${businessId}`).emit(event, data);
+    // Several agents at once (e.g. the members a RING_ALL call is offered to).
+    emitToUsers(userIds, event, data) {
+        const rooms = [...new Set((userIds || []).map((id) => `user:${id}`))];
+        if (rooms.length) this.io.to(rooms).emit(event, data);
+    }
+
+    async addUsersToCallRoom(userIds, callId) {
+        const rooms = [...new Set((userIds || []).map((id) => `user:${id}`))];
+        if (rooms.length) await this.io.in(rooms).socketsJoin(`call:${callId}`);
+    }
+
+    broadcastToSupervisors(tenantId, event, data) {
+        this.io.to(`supervisors:${tenantId}`).emit(event, data);
     }
 
     // ── Domain broadcasts ─────────────────────────────────────────────────────
@@ -76,12 +93,12 @@ class RoomManager {
         socket.join(`user:${userId}`);
     }
 
-    joinBusinessRoom(socket, businessId) {
-        socket.join(`business:${businessId}`);
+    joinTenantRoom(socket, tenantId) {
+        socket.join(`tenant:${tenantId}`);
     }
 
-    joinManagerRoom(socket, businessId) {
-        socket.join(`managers:${businessId}`);
+    joinSupervisorRoom(socket, tenantId) {
+        socket.join(`supervisors:${tenantId}`);
     }
 
     joinCallRoom(socket, callId) {
@@ -98,6 +115,14 @@ class RoomManager {
     }
 
     // ── Cross-worker room management ──────────────────────────────────────────
+
+    // Takes one socket out of a call wherever in the cluster it lives: leaves
+    // the room (adapter-wide) and clears its call binding.
+    async detachSocketFromCall(socketId, callId) {
+        if (!socketId || !callId) return;
+        await this.io.in(socketId).socketsLeave(`call:${callId}`);
+        this._clearRemoteSocketCallId(socketId, callId);
+    }
 
     async addUserToCallRoom(userId, callId) {
         // io.in(room).socketsJoin() broadcasts the join instruction through the

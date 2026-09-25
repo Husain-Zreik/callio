@@ -1,0 +1,93 @@
+// src/persistence/ChannelRepository.js
+// Customer-facing lines (WhatsApp numbers, SIP DIDs) and their credentials.
+import connection from '../../config/dbConnection.js';
+import { decryptJson, encryptJson } from '../infra/crypto/secretBox.js';
+
+const CHANNEL_COLUMNS = `id, tenant_id, external_ref, type, display_name, address, provider_account_id,
+    sip_trunk_id, inbound_queue_id, recording_enabled, status`;
+
+class ChannelRepository {
+    async findById(channelId) {
+        if (!channelId) return null;
+        const [rows] = await connection.execute(
+            `SELECT ${CHANNEL_COLUMNS} FROM channels WHERE id = ? LIMIT 1`,
+            [channelId]
+        );
+        return rows[0] ?? null;
+    }
+
+    async findForTenant(channelId, tenantId) {
+        const [rows] = await connection.execute(
+            `SELECT ${CHANNEL_COLUMNS} FROM channels WHERE id = ? AND tenant_id = ? LIMIT 1`,
+            [channelId, tenantId]
+        );
+        return rows[0] ?? null;
+    }
+
+    async findByExternalRef(tenantId, externalRef) {
+        const [rows] = await connection.execute(
+            `SELECT ${CHANNEL_COLUMNS} FROM channels WHERE tenant_id = ? AND external_ref = ? LIMIT 1`,
+            [tenantId, externalRef]
+        );
+        return rows[0] ?? null;
+    }
+
+    async listForTenant(tenantId) {
+        const [rows] = await connection.execute(
+            `SELECT ${CHANNEL_COLUMNS} FROM channels WHERE tenant_id = ? ORDER BY id ASC`,
+            [tenantId]
+        );
+        return rows;
+    }
+
+    // Inbound WhatsApp webhooks identify the line by Meta's phone_number_id.
+    async findActiveWhatsAppByPhoneNumberId(phoneNumberId) {
+        const [rows] = await connection.execute(
+            `SELECT ${CHANNEL_COLUMNS} FROM channels
+             WHERE type = 'WHATSAPP' AND provider_account_id = ? AND status = 'ACTIVE' LIMIT 1`,
+            [String(phoneNumberId)]
+        );
+        return rows[0] ?? null;
+    }
+
+    // Inbound SIP calls identify the line by the dialled DID.
+    async findActiveSipByAddress(address) {
+        const [rows] = await connection.execute(
+            `SELECT ${CHANNEL_COLUMNS} FROM channels
+             WHERE type = 'SIP' AND address = ? AND status = 'ACTIVE' LIMIT 1`,
+            [address]
+        );
+        return rows[0] ?? null;
+    }
+
+    async getCredentials(channelId) {
+        const [rows] = await connection.execute('SELECT credentials FROM channels WHERE id = ?', [channelId]);
+        return rows[0]?.credentials ? decryptJson(rows[0].credentials) : null;
+    }
+
+    async upsert(tenantId, externalRef, fields) {
+        const {
+            type, display_name = null, address, provider_account_id = null, sip_trunk_id = null,
+            credentials, inbound_queue_id = null, recording_enabled = false, status = 'ACTIVE',
+        } = fields;
+        // credentials: undefined = keep existing, null = clear, object = replace.
+        const encrypted = credentials === undefined ? undefined : encryptJson(credentials);
+        await connection.execute(
+            `INSERT INTO channels (tenant_id, external_ref, type, display_name, address, provider_account_id,
+                                   sip_trunk_id, credentials, inbound_queue_id, recording_enabled, status,
+                                   created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+             ON DUPLICATE KEY UPDATE
+                 type = VALUES(type), display_name = VALUES(display_name), address = VALUES(address),
+                 provider_account_id = VALUES(provider_account_id), sip_trunk_id = VALUES(sip_trunk_id),
+                 credentials = ${encrypted === undefined ? 'credentials' : 'VALUES(credentials)'},
+                 inbound_queue_id = VALUES(inbound_queue_id), recording_enabled = VALUES(recording_enabled),
+                 status = VALUES(status), updated_at = NOW()`,
+            [tenantId, externalRef, type, display_name, address, provider_account_id, sip_trunk_id,
+                encrypted ?? null, inbound_queue_id, recording_enabled ? 1 : 0, status]
+        );
+        return this.findByExternalRef(tenantId, externalRef);
+    }
+}
+
+export default new ChannelRepository();

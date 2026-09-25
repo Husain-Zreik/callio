@@ -3,9 +3,12 @@
 //   AGENT    (was FRONTEND) — an agent's browser/app WebRTC peer
 //   CUSTOMER (was WHATSAPP) — the customer, over WhatsApp or SIP
 //   MONITOR                 — a supervisor listening/whispering/barging
-// A call can have several AGENT legs over its life (transfers) and several
-// MONITOR legs at once, so legs are identified by id, with agent_id saying
-// who is on it.
+// One row per (call, leg type), matching the media layer, which holds one
+// live peer per leg type per call: a transfer or reconnect replaces the AGENT
+// row, and one supervisor monitors at a time. The unique index is also what
+// makes concurrent reconnects resolve to a single row. agent_id records who
+// is on the leg now. Several simultaneous monitors would need the media layer
+// to key peers by leg id first; then this becomes a plain index.
 export async function up(knex) {
     await knex.schema.createTable("call_connections", (table) => {
         table.bigIncrements("id").unsigned().primary();
@@ -31,7 +34,7 @@ export async function up(knex) {
         table.timestamp("disconnected_at").nullable();
         table.timestamps(true, true);
 
-        table.index(["call_id", "connection_type"]);
+        table.unique(["call_id", "connection_type"]);
         table.index("agent_id");
 
         table.foreign("call_id").references("id").inTable("calls").onDelete("CASCADE");

@@ -1,16 +1,18 @@
+// src/core/routing/AgentAssignmentCoordinator.js
+// Single entry point for anything that changes agent/queue state: releasing
+// agents after a call, availability changes, draining queues when an agent
+// frees up, and assigning transferred calls.
 import EventBus from '../EventBus.js';
 import CallRepository from '../../persistence/CallRepository.js';
 import AgentRepository from '../../persistence/AgentRepository.js';
-import BusinessRepository from '../../persistence/BusinessRepository.js';
+import QueueRepository from '../../persistence/QueueRepository.js';
 import CallConnectionRepository from '../../persistence/CallConnectionRepository.js';
-import UserGroupRepository from '../../persistence/UserGroupRepository.js';
-import OneSignalService from '../../push/OneSignalService.js';
 import { sdpCoordinator } from '../../media/webrtc/SDPCoordinator.js';
 import { callAgentAssignmentService } from './CallAgentAssignmentService.js';
+import { queueRouter } from './QueueRouter.js';
 import { callLifecycleLogger } from '../calls/CallLifecycleLogger.js';
-import { ConnectionType, AssignmentType, AgentAvailability, RoutingStrategy } from '../constants/CallConstants.js';
+import { ConnectionType, AssignmentType, AgentAvailability, AgentRole } from '../constants/CallConstants.js';
 import { IncomingCallPayload } from '../calls/IncomingCallPayload.js';
-import { NotificationPresets, NotificationIcons, absoluteUrl } from '../../push/notificationPresets.js';
 import { presenceService } from '../agents/PresenceService.js';
 
 class AgentAssignmentCoordinator {
@@ -22,637 +24,274 @@ class AgentAssignmentCoordinator {
         this._callEventCallback = fn;
     }
 
-    async emitQueueUpdate(businessId) {
-        if (!businessId) return;
+    // ── Queue snapshots ──────────────────────────────────────────────────────
 
-        const isCallCenter = await BusinessRepository.isCallCentered(businessId);
-        if (!isCallCenter) return;
-
-        const agents = await AgentRepository.getCallCenterAgents(businessId);
-        const snapshot = await callAgentAssignmentService.buildQueueSnapshot(businessId, agents);
-        EventBus.emit('call:agent_queue', snapshot);
+    // Emits a fresh snapshot for one queue, or for every queue of the tenant.
+    async emitQueueUpdate(tenantId, queueId = null) {
+        if (!tenantId) return;
+        const queues = queueId
+            ? [await QueueRepository.findForTenant(queueId, tenantId)].filter(Boolean)
+            : await QueueRepository.listForTenant(tenantId);
+        for (const queue of queues) {
+            const members = await QueueRepository.getMembers(queue.id);
+            const snapshot = await callAgentAssignmentService.buildQueueSnapshot(queue, members);
+            EventBus.emit('call:agent_queue', snapshot);
+        }
     }
 
-    // Centralized here (rather than in each of the ~10 call sites across the
-    // termination/rejection/transfer/IVR/connection-failure handlers) so the
-    // "tell the agent's own socket" broadcast can't be forgotten at a new
-    // call site the way the original ON_CALL-side broadcast was.
-    async releaseAgentIfIdle(userId) {
-        if (!userId) return false;
-        const released = await AgentRepository.setAgentAvailableIfNoActiveCalls(userId);
-        if (released) await this._broadcastAvailability(userId, AgentAvailability.AVAILABLE);
+    async getQueueSnapshots(tenantId) {
+        const queues = await QueueRepository.listForTenant(tenantId);
+        return Promise.all(queues.map(async (queue) =>
+            callAgentAssignmentService.buildQueueSnapshot(queue, await QueueRepository.getMembers(queue.id))
+        ));
+    }
+
+    // ── Availability ─────────────────────────────────────────────────────────
+
+    // Centralized so the "tell the agent's own socket" broadcast can't be
+    // forgotten at any of the call-ending paths that release an agent.
+    async releaseAgentIfIdle(agentId) {
+        if (!agentId) return false;
+        const released = await AgentRepository.setAgentAvailableIfNoActiveCalls(agentId);
+        if (released) await this._broadcastAvailability(agentId, AgentAvailability.AVAILABLE);
         return released;
     }
 
-    async _broadcastAvailability(userId, availability) {
+    // Outbound calls end with the agent OFFLINE rather than AVAILABLE: safer
+    // than auto-queueing them into inbound routing right after placing a call.
+    async releaseAgentOfflineIfIdle(agentId) {
+        if (!agentId) return false;
+        const released = await AgentRepository.setAgentOfflineIfNoActiveCalls(agentId);
+        if (released) await this._broadcastAvailability(agentId, AgentAvailability.OFFLINE);
+        return released;
+    }
+
+    async _broadcastAvailability(agentId, availability, extra = {}) {
         try {
-            const businessId = await AgentRepository.getUserBusinessId(userId);
-            if (!businessId) return;
+            const tenantId = await AgentRepository.getTenantId(agentId);
+            if (!tenantId) return;
             EventBus.emit('call:agent_availability', {
-                businessId,
-                userId,
+                tenantId,
+                userId: agentId,
                 availability,
                 updatedAt: new Date().toISOString(),
+                ...extra,
             });
         } catch (err) {
-            console.error(`[AgentAssignmentCoordinator] Failed to broadcast availability for user ${userId}:`, err.message);
+            console.error(`[AgentAssignmentCoordinator] Failed to broadcast availability for agent ${agentId}:`, err);
         }
     }
 
     /**
-     * Validates and resolves an agent availability sync request.
-     * Returns { userId, availability } on success, null if unauthorized or invalid.
+     * An agent (or a supervisor, for another agent of the same tenant) sets
+     * availability. ON_CALL can't be set by hand — it follows real calls.
+     * Returns the resulting availability, or null if refused.
      */
-    async resolveAvailabilitySync(businessId, actorUserId, targetUserId) {
-        if (!actorUserId || !targetUserId) return null;
+    async setAvailability(tenantId, actorAgentId, targetAgentId, availability) {
+        if (![AgentAvailability.AVAILABLE, AgentAvailability.OFFLINE].includes(availability)) return null;
 
-        const isSelfSync = actorUserId === targetUserId;
-        if (!isSelfSync) {
-            const managers = await AgentRepository.getCallCenterManagers(businessId);
-            const isManager = managers.some((m) => String(m.id) === String(actorUserId));
-            if (!isManager) {
-                console.warn(`[AgentAssignmentCoordinator] Unauthorized availability sync by user ${actorUserId} for user ${targetUserId} in business ${businessId}`);
+        const target = await AgentRepository.findById(targetAgentId);
+        if (!target || String(target.tenant_id) !== String(tenantId)) return null;
+        if (String(actorAgentId) !== String(targetAgentId)) {
+            const actor = await AgentRepository.findById(actorAgentId);
+            if (actor?.role !== AgentRole.SUPERVISOR || String(actor.tenant_id) !== String(tenantId)) {
+                console.warn(`[AgentAssignmentCoordinator] Agent ${actorAgentId} may not set availability for agent ${targetAgentId}`);
                 return null;
             }
         }
 
-        const agents = await AgentRepository.getCallCenterAgents(businessId);
-        const targetAgent = agents.find((agent) => String(agent.id) === String(targetUserId));
-        if (!targetAgent) {
-            console.warn(`[AgentAssignmentCoordinator] Ignoring availability sync for non-agent user ${targetUserId} in business ${businessId}`);
-            return null;
+        // An agent on a live call stays ON_CALL until it ends.
+        if (target.availability === AgentAvailability.ON_CALL
+            && await CallRepository.hasAgentActiveCall(targetAgentId, 0)) {
+            return AgentAvailability.ON_CALL;
         }
 
-        let availability = String(targetAgent.call_availability || '').toUpperCase();
+        await AgentRepository.updateAgentAvailability(targetAgentId, availability);
+        await this._broadcastAvailability(targetAgentId, availability);
 
-        // Safety net: if the agent is stuck ON_CALL but has no active calls
-        // (e.g. connect+terminate webhook race), release to OFFLINE.
-        // OFFLINE is safer than AVAILABLE — avoids pushing them into the
-        // inbound queue unexpectedly on a page refresh.
-        if (availability === AgentAvailability.ON_CALL && isSelfSync) {
-            const released = await AgentRepository.setAgentOfflineIfNoActiveCalls(targetUserId);
-            if (released) {
-                console.log(`[AgentAssignmentCoordinator] Safety net: released stuck ON_CALL agent ${targetUserId} to OFFLINE`);
-                availability = AgentAvailability.OFFLINE;
-            }
+        if (availability === AgentAvailability.AVAILABLE) {
+            await this.drainForTenant(tenantId).catch((err) =>
+                console.error(`[AgentAssignmentCoordinator] Drain after availability change failed for tenant ${tenantId}:`, err)
+            );
         }
-
-        if (!Object.values(AgentAvailability).includes(availability)) return null;
-
-        return { userId: targetUserId, availability };
+        await this.emitQueueUpdate(tenantId).catch(() => { });
+        return availability;
     }
 
     /**
-     * Full availability sync: resolves, broadcasts via EventBus, and triggers
-     * assignment if the agent just became available.
+     * Re-reads an agent's availability and broadcasts it (a client resync).
+     * Safety net: an agent stuck ON_CALL with no active call (a connect +
+     * terminate webhook race) is released to OFFLINE — safer than AVAILABLE,
+     * which would push them into routing on a page refresh.
      */
-    async syncAgentAvailability(businessId, actorUserId, targetUserId) {
+    async syncAgentAvailability(tenantId, actorAgentId, targetAgentId) {
         try {
-            const result = await this.resolveAvailabilitySync(businessId, actorUserId, targetUserId);
-            if (!result) return;
+            const target = await AgentRepository.findById(targetAgentId);
+            if (!target || String(target.tenant_id) !== String(tenantId)) return;
 
-            const { userId, availability } = result;
+            if (String(actorAgentId) !== String(targetAgentId)) {
+                const actor = await AgentRepository.findById(actorAgentId);
+                if (actor?.role !== AgentRole.SUPERVISOR) return;
+            }
+
+            let availability = target.availability;
+            if (availability === AgentAvailability.ON_CALL && String(actorAgentId) === String(targetAgentId)) {
+                if (await AgentRepository.setAgentOfflineIfNoActiveCalls(targetAgentId)) {
+                    console.log(`[AgentAssignmentCoordinator] Safety net: released stuck ON_CALL agent ${targetAgentId} to OFFLINE`);
+                    availability = AgentAvailability.OFFLINE;
+                }
+            }
 
             EventBus.emit('call:agent_availability', {
-                businessId,
-                userId,
+                tenantId,
+                userId: targetAgentId,
                 availability,
                 updatedAt: new Date().toISOString(),
             });
 
             if (availability === AgentAvailability.AVAILABLE) {
-                try {
-                    const assigned = await this.assignOldestUnassignedCall(businessId);
-                    if (!assigned) await this.emitQueueUpdate(businessId);
-                } catch (assignmentErr) {
-                    console.error(
-                        `[AgentAssignmentCoordinator] Availability sync assignment error for business ${businessId}, user ${userId}:`,
-                        assignmentErr.message
-                    );
-                    await this.emitQueueUpdate(businessId).catch((queueErr) => {
-                        console.error(
-                            `[AgentAssignmentCoordinator] Availability sync queue update fallback failed for business ${businessId}:`,
-                            queueErr.message
-                        );
-                    });
-                }
+                const assigned = await this.drainForTenant(tenantId);
+                if (!assigned) await this.emitQueueUpdate(tenantId);
             }
         } catch (error) {
-            console.error(
-                `[AgentAssignmentCoordinator] Availability sync failed for business ${businessId}, actor ${actorUserId}, target ${targetUserId}:`,
-                error.message
-            );
+            console.error(`[AgentAssignmentCoordinator] Availability sync failed for tenant ${tenantId}, agent ${targetAgentId}:`, error);
         }
     }
 
-    async releaseAgentOfflineIfIdle(userId) {
-        if (!userId) return false;
-        const released = await AgentRepository.setAgentOfflineIfNoActiveCalls(userId);
-        if (released) await this._broadcastAvailability(userId, AgentAvailability.OFFLINE);
-        return released;
+    // ── Queue draining ───────────────────────────────────────────────────────
+
+    // Kept under its original name for the many call-ending paths that trigger
+    // it: an agent may have freed up, so drain the tenant's queues, longest
+    // wait first. Returns true if any call was assigned.
+    async assignOldestUnassignedCall(tenantId) {
+        return this.drainForTenant(tenantId);
     }
 
-    _parseCallMetadata(call) {
-        const raw = call?.metadata;
-        if (!raw) return null;
-        if (typeof raw === 'object') return raw;
-        try {
-            const parsed = JSON.parse(raw);
-            return parsed && typeof parsed === 'object' ? parsed : null;
-        } catch {
-            return null;
+    async drainForTenant(tenantId) {
+        if (!tenantId) return false;
+        const queueIds = await CallRepository.findQueuesWithWaitingCalls(tenantId);
+        let assignedAny = false;
+        for (const queueId of queueIds) {
+            const queue = await queueRouter.getQueue(queueId);
+            if (!queue || queueRouter.isRingAll(queue)) continue;
+            if (await this.drainQueue(queue)) assignedAny = true;
         }
+        return assignedAny;
     }
 
-    _normalizeIdList(ids) {
-        if (!Array.isArray(ids)) return [];
-        return [...new Set(
-            ids
-                .map((id) => Number(id))
-                .filter((id) => Number.isFinite(id))
-        )];
-    }
-
-    async _getGroupAgentIdSet(groupId, businessId, cache) {
-        const key = String(groupId);
-        if (cache.has(key)) return cache.get(key);
-
-        const members = await UserGroupRepository.getCallCenterAgentsForGroup(businessId, Number(groupId));
-        const set = new Set(members.map((member) => Number(member.id)));
-        cache.set(key, set);
-        return set;
-    }
-
-    async _resolveScopedAvailableAgentsForCall(call, allAgents, businessId, groupMembersCache, businessRoutingCache) {
-        const availableAgents = allAgents.filter(
-            (agent) => agent.call_availability === AgentAvailability.AVAILABLE
-        );
-        if (!availableAgents.length) return [];
-
-        const metadata = this._parseCallMetadata(call);
-        let routing = metadata?.routing && typeof metadata.routing === 'object'
-            ? metadata.routing
-            : null;
-        if (!routing) {
-            const cacheKey = String(businessId);
-            let settings = businessRoutingCache?.get(cacheKey) || null;
-            if (!settings) {
-                settings = await BusinessRepository.getCallRoutingSettings(businessId);
-                businessRoutingCache?.set(cacheKey, settings);
-            }
-            const strategyRaw = String(settings?.assignmentStrategy || RoutingStrategy.QUEUE).toUpperCase();
-            const receptionistTargetType = settings?.receptionistTargetType ?? null;
-            const receptionistTargetId = settings?.receptionistTargetId ?? null;
-            const receptionistAgentId = settings?.receptionistAgentId ?? null;
-            const receptionistGroupId = settings?.receptionistGroupId ?? null;
-            const priorityMode = settings?.priorityMode ?? 'AGENT_ORDER';
-            const priorityGroupId = settings?.priorityGroupId ?? null;
-            const priorityAgentIds = settings?.priorityAgentIds ?? [];
-
-            let strategy = strategyRaw;
-
-            if (strategyRaw === RoutingStrategy.RECEPTIONIST) {
-                const hasReceptionistAgent = receptionistTargetType === 'agent' && Number.isFinite(Number(receptionistAgentId ?? receptionistTargetId));
-                const hasReceptionistGroup = receptionistTargetType === 'group' && Number.isFinite(Number(receptionistGroupId ?? receptionistTargetId));
-                if (!hasReceptionistAgent && !hasReceptionistGroup) {
-                    strategy = RoutingStrategy.QUEUE;
-                }
-            } else if (strategyRaw === RoutingStrategy.PRIORITY) {
-                const normalizedMode = String(priorityMode || 'AGENT_ORDER').toUpperCase();
-                const hasPriorityGroup = normalizedMode === 'GROUP_LEAD_FIRST' && Number.isFinite(Number(priorityGroupId));
-                const hasPriorityAgents = normalizedMode !== 'GROUP_LEAD_FIRST' && Array.isArray(priorityAgentIds) && priorityAgentIds.length > 0;
-                if (!hasPriorityGroup && !hasPriorityAgents) {
-                    strategy = RoutingStrategy.QUEUE;
-                }
-            }
-
-            routing = {
-                assignmentStrategy: strategy,
-                strategy,
-                receptionistTargetType,
-                receptionistTargetId,
-                receptionistAgentId,
-                receptionistGroupId,
-                priorityMode,
-                priorityGroupId,
-                priorityAgentIds,
-            };
-        }
-
-        const strategy = String(routing.assignmentStrategy || routing.strategy || RoutingStrategy.QUEUE).toUpperCase();
-
-        if (strategy === RoutingStrategy.RECEPTIONIST) {
-            const targetType = String(routing.receptionistTargetType || '').toLowerCase();
-
-            if (targetType === 'agent') {
-                const targetAgentId = Number(routing.receptionistAgentId ?? routing.receptionistTargetId);
-                if (!Number.isFinite(targetAgentId)) return [];
-                return availableAgents.filter((agent) => Number(agent.id) === targetAgentId);
-            }
-
-            if (targetType === 'group') {
-                const targetGroupId = Number(routing.receptionistGroupId ?? routing.receptionistTargetId);
-                if (!Number.isFinite(targetGroupId)) return [];
-                const groupAgentSet = await this._getGroupAgentIdSet(targetGroupId, businessId, groupMembersCache);
-                return availableAgents.filter((agent) => groupAgentSet.has(Number(agent.id)));
-            }
-
-            return [];
-        }
-
-        if (strategy === RoutingStrategy.PRIORITY) {
-            const priorityMode = String(routing.priorityMode || 'AGENT_ORDER').toUpperCase();
-
-            if (priorityMode === 'GROUP_LEAD_FIRST') {
-                const priorityGroupId = Number(routing.priorityGroupId);
-                if (!Number.isFinite(priorityGroupId)) return [];
-                const priorityGroupSet = await this._getGroupAgentIdSet(priorityGroupId, businessId, groupMembersCache);
-                return availableAgents.filter((agent) => priorityGroupSet.has(Number(agent.id)));
-            }
-
-            const priorityAgentIds = this._normalizeIdList(routing.priorityAgentIds);
-            if (!priorityAgentIds.length) return [];
-            const priorityAgentSet = new Set(priorityAgentIds);
-            return availableAgents.filter((agent) => priorityAgentSet.has(Number(agent.id)));
-        }
-
-        return availableAgents;
-    }
-
-    async assignOldestUnassignedCall(businessId) {
-        if (!businessId) return false;
-
-        const isCallCenter = await BusinessRepository.isCallCentered(businessId);
-        if (!isCallCenter) return false;
-
+    /**
+     * Assigns the oldest waiting call of a queue that an available member can
+     * take. Retries when another worker won a claim race. Returns true if a
+     * call was assigned.
+     */
+    async drainQueue(queue) {
         for (let attempt = 0; attempt < 3; attempt++) {
-            const agents = await AgentRepository.getCallCenterAgents(businessId);
-            if (!agents.length) {
-                return false;
-            }
+            const members = await queueRouter.getMembers(queue);
+            if (!members.some((a) => a.availability === AgentAvailability.AVAILABLE)) return false;
 
-            const unassignedCalls = await CallRepository.findOldestUnassignedCalls(businessId, 25);
-            if (!unassignedCalls.length) {
-                return false;
-            }
+            const waiting = await CallRepository.findOldestUnassignedCalls(queue.id, 25);
+            if (!waiting.length) return false;
 
-            let anyCallTakenByAnotherWorker = false;
-            const groupMembersCache = new Map();
-            const businessRoutingCache = new Map();
-
-            for (const unassignedCall of unassignedCalls) {
-                const eligibleAvailableAgents = await this._resolveScopedAvailableAgentsForCall(
-                    unassignedCall,
-                    agents,
-                    businessId,
-                    groupMembersCache,
-                    businessRoutingCache
-                );
-
-                if (!eligibleAvailableAgents.length) continue;
-
-                let callTakenByAnotherWorker = false;
-                const selectedAgent = await callAgentAssignmentService.pickAgentForBusiness(
-                    businessId,
-                    eligibleAvailableAgents,
-                    async (agentId) => {
-                        const { claimed, assigned } = await AgentRepository.claimAgentAndAssignCall(agentId, unassignedCall.id);
-                        if (assigned) return true;
-                        if (claimed && !assigned) callTakenByAnotherWorker = true;
-                        return false;
-                    }
-                );
-
-                if (!selectedAgent) {
-                    if (callTakenByAnotherWorker) anyCallTakenByAnotherWorker = true;
+            let raceLost = false;
+            for (const call of waiting) {
+                const { agent, takenByAnotherWorker } = await queueRouter.claimForWaitingCall(queue, call.id, members);
+                if (!agent) {
+                    if (takenByAnotherWorker) raceLost = true;
                     continue;
                 }
-
-                const userId = selectedAgent.id;
-                const agentName = selectedAgent.name || null;
-
-                const agentSocketCount = await presenceService.getUserSocketCount(userId);
-                await callLifecycleLogger.logAssigned(unassignedCall.id, businessId, userId, {
-                    assignment_type: AssignmentType.QUEUED,
-                    agent_connected: agentSocketCount > 0,
-                    agent_socket_count: agentSocketCount,
-                });
-
-                const frontendConnection = await CallConnectionRepository.findByCallAndType(unassignedCall.id, ConnectionType.FRONTEND);
-                const sdpOffer = frontendConnection?.local_sdp
-                    || await sdpCoordinator.createSDPOffer(unassignedCall.id, ConnectionType.FRONTEND, this._callEventCallback);
-
-                let callRoutingContext;
-                try {
-                    const meta = typeof unassignedCall.metadata === 'string'
-                        ? JSON.parse(unassignedCall.metadata)
-                        : unassignedCall.metadata;
-                    callRoutingContext = meta?.routing ?? undefined;
-                } catch {
-                    callRoutingContext = undefined;
-                }
-
-                EventBus.emit('call:incoming', new IncomingCallPayload({
-                    callId: unassignedCall.id,
-                    wacid: unassignedCall.wacid,
-                    businessId,
-                    userId,
-                    agentName,
-                    callerId: unassignedCall.client_number_id,
-                    callerName: unassignedCall.caller_name,
-                    callerUsername: unassignedCall.caller_username,
-                    callerNumber: unassignedCall.caller_number,
-                    calleeId: unassignedCall.business_number_id,
-                    calleeName: unassignedCall.callee_name,
-                    calleeNumber: unassignedCall.callee_number,
-                    ringingAt: unassignedCall.ringing_at,
-                    sdpOffer,
-                    assignmentType: AssignmentType.QUEUED,
-                    routingContext: callRoutingContext,
-                }));
-
-                // claimAgentAndAssignCall above already flipped this agent's DB
-                // availability to ON_CALL — tell their own socket too, same gap
-                // fixed for the webhook's direct-assignment path.
-                EventBus.emit('call:agent_availability', {
-                    businessId,
-                    userId,
-                    availability: AgentAvailability.ON_CALL,
-                    updatedAt: new Date().toISOString(),
-                });
-
-                await this.emitQueueUpdate(businessId);
+                await this.#deliverAssignedCall(call, agent, AssignmentType.QUEUED);
+                await this.emitQueueUpdate(call.tenant_id, queue.id);
                 return true;
             }
-
-            if (!anyCallTakenByAnotherWorker) {
-                return false;
-            }
+            if (!raceLost) return false;
         }
-
         return false;
     }
 
     /**
-     * Assign a specific call (e.g. IVR-transferred) to the best available agent.
-     *
-     * targetType: 'agent' → try that exact agent first, fall back to queue
-     * targetType: 'group' → pick within the group per the business's routing
-     *                        strategy (priority/queue/receptionist), fall back to queue
-     * targetType: 'queue' (default) → find any available agent for the business
-     *
-     * @param {number} callId
-     * @param {object} callRecord  Full call row from DB (with id, wacid, caller_number, etc.)
-     * @param {number} businessId
-     * @param {string} targetType  'agent' | 'group' | 'queue'
-     * @param {number|null} targetId   userId (agent) or groupId (group)
-     * @returns {Promise<boolean>}  true if assigned to an agent, false if queued
+     * Assigns a specific call (IVR transfer, agent transfer into a queue).
+     *   targetType 'agent' → that agent, if available
+     *   targetType 'queue' → the queue's strategy (the call's queue_id must
+     *                        already point at it)
+     * Returns true if assigned; false leaves the call waiting in its queue.
      */
-    async assignTransferredCall(callId, callRecord, businessId, targetType = 'queue', targetId = null) {
-        // Build candidate agent list based on target
-        let candidates = [];
-        let preClaimedAgent = null; // set when the picker below already claimed the agent+call together
+    async assignTransferredCall(callId, callRecord, tenantId, targetType = 'queue', targetId = null) {
+        let agent = null;
 
         if (targetType === 'agent' && targetId) {
-            const agent = await AgentRepository.findUserById(targetId);
-            if (agent && agent.call_availability === 'AVAILABLE') candidates = [agent];
-        } else if (targetType === 'group' && targetId) {
-            preClaimedAgent = await this._assignGroupByRoutingStrategy(callId, businessId, targetId);
-            if (preClaimedAgent) candidates = [preClaimedAgent];
+            const candidate = await AgentRepository.findById(targetId);
+            if (candidate && String(candidate.tenant_id) === String(tenantId)
+                && candidate.availability === AgentAvailability.AVAILABLE) {
+                const { assigned } = await AgentRepository.claimAgentAndAssignCall(candidate.id, callId);
+                if (assigned) agent = candidate;
+            }
         } else {
-            // Queue mode: use the same round-robin picker used by inbound routing.
-            const all = await AgentRepository.getCallCenterAgents(businessId);
-            const available = all.filter((a) => a.call_availability === AgentAvailability.AVAILABLE);
-            if (available.length) {
-                preClaimedAgent = await callAgentAssignmentService.pickAgentForBusiness(
-                    businessId,
-                    available,
-                    async (agentId) => {
-                        const { assigned } = await AgentRepository.claimAgentAndAssignCall(agentId, callId);
-                        return assigned;
-                    }
-                );
-                if (preClaimedAgent) candidates = [preClaimedAgent];
+            const queue = await queueRouter.getQueue(targetId ?? callRecord.queue_id);
+            if (queue && !queueRouter.isRingAll(queue)) {
+                ({ agent } = await queueRouter.claimForWaitingCall(queue, callId));
+            } else if (queue) {
+                // RING_ALL: offer to everyone available; first accept claims it.
+                const call = await CallRepository.findById(callId);
+                const offered = await queueRouter.ringAllTargets(queue, tenantId);
+                if (call && offered.length) {
+                    const sdpOffer = await this.#agentOffer(callId);
+                    EventBus.emit('call:incoming', IncomingCallPayload.fromCall(call, {
+                        agentId: null,
+                        offeredAgentIds: offered.map((a) => a.id),
+                        sdpOffer,
+                        assignmentType: AssignmentType.QUEUED,
+                    }));
+                }
+                await this.emitQueueUpdate(tenantId, queue.id);
+                return false;
             }
         }
 
-        for (const agent of candidates) {
-            if (!preClaimedAgent) {
-                const { claimed, assigned } = await AgentRepository.claimAgentAndAssignCall(agent.id, callId);
-                if (!claimed) continue;
-                if (!assigned) continue;
-            }
-
-            const transferAgentSocketCount = await presenceService.getUserSocketCount(agent.id);
-            await callLifecycleLogger.logAssigned(callId, businessId, agent.id, {
-                assignment_type: AssignmentType.QUEUED,
-                agent_connected: transferAgentSocketCount > 0,
-                agent_socket_count: transferAgentSocketCount,
-            });
-
-            // IvrTransferHandler pre-creates the FRONTEND peer connection and its
-            // SDP offer on the same worker before calling assignTransferredCall.
-            // Re-using that offer avoids calling createSDPOffer on an already-
-            // initialised peer, which would add a second placeholder sender and
-            // cause the agent to hear the reconnecting tone alongside the caller.
-            const existingFrontendConn = await CallConnectionRepository.findByCallAndType(callId, ConnectionType.FRONTEND);
-            const sdpOffer = existingFrontendConn?.local_sdp
-                ?? await sdpCoordinator.createSDPOffer(callId, ConnectionType.FRONTEND, this._callEventCallback);
-
-            EventBus.emit('call:incoming', new IncomingCallPayload({
-                callId,
-                wacid: callRecord.wacid,
-                businessId,
-                userId: agent.id,
-                agentName: agent.name || null,
-                callerId: callRecord.client_number_id,
-                callerName: callRecord.caller_name,
-                callerUsername: callRecord.caller_username,
-                callerNumber: callRecord.caller_number,
-                calleeId: callRecord.business_number_id,
-                calleeName: callRecord.callee_name,
-                calleeNumber: callRecord.callee_number,
-                ringingAt: callRecord.ringing_at,
-                sdpOffer,
-                assignmentType: AssignmentType.QUEUED,
-            }));
-
-            await this._sendIvrAssignedNotification({
-                userId: agent.id,
-                agentName: agent.name,
-                businessId,
-                wacid: callRecord.wacid,
-                callerName: callRecord.caller_name,
-                callerUsername: callRecord.caller_username,
-                callerNumber: callRecord.caller_number,
-            });
-
-            await this.emitQueueUpdate(businessId);
-            console.log(`[AgentAssignment] IVR-transferred call ${callId} assigned to agent ${agent.id}`);
+        if (agent) {
+            const call = await CallRepository.findById(callId);
+            if (call) await this.#deliverAssignedCall(call, agent, AssignmentType.QUEUED);
+            await this.emitQueueUpdate(tenantId, callRecord.queue_id);
+            console.log(`[AgentAssignment] Transferred call ${callId} assigned to agent ${agent.id}`);
             return true;
         }
 
-        // No available agent — emit queue update and notify managers so the call
-        // doesn't sit silently in the queue.
-        await this.emitQueueUpdate(businessId);
-        await this._sendIvrQueuedNotification({
-            businessId,
-            wacid: callRecord.wacid,
-            callerName: callRecord.caller_name,
-            callerUsername: callRecord.caller_username,
-            callerNumber: callRecord.caller_number,
-        });
-        console.log(`[AgentAssignment] IVR-transferred call ${callId} placed in queue (no available agent)`);
+        await this.emitQueueUpdate(tenantId, callRecord.queue_id);
+        EventBus.emit('call:waiting', { callId, tenantId, queueId: callRecord.queue_id });
+        console.log(`[AgentAssignment] Transferred call ${callId} waiting in queue (no available agent)`);
         return false;
     }
 
-    /**
-     * Pick an agent within an IVR-targeted group per the business's configured
-     * assignment strategy, so a group transfer honors the same routing rules as
-     * a direct inbound call — instead of always taking the lowest-id available
-     * member. Mirrors CallWebhookProcessor._findPriorityAgent's GROUP_LEAD_FIRST
-     * ordering and reuses the same group-scoped pickers as the receptionist path.
-     *
-     * PRIORITY + GROUP_LEAD_FIRST → group leads first, then members, id order
-     * PRIORITY + AGENT_ORDER      → business's priorityAgentIds order, remainder by id
-     * QUEUE / RECEPTIONIST        → fair round-robin among the group's members
-     *
-     * Claims the agent and assigns the call atomically.
-     * @returns {Promise<object|null>} the claimed agent row, or null if none available/claimable
-     */
-    async _assignGroupByRoutingStrategy(callId, businessId, groupId) {
-        const availableGroupAgents = await UserGroupRepository.getAvailableCallCenterAgentsForGroup(businessId, groupId);
-        if (!availableGroupAgents.length) return null;
-
-        const claimFn = async (agentId) => {
-            const { assigned } = await AgentRepository.claimAgentAndAssignCall(agentId, callId);
-            return assigned;
-        };
-
-        const routing = await BusinessRepository.getCallRoutingSettings(businessId);
-
-        if (routing.assignmentStrategy === RoutingStrategy.PRIORITY) {
-            const preferredIds = routing.priorityMode === 'GROUP_LEAD_FIRST'
-                ? [
-                    ...availableGroupAgents
-                        .filter((agent) => String(agent.group_role || '').toUpperCase() === 'LEAD')
-                        .sort((a, b) => Number(a.id) - Number(b.id))
-                        .map((agent) => agent.id),
-                    ...availableGroupAgents
-                        .filter((agent) => String(agent.group_role || '').toUpperCase() !== 'LEAD')
-                        .sort((a, b) => Number(a.id) - Number(b.id))
-                        .map((agent) => agent.id),
-                ]
-                : routing.priorityAgentIds;
-
-            return callAgentAssignmentService.pickPriorityAgentForBusinessByOrder(
-                businessId, preferredIds, availableGroupAgents, claimFn
-            );
-        }
-
-        // QUEUE / RECEPTIONIST — no leader concept here, rotate fairly among the group.
-        return callAgentAssignmentService.pickAgentForGroup(businessId, groupId, availableGroupAgents, claimFn);
+    // The AGENT-leg SDP offer for a call: reuse one already created on this
+    // worker (IvrTransferHandler pre-creates it next to the CUSTOMER peer) —
+    // creating a second would add another placeholder sender.
+    async #agentOffer(callId) {
+        const existing = await CallConnectionRepository.findByCallAndType(callId, ConnectionType.AGENT);
+        return existing?.local_sdp
+            ?? await sdpCoordinator.createSDPOffer(callId, ConnectionType.AGENT, this._callEventCallback);
     }
 
-    /**
-     * Push notification for an IVR-transferred call that was successfully
-     * assigned to a specific agent.
-     */
-    async _sendIvrAssignedNotification({ userId, agentName, businessId, wacid, callerName, callerUsername, callerNumber }) {
-        try {
-            const name = agentName || 'Agent';
-            // A phone-less (bsuid-only) caller has no callerNumber — prefer
-            // their WhatsApp username over the literal "(null)" a bare number
-            // interpolation would otherwise render.
-            const callerLabel = callerNumber
-                ? `${callerName} (${callerNumber})`
-                : callerUsername
-                    ? `${callerName} (@${callerUsername})`
-                    : callerName;
-            await OneSignalService.sendToUsers(
-                userId,
-                `Call from IVR - Assigned to ${name}`,
-                `New call from ${callerLabel} routed via IVR menu`,
-                {
-                    type: 'incoming_call',
-                    source: 'ivr',
-                    callId: wacid,
-                    callerName,
-                    callerUsername,
-                    callerNumber,
-                    businessId,
-                    assignedUserId: userId,
-                    assignedUserName: name,
-                    isCallCenter: true,
-                    timestamp: new Date().toISOString(),
-                },
-                {
-                    url: absoluteUrl('/call-center'),
-                    icon: NotificationIcons.call,
-                    payload: {
-                        ...NotificationPresets.transferredCall,
-                        buttons: [
-                            { id: 'answer', text: 'Answer' },
-                            { id: 'decline', text: 'Decline' },
-                        ],
-                    },
-                },
-            );
-        } catch (err) {
-            console.error(`[AgentAssignment] IVR-assigned notification error:`, err.message);
-        }
-    }
+    async #deliverAssignedCall(call, agent, assignmentType) {
+        const socketCount = await presenceService.getUserSocketCount(agent.id);
+        await callLifecycleLogger.logAssigned(call.id, call.tenant_id, agent.id, {
+            assignment_type: assignmentType,
+            queue_id: call.queue_id ?? null,
+            agent_connected: socketCount > 0,
+            agent_socket_count: socketCount,
+        });
 
-    /**
-     * Push notification for an IVR-transferred call that ended up queued
-     * because no agent was available. Notifies call-center managers so
-     * someone can manually pick the call up.
-     */
-    async _sendIvrQueuedNotification({ businessId, wacid, callerName, callerUsername, callerNumber }) {
-        try {
-            const managers = await AgentRepository.getCallCenterManagers(businessId);
-            if (!managers.length) return;
+        const sdpOffer = await this.#agentOffer(call.id);
+        EventBus.emit('call:incoming', IncomingCallPayload.fromCall(
+            { ...call, agent_id: agent.id },
+            { agentId: agent.id, agentName: agent.name ?? null, sdpOffer, assignmentType }
+        ));
 
-            // A phone-less (bsuid-only) caller has no callerNumber — prefer
-            // their WhatsApp username over the literal "(null)" a bare number
-            // interpolation would otherwise render.
-            const callerLabel = callerNumber
-                ? `${callerName} (${callerNumber})`
-                : callerUsername
-                    ? `${callerName} (@${callerUsername})`
-                    : callerName;
-            await OneSignalService.sendToUsers(
-                managers.map(m => m.id),
-                'Call Waiting in Queue - From IVR',
-                `Unassigned call from ${callerLabel} — IVR transferred but no agent is available`,
-                {
-                    type: 'incoming_call',
-                    source: 'ivr',
-                    callId: wacid,
-                    callerName,
-                    callerUsername,
-                    callerNumber,
-                    businessId,
-                    assignedUserId: null,
-                    isCallCenter: true,
-                    needsAssignment: true,
-                    timestamp: new Date().toISOString(),
-                },
-                {
-                    url: absoluteUrl('/call-center'),
-                    icon: NotificationIcons.call,
-                    payload: {
-                        ...NotificationPresets.incomingCall,
-                        buttons: [
-                            { id: 'answer', text: 'Answer' },
-                            { id: 'decline', text: 'Decline' },
-                        ],
-                    },
-                },
-            );
-        } catch (err) {
-            console.error(`[AgentAssignment] IVR-queued notification error:`, err.message);
-        }
+        // The claim already flipped the agent ON_CALL — tell their own socket.
+        EventBus.emit('call:agent_availability', {
+            tenantId: call.tenant_id,
+            userId: agent.id,
+            availability: AgentAvailability.ON_CALL,
+            updatedAt: new Date().toISOString(),
+        });
     }
 }
 

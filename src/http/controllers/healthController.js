@@ -9,6 +9,7 @@ import { recordingManager } from '../../media/recording/RecordingManager.js';
 import { workerStatsService } from '../../infra/monitoring/WorkerStatsService.js';
 import { encodingWorkerBridge } from '../../media/recording/encoding/EncodingWorkerBridge.js';
 import { dtmfWorkerBridge } from '../../media/dtmf/DTMFWorkerBridge.js';
+import { config } from '../../../config/envConfig.js';
 
 function toMB(bytes) {
     return Math.round(bytes / 1024 / 1024) + ' MB';
@@ -49,7 +50,7 @@ export async function handleHealth(request, reply) {
 
     reply.code(status === 'ok' ? 200 : 503).send({
         status,
-        worker:           process.env.pm_id ?? 0,
+        worker:           config.runtime.pmId ?? config.runtime.workerId,
         pid:              process.pid,
         uptime:           Math.floor(process.uptime()) + 's',
         activeCalls,

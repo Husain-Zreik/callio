@@ -1,7 +1,6 @@
 // src/core/events/handlers/AgentEventHandler.js
 import CallRepository from '../../../persistence/CallRepository.js';
 import AgentRepository from '../../../persistence/AgentRepository.js';
-import BusinessRepository from '../../../persistence/BusinessRepository.js';
 import CallConnectionRepository from '../../../persistence/CallConnectionRepository.js';
 import { acceptWhatsAppCall, terminateWhatsAppCall } from '../../../channels/whatsapp/WhatsAppCallApi.js';
 import EventBus from '../../EventBus.js';
@@ -16,7 +15,11 @@ import { ConnectionType, CallStatus, CallDirection, TerminationReason, Terminate
 import { agentAssignmentCoordinator } from '../../routing/AgentAssignmentCoordinator.js';
 import { agentMissedCallTracker } from '../../routing/AgentMissedCallTracker.js';
 import { roomManager } from '../../../realtime/managers/RoomManager.js';
-import { notifyCallResolved } from '../../../realtime/namespaces/call/handlers/delivery.js';
+import { callPushNotifier } from '../../../push/CallPushNotifier.js';
+import { queueRouter } from '../../routing/QueueRouter.js';
+import { IncomingCallPayload } from '../../calls/IncomingCallPayload.js';
+import { toCallView } from '../../calls/CallView.js';
+import { AssignmentType, AgentAvailability } from '../../constants/CallConstants.js';
 
 // Max wait for the agent's inbound audio track to arrive on the FRONTEND peer
 // before we tell Meta "accepted". Empirically the ontrack dispatch lands within
@@ -28,32 +31,29 @@ const AGENT_AUDIO_TRACK_TIMEOUT_MS = 5000;
 export class AgentEventHandler {
 
     async handleAgentJoined(data) {
-        const { callId, userId, businessId, sdpAnswer, socketId, deviceId } = data;
+        const { callId, userId, tenantId, sdpAnswer, socketId, deviceId } = data;
 
         console.log(`[AgentEventHandler] Agent ${userId} joined call ${callId}`, { socketId });
 
         // Guard: only the worker owning the in-memory peer connection should handle this.
-        const ownsConnection = peerRegistry.getConnectionData(callId, ConnectionType.FRONTEND).valid;
+        const ownsConnection = peerRegistry.getConnectionData(callId, ConnectionType.AGENT).valid;
         if (!ownsConnection) {
             console.log(`[AgentEventHandler] Worker does not own peer connection for call ${callId} — skipping`);
             return;
         }
 
         try {
-            // For non-call-center businesses enforce the 1-IN_PROGRESS-per-business rule
-            // at accept time. This catches the window where a second inbound call arrived
-            // while the first was already IN_PROGRESS and a different user tries to accept it.
-            const isCallCenter = await BusinessRepository.isCallCentered(businessId);
-            if (!isCallCenter) {
-                const activeExists = await CallRepository.hasOtherActiveCall(businessId, callId);
-                if (activeExists) throw new Error('A call is already active for this business.');
-            } else {
-                // For call-center businesses, guard at the per-agent level: an agent must not
-                // accept a second call while already on an active one. This is the final safety
-                // net after the batchUpdateAgentAvailability guard in the cleanup service.
-                const agentHasActiveCall = await CallRepository.hasAgentActiveCall(userId, callId);
-                if (agentHasActiveCall) throw new Error('Agent already has an active call.');
+            // Queue capacity (queues.max_active_calls) — catches a second call being
+            // accepted while the queue's limit is already reached.
+            const callQueueRow = await CallRepository.findById(callId);
+            const callQueue = callQueueRow?.queue_id ? await queueRouter.getQueue(callQueueRow.queue_id) : null;
+            if (await queueRouter.isAtCapacity(callQueue, callId)) {
+                throw new Error('The queue is at its active-call limit.');
             }
+            // An agent must not accept a second call while already on one — the final
+            // safety net after the batchUpdateAgentAvailability guard in cleanup.
+            const agentHasActiveCall = await CallRepository.hasAgentActiveCall(userId, callId);
+            if (agentHasActiveCall) throw new Error('Agent already has an active call.');
 
             // Early-exit before touching the peer connection: if the call is no longer
             // RINGING (terminated between dispatch and now), processSDPAnswer would throw
@@ -84,7 +84,7 @@ export class AgentEventHandler {
                 if (!claimed) throw new Error('Call assignment conflict. Call ownership changed.');
             }
 
-            iceCoordinator.setConnectionInfo(callId, ConnectionType.FRONTEND, socketId);
+            iceCoordinator.setConnectionInfo(callId, ConnectionType.AGENT, socketId);
             // Durable per-device identity (survives this socket disconnecting/
             // reconnecting) — recorded alongside the ephemeral socketId above so
             // ongoing-calls resync and reconnect-authorization can tell "my other
@@ -94,9 +94,9 @@ export class AgentEventHandler {
             // after its own row-recreating step) so a resync landing immediately
             // after accept can never read a call still carrying a stale/absent
             // device_id.
-            await CallConnectionRepository.updateDeviceId(callId, ConnectionType.FRONTEND, deviceId ?? null)
+            await CallConnectionRepository.updateDeviceId(callId, ConnectionType.AGENT, deviceId ?? null)
                 .catch((err) => console.error(`[AgentEventHandler] Failed to persist deviceId for call ${callId}:`, err.message));
-            await sdpCoordinator.processSDPAnswer(callId, sdpAnswer, ConnectionType.FRONTEND);
+            await sdpCoordinator.processSDPAnswer(callId, sdpAnswer, ConnectionType.AGENT);
             iceCoordinator.markClientReady(callId);
 
             // ── Gate: wait for the agent's microphone track on the FRONTEND peer ───
@@ -116,7 +116,7 @@ export class AgentEventHandler {
             // removing the separate getStatus + findById pair.
             const callRecord = await CallRepository.findById(callId);
             const currentStatus = callRecord?.status ?? null;
-            const isIvrTransferred = !!callRecord?.ivr_menu_id;
+            const isIvrTransferred = !!callRecord?.ivr_flow_id;
 
             if (currentStatus === CallStatus.RINGING) {
 
@@ -127,15 +127,15 @@ export class AgentEventHandler {
                     // it with a new SDP answer or we'd issue a redundant Meta API call.
                     // `requireReady=true` uses the registry's isReady flag, which is set only on
                     // connectionState→'connected' — safe to read without touching the wrtc native pc.
-                    const whatsappAlreadyReady = peerRegistry.getConnectionData(callId, ConnectionType.WHATSAPP, true).valid;
+                    const whatsappAlreadyReady = peerRegistry.getConnectionData(callId, ConnectionType.CUSTOMER, true).valid;
 
                     if (!whatsappAlreadyReady) {
                         // Fresh RINGING call — accept WhatsApp now that the agent is ready
-                        const whatsappConn = await CallConnectionRepository.findByCallAndType(callId, ConnectionType.WHATSAPP);
+                        const whatsappConn = await CallConnectionRepository.findByCallAndType(callId, ConnectionType.CUSTOMER);
                         if (!whatsappConn || !whatsappConn.remote_sdp) throw new Error('WhatsApp offer not found');
 
                         const whatsappSdpAnswer = await sdpCoordinator.createSDPAnswer(
-                            callId, whatsappConn.remote_sdp, ConnectionType.WHATSAPP
+                            callId, whatsappConn.remote_sdp, ConnectionType.CUSTOMER
                         );
                         await acceptWhatsAppCall(callId, whatsappSdpAnswer);
 
@@ -165,19 +165,29 @@ export class AgentEventHandler {
                 await CallRepository.updateTimestamp(callId, 'answered_at', new Date());
             }
 
-            const result = peerRegistry.getConnectionData(callId, ConnectionType.FRONTEND);
+            const result = peerRegistry.getConnectionData(callId, ConnectionType.AGENT);
             if (result.valid) {
                 result.data.setWhatsappConnected(true);
-                result.data.context.update({ userId, businessId });
+                result.data.context.update({ userId, tenantId });
             }
 
-            const agentName = await AgentRepository.getUserNameById(userId, businessId);
+            // Who is on the AGENT leg now, and — for a RING_ALL call that was
+            // offered without claiming anyone — flip the accepting agent ON_CALL.
+            CallConnectionRepository.updateAgentId(callId, ConnectionType.AGENT, userId)
+                .catch((err) => console.error(`[AgentEventHandler] Failed to persist agent for call ${callId}:`, err));
+            if (await AgentRepository.markOnCall(userId)) {
+                EventBus.emit('call:agent_availability', {
+                    tenantId, userId, availability: AgentAvailability.ON_CALL, updatedAt: new Date().toISOString(),
+                });
+            }
+
+            const agentName = await AgentRepository.getNameById(userId);
 
             const isFollowUp = await callLifecycleLogger.isFollowUp(callId, userId);
             if (isFollowUp) {
-                await callLifecycleLogger.logFollowUp(callId, businessId, userId);
+                await callLifecycleLogger.logFollowUp(callId, tenantId, userId);
             } else {
-                await callLifecycleLogger.logAccepted(callId, businessId, userId);
+                await callLifecycleLogger.logAccepted(callId, tenantId, userId);
             }
 
             // The agent is engaged — clear any prior missed-call streak so the
@@ -188,18 +198,19 @@ export class AgentEventHandler {
             );
 
             EventBus.emit('call:success', { callId, message: 'Call accepted successfully', code: 'CALL_ACCEPTED' });
-            EventBus.emit('call:handled', { callId, businessId, userId, agentName, deviceId: deviceId ?? null, action: 'accepted' });
+            EventBus.emit('call:handled', { callId, tenantId, userId, agentName, deviceId: deviceId ?? null, action: 'accepted' });
 
-            // Fire-and-forget: dismiss the native ringing UI on this agent's
-            // other devices, and (for a broadcast/non-call-center business)
-            // every other agent's killed/backgrounded device too — see
-            // notifyCallResolved's own doc comment for why call:handled
-            // above doesn't already cover this. excludeDeviceId: deviceId is
-            // this device — the one that just answered — and must never be a
-            // target of its own "dismiss stale ring" fan-out (2026-09-01 fix,
-            // see notifyCallResolved's doc comment).
-            notifyCallResolved(callId, businessId, userId, { fanOutToBusiness: !isCallCenter, excludeDeviceId: deviceId ?? null }).catch((err) =>
-                console.error(`[AgentEventHandler] notifyCallResolved failed for call ${callId}:`, err.message)
+            // Fire-and-forget: dismiss the native ringing UI on this agent's other
+            // devices, and — for a RING_ALL call — every other member's device.
+            // excludeDeviceId: the device that just answered must never receive its
+            // own "dismiss stale ring" push (it tears the live call down natively).
+            callPushNotifier.notifyCallResolved(callId, {
+                resolvedAgentId: userId,
+                ringAllQueue: queueRouter.isRingAll(callQueue) ? callQueue : null,
+                tenantId,
+                excludeDeviceId: deviceId ?? null,
+            }).catch((err) =>
+                console.error(`[AgentEventHandler] notifyCallResolved failed for call ${callId}:`, err)
             );
 
             console.log(`[AgentEventHandler] ✅ Agent ${userId} successfully joined call ${callId}`);
@@ -215,7 +226,7 @@ export class AgentEventHandler {
             if (error.message.includes('already has an active call')) {
                 emitCallError({
                     callId,
-                    code: 'CALL_ALREADY_ENDED',
+                    code: CallErrorCodes.CALL_ALREADY_ENDED,
                     message: 'Unable to accept: you are already on an active call.',
                     socketId,
                 });
@@ -249,7 +260,7 @@ export class AgentEventHandler {
                         await agentAssignmentCoordinator.releaseAgentOfflineIfIdle(userId);
                     } else {
                         await agentAssignmentCoordinator.releaseAgentIfIdle(userId);
-                        await agentAssignmentCoordinator.assignOldestUnassignedCall(call.business_id);
+                        await agentAssignmentCoordinator.assignOldestUnassignedCall(call.tenant_id);
                     }
                     console.log(`[AgentEventHandler] Released agent ${userId} after failed accept for terminated call ${callId}`);
 
@@ -259,7 +270,7 @@ export class AgentEventHandler {
                     // CallEventHandler's outer catch, once friendly and once raw.
                     emitCallError({
                         callId,
-                        code: 'CALL_ALREADY_ENDED',
+                        code: CallErrorCodes.CALL_ALREADY_ENDED,
                         message: 'This call has already ended.',
                         socketId,
                     });
@@ -283,46 +294,37 @@ export class AgentEventHandler {
      * (established in IvrTransferHandler or _handleIncomingCall) is still active on this
      * worker and continues to route all AGENT_JOINED events here.
      */
-    async handleRingingAgentReconnect({ callId, socketId, userId, businessId }) {
-        if (!peerRegistry.getConnectionData(callId, ConnectionType.WHATSAPP).valid) {
+    async handleRingingAgentReconnect({ callId, socketId, userId, tenantId }) {
+        if (!peerRegistry.getConnectionData(callId, ConnectionType.CUSTOMER).valid) {
             console.log(`[AgentEventHandler] RINGING_AGENT_RECONNECT: no WHATSAPP peer for call ${callId} on this worker — skipping`);
             return;
         }
 
         try {
-            await peerRegistry.closePeerConnection(callId, ConnectionType.FRONTEND).catch(() => { });
-            await CallConnectionRepository.cleanupConnection(callId, ConnectionType.FRONTEND).catch(() => { });
+            await peerRegistry.closePeerConnection(callId, ConnectionType.AGENT).catch(() => { });
+            await CallConnectionRepository.cleanupConnection(callId, ConnectionType.AGENT).catch(() => { });
 
-            const sdpOffer = await sdpCoordinator.createSDPOffer(callId, ConnectionType.FRONTEND);
+            const sdpOffer = await sdpCoordinator.createSDPOffer(callId, ConnectionType.AGENT);
 
             const call = await CallRepository.findById(callId);
             if (!call) return;
 
-            const agent = await AgentRepository.findUserById(userId);
+            const agent = await AgentRepository.findById(userId);
 
             EventBus.emit('call:ringing_reconnect_deliver', {
-                callId,
                 socketId,
-                sdpOffer,
-                wacid: call.wacid,
-                businessId: call.business_id,
-                userId: call.user_id,
-                agentName: agent?.name ?? null,
-                callerId: call.client_number_id,
-                callerName: call.caller_name,
-                callerUsername: call.caller_username,
-                callerNumber: call.caller_number,
-                calleeId: call.business_number_id,
-                calleeName: call.callee_name,
-                calleeUsername: call.callee_username,
-                calleeNumber: call.callee_number,
-                ringingAt: call.ringing_at,
+                payload: IncomingCallPayload.fromCall(call, {
+                    agentId: call.agent_id,
+                    agentName: agent?.name ?? null,
+                    sdpOffer,
+                    assignmentType: AssignmentType.DIRECT,
+                }),
             });
 
             const secondsSinceAssignment = call.ringing_at
                 ? Math.round((Date.now() - new Date(call.ringing_at).getTime()) / 1000)
                 : null;
-            await callLifecycleLogger.logAgentConnected(callId, call.business_id, userId, {
+            await callLifecycleLogger.logAgentConnected(callId, call.tenant_id, userId, {
                 seconds_since_assignment: secondsSinceAssignment,
                 is_first_socket: true,
                 re_delivered: true,
@@ -336,25 +338,20 @@ export class AgentEventHandler {
     }
 
     async handleAgentReconnected(data) {
-        const { callId, userId, businessId, sdpOffer, socketId, deviceId, reconnectTrigger } = data;
+        const { callId, userId, tenantId, sdpOffer, socketId, deviceId, reconnectTrigger } = data;
 
         const isIceTrigger = reconnectTrigger === 'ice_failure';
         console.log(`[AgentEventHandler] Agent ${userId} reconnecting to call ${callId}${isIceTrigger ? ' [triggered by ICE failure]' : ''}`);
 
         try {
-            const call = await CallRepository.getUserActiveCall(businessId, callId, userId);
+            const call = await CallRepository.getUserActiveCall(tenantId, callId, userId);
             if (!call) throw new Error('No active call found for reconnecting.');
 
-            const isCallCenter = await BusinessRepository.isCallCentered(businessId);
-            if (!isCallCenter) {
-                const activeExists = await CallRepository.hasOtherActiveCall(businessId, callId);
-                if (activeExists) throw new Error('A call is already active for this business.');
-            }
 
             // Log the disconnect event before tearing down the old peer so the
             // lifecycle timeline shows the break before the recovery.
             if (isIceTrigger) {
-                callLifecycleLogger.logDisconnected(callId, businessId, userId, {
+                callLifecycleLogger.logDisconnected(callId, tenantId, userId, {
                     reason: 'ice_failure',
                     auto_reconnect: true,
                 }).catch(err => console.error(`[AgentEventHandler] logDisconnected(ice_failure) failed for call ${callId}:`, err.message));
@@ -388,14 +385,14 @@ export class AgentEventHandler {
                 : false;
 
             // Close old FRONTEND and guard WHATSAPP still exists
-            await peerRegistry.closePeerConnection(callId, ConnectionType.FRONTEND);
-            await CallConnectionRepository.cleanupConnection(callId, ConnectionType.FRONTEND);
+            await peerRegistry.closePeerConnection(callId, ConnectionType.AGENT);
+            await CallConnectionRepository.cleanupConnection(callId, ConnectionType.AGENT);
 
-            if (!peerRegistry.getConnectionData(callId, ConnectionType.WHATSAPP).valid) {
+            if (!peerRegistry.getConnectionData(callId, ConnectionType.CUSTOMER).valid) {
                 throw new Error('No active call found for reconnecting.');
             }
 
-            iceCoordinator.setConnectionInfo(callId, ConnectionType.FRONTEND, socketId);
+            iceCoordinator.setConnectionInfo(callId, ConnectionType.AGENT, socketId);
 
             // Cross-device handoff, not a lockout: moving an active call to another
             // of your own devices/tabs is a deliberate, supported action. The bug
@@ -414,7 +411,7 @@ export class AgentEventHandler {
                 console.log(`[AgentEventHandler] Call ${callId} reconnect — no supersede notification needed (previousSocketId=${previousConnectionInfo?.socketId ?? 'none'}, sameSocket=${!isDifferentSocket})`);
             }
 
-            const sdpAnswer = await sdpCoordinator.createSDPAnswer(callId, sdpOffer, ConnectionType.FRONTEND);
+            const sdpAnswer = await sdpCoordinator.createSDPAnswer(callId, sdpOffer, ConnectionType.AGENT);
             // Must run AFTER createSDPAnswer, not before: cleanupConnection above
             // *deletes* the FRONTEND call_connections row, and createSDPAnswer is
             // what recreates it (via Peer.insertConnectionRecord). Writing the
@@ -422,36 +419,24 @@ export class AgentEventHandler {
             // exist yet — which would have meant every reconnect kept whatever
             // device_id was persisted at the *original* accept, never updating it,
             // making all subsequent resyncs/handoffs reason about a stale device.
-            CallConnectionRepository.updateDeviceId(callId, ConnectionType.FRONTEND, deviceId ?? null)
+            CallConnectionRepository.updateDeviceId(callId, ConnectionType.AGENT, deviceId ?? null)
                 .catch((err) => console.error(`[AgentEventHandler] Failed to persist deviceId for call ${callId}:`, err.message));
             iceCoordinator.markClientReady(callId);
             await peerRegistry.checkAndStartBridging(callId);
 
-            const {
-                wacid, client_number_id, business_number_id,
-                caller_name, caller_username, caller_number,
-                callee_name, callee_username, callee_number,
-                direction, status, ringing_at: ringingAt, answered_at: startedAt,
-            } = call;
+            CallConnectionRepository.updateAgentId(callId, ConnectionType.AGENT, userId)
+                .catch((err) => console.error(`[AgentEventHandler] Failed to persist agent for call ${callId}:`, err));
+            const agentName = await AgentRepository.getNameById(userId);
 
-            const callerId = direction === CallDirection.INBOUND ? client_number_id : business_number_id;
-            const calleeId = direction === CallDirection.OUTBOUND ? client_number_id : business_number_id;
-            const agentName = await AgentRepository.getUserNameById(userId, businessId);
-
-            await callLifecycleLogger.logReconnected(callId, businessId, userId, {
+            await callLifecycleLogger.logReconnected(callId, tenantId, userId, {
                 source: isIceTrigger ? 'ice_failure_recovery' : 'network_reconnect',
             });
 
-            EventBus.emit('call:reconnected', { callId, userId, businessId, sdpAnswer });
+            EventBus.emit('call:reconnected', { callId, userId, tenantId, sdpAnswer });
 
             console.log(`[AgentEventHandler] ✅ Agent ${userId} reconnected to call ${callId}${isIceTrigger ? ' (ICE failure recovered)' : ''}`);
 
-            return {
-                callId, wacid, userId, agentName, businessId,
-                callerId, callerName: caller_name, callerUsername: caller_username, callerNumber: caller_number,
-                calleeId, calleeName: callee_name, calleeUsername: callee_username, calleeNumber: callee_number,
-                status, direction, startedAt, ringingAt, sdpAnswer,
-            };
+            return { ...toCallView(call, { agentName, deviceId: deviceId ?? null }), sdpAnswer };
         } catch (error) {
             console.error(`[AgentEventHandler] Failed to handle agent reconnect for call ${callId}:`, error.message);
             throw error;
@@ -467,7 +452,7 @@ export class AgentEventHandler {
      */
     async #waitForFrontendAudioTrack(callId, timeoutMs) {
         // Already arrived?
-        const existing = peerRegistry.getConnectionData(callId, ConnectionType.FRONTEND);
+        const existing = peerRegistry.getConnectionData(callId, ConnectionType.AGENT);
         if (existing.valid) {
             // Wrapped in try/catch: wrtc throws "Invalid argument" during native peer
             // connection state transitions (Pattern A race). On failure fall back to
@@ -501,7 +486,7 @@ export class AgentEventHandler {
             const listener = (evt) => {
                 if (
                     evt?.callId === callId
-                    && evt.connectionType === ConnectionType.FRONTEND
+                    && evt.connectionType === ConnectionType.AGENT
                     && evt.track?.kind === 'audio'
                 ) {
                     cleanup();
@@ -560,8 +545,8 @@ export class AgentEventHandler {
                     await agentAssignmentCoordinator.releaseAgentOfflineIfIdle(userId);
                 } else {
                     await agentAssignmentCoordinator.releaseAgentIfIdle(userId);
-                    if (call?.business_id) {
-                        await agentAssignmentCoordinator.assignOldestUnassignedCall(call.business_id);
+                    if (call?.tenant_id) {
+                        await agentAssignmentCoordinator.assignOldestUnassignedCall(call.tenant_id);
                     }
                 }
             } catch (err) {
@@ -571,7 +556,7 @@ export class AgentEventHandler {
 
         emitCallError({
             callId,
-            code: CallErrorCodes.AGENT_MEDIA_NOT_READY ?? 'AGENT_MEDIA_NOT_READY',
+            code: CallErrorCodes.AGENT_MEDIA_NOT_READY,
             message: 'Your microphone was not detected. Please check that your microphone is connected and permissions are allowed, then try again.',
         });
     }

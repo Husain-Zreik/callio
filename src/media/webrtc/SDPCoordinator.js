@@ -19,7 +19,7 @@ class SDPCoordinator {
     async createSDPOffer(callId, connectionType, callEventHandler = null) {
         console.log(`Creating ${connectionType} SDP offer for call ${callId}`);
 
-        if (connectionType === ConnectionType.FRONTEND) {
+        if (connectionType === ConnectionType.AGENT) {
             iceCoordinator.resetOutbound(callId);
         }
 
@@ -28,7 +28,7 @@ class SDPCoordinator {
         try {
             await peerRegistry.prepareConnection(callId, connectionType, connectionData);
 
-            if (connectionType === ConnectionType.FRONTEND && callEventHandler) {
+            if (connectionType === ConnectionType.AGENT && callEventHandler) {
                 const subscribed = await redisPubSubService.subscribeToCallEvents(callId, callEventHandler);
                 if (subscribed) console.log(`[SDPCoordinator] 🔔 Subscribed to events for call ${callId}`);
             }
@@ -66,7 +66,7 @@ class SDPCoordinator {
             await peerRegistry.prepareConnection(callId, connectionType, connectionData);
             await iceCoordinator.flushPreConnectionCandidates(pc, callId, connectionType);
 
-            if (connectionType === ConnectionType.WHATSAPP) {
+            if (connectionType === ConnectionType.CUSTOMER) {
                 await peerRegistry.extractAndStoreCandidates(sdpOffer, callId, connectionType);
             }
 
@@ -111,7 +111,7 @@ class SDPCoordinator {
         }
 
         try {
-            if (connectionType === ConnectionType.WHATSAPP) {
+            if (connectionType === ConnectionType.CUSTOMER) {
                 await peerRegistry.extractAndStoreCandidates(sdpAnswer, callId, connectionType);
             }
 
@@ -121,7 +121,7 @@ class SDPCoordinator {
 
             await iceCoordinator.flushPostConnectionCandidates(pc, callId, connectionType);
 
-            if (connectionType !== ConnectionType.WHATSAPP) {
+            if (connectionType !== ConnectionType.CUSTOMER) {
                 iceCoordinator.markClientReady(callId);
             }
         } catch (err) {

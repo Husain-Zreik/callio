@@ -1,68 +1,44 @@
 // src/core/calls/IncomingCallPayload.js
-// Validated, consistent payload for the `call:incoming` EventBus event.
-// All three assignment paths (DIRECT, QUEUED, TRANSFERRED) must use this class
-// so the frontend always receives an identical field shape.
+// Payload of the `call:incoming` EventBus event (and the agent socket event of
+// the same name). Every assignment path builds it with fromCall() so agents
+// always receive the same shape: the CallView plus how the call reached them.
 import { AssignmentType } from '../constants/CallConstants.js';
+import { toCallView } from './CallView.js';
 
 export class IncomingCallPayload {
-    constructor({
-        callId,
-        wacid,
-        businessId,
-        userId,
-        agentName,
-        agentEmail,
-        callerId,
-        callerName,
-        callerUsername,
-        callerNumber,
-        calleeId,
-        calleeName,
-        calleeUsername,
-        calleeNumber,
-        status,
-        callState = null,
-        direction,
-        sdpOffer,
-        startedAt,
-        ringingAt,
-        answeredAt,
+    /**
+     * @param {object} call      calls row
+     * @param {object} options
+     *   agentId        the agent it's assigned to (null = offered to offeredAgentIds)
+     *   agentName
+     *   offeredAgentIds agents it's offered to without an assignment (RING_ALL)
+     *   sdpOffer       the AGENT-leg offer
+     *   assignmentType AssignmentType
+     *   transferredFrom, assignedBy  set for transfers
+     */
+    static fromCall(call, {
+        agentId = call?.agent_id ?? null,
+        agentName = null,
+        offeredAgentIds = null,
+        sdpOffer = null,
         assignmentType,
-        routingContext = null,
         transferredFrom = null,
         assignedBy = null,
-        isCallCenter = false,
-    }) {
-        if (!callId)     throw new Error('IncomingCallPayload: callId required');
-        if (!businessId) throw new Error('IncomingCallPayload: businessId required');
+    } = {}) {
+        if (!call?.id) throw new Error('IncomingCallPayload: call required');
         if (!assignmentType || !Object.values(AssignmentType).includes(assignmentType))
             throw new Error(`IncomingCallPayload: invalid assignmentType "${assignmentType}"`);
 
-        this.callId          = callId;
-        this.wacid           = wacid           ?? null;
-        this.businessId      = businessId;
-        this.userId          = userId          ?? null;
-        this.agentName       = agentName       ?? null;
-        this.agentEmail      = agentEmail      ?? null;
-        this.callerId        = callerId        ?? null;
-        this.callerName      = callerName      ?? null;
-        this.callerUsername  = callerUsername  ?? null;
-        this.callerNumber    = callerNumber    ?? null;
-        this.calleeId        = calleeId        ?? null;
-        this.calleeName      = calleeName      ?? null;
-        this.calleeUsername  = calleeUsername  ?? null;
-        this.calleeNumber    = calleeNumber    ?? null;
-        this.status          = status          ?? null;
-        this.callState       = callState       ?? null;
-        this.direction       = direction       ?? null;
-        this.sdpOffer        = sdpOffer        ?? null;
-        this.startedAt       = startedAt       ?? null;
-        this.ringingAt       = ringingAt       ?? null;
-        this.answeredAt      = answeredAt      ?? null;
-        this.assignmentType  = assignmentType;
-        this.routingContext  = routingContext;
-        this.transferredFrom = transferredFrom;
-        this.assignedBy      = assignedBy;
-        this.isCallCenter    = isCallCenter    ?? false;
+        const payload = new IncomingCallPayload();
+        Object.assign(payload, toCallView(call, { agentName }), {
+            agentId,
+            agentName,
+            offeredAgentIds: offeredAgentIds ?? (agentId ? [agentId] : []),
+            sdpOffer,
+            assignmentType,
+            transferredFrom,
+            assignedBy,
+        });
+        return payload;
     }
 }

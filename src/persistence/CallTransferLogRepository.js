@@ -2,17 +2,17 @@
 import connection from '../../config/dbConnection.js';
 
 class CallTransferLogRepository {
-    async create(callId, businessId, fromAgentId, toAgentId, initiatedByUserId, initiatedByType, transferredAt) {
+    async create(callId, fromAgentId, toAgentId, initiatedByAgentId, initiatedByType, transferredAt, toQueueId = null) {
         await connection.execute(
             `INSERT INTO call_transfer_logs
-                (call_id, business_id, from_agent_id, to_agent_id, initiated_by_user_id, initiated_by_type, transferred_at, created_at, updated_at)
+                (call_id, from_agent_id, to_agent_id, to_queue_id, initiated_by_agent_id, initiated_by_type, transferred_at, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
             [
                 callId,
-                businessId,
                 fromAgentId ?? null,
-                toAgentId,
-                initiatedByUserId ?? null,
+                toAgentId ?? null,
+                toQueueId ?? null,
+                initiatedByAgentId ?? null,
                 initiatedByType || 'system',
                 transferredAt,
             ]
@@ -23,9 +23,7 @@ class CallTransferLogRepository {
         const [rows] = await connection.execute(
             `SELECT id, transferred_at
              FROM call_transfer_logs
-             WHERE call_id = ?
-               AND to_agent_id = ?
-               AND accepted_at IS NULL
+             WHERE call_id = ? AND to_agent_id = ? AND accepted_at IS NULL
              ORDER BY transferred_at DESC
              LIMIT 1`,
             [callId, toAgentId]
@@ -36,9 +34,7 @@ class CallTransferLogRepository {
     async hasPendingTransfer(callId, toAgentId) {
         const [rows] = await connection.execute(
             `SELECT id FROM call_transfer_logs
-             WHERE call_id = ?
-               AND to_agent_id = ?
-               AND accepted_at IS NULL
+             WHERE call_id = ? AND to_agent_id = ? AND accepted_at IS NULL
              LIMIT 1`,
             [callId, toAgentId]
         );
@@ -52,6 +48,18 @@ class CallTransferLogRepository {
              WHERE id = ?`,
             [acceptedAt, acceptanceDurationSeconds, id]
         );
+    }
+
+    async listForCall(callId) {
+        const [rows] = await connection.execute(
+            `SELECT id, from_agent_id, to_agent_id, to_queue_id, initiated_by_agent_id, initiated_by_type,
+                    transferred_at, accepted_at, acceptance_duration_seconds
+             FROM call_transfer_logs
+             WHERE call_id = ?
+             ORDER BY transferred_at ASC`,
+            [callId]
+        );
+        return rows;
     }
 }
 

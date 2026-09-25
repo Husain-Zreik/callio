@@ -8,7 +8,7 @@ class RecordingManager {
         this.activeSessions = new Map(); // callId -> RecordingSession
     }
 
-    async startRecording(callId, businessId, tracks) {
+    async startRecording(callId, tenantId, tracks) {
         if (this.activeSessions.has(callId)) {
             console.warn(`[RecordingManager] Call ${callId} is already being recorded`);
             return { success: false, reason: 'Already recording' };
@@ -24,7 +24,7 @@ class RecordingManager {
         try {
             console.log(`[RecordingManager] Starting recording for call ${callId}`);
 
-            const session = new RecordingSession(callId, businessId);
+            const session = new RecordingSession(callId, tenantId);
             this.activeSessions.set(callId, session);
 
             const started = await session.start();

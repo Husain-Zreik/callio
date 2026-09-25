@@ -2,14 +2,14 @@
 // Mirrors the role of EventTypes.js for pub/sub events.
 export const CallErrorCodes = {
     // Management / query (callId: null)
-    MISSING_BUSINESS_CONTEXT:       'MISSING_BUSINESS_CONTEXT',
+    MISSING_TENANT_CONTEXT:         'MISSING_TENANT_CONTEXT',
     FAILED_FETCH_ACTIVE:            'FAILED_FETCH_ACTIVE',
     AGENT_QUEUE_SYNC_FAILED:        'AGENT_QUEUE_SYNC_FAILED',
     AGENT_AVAILABILITY_SYNC_FAILED: 'AGENT_AVAILABILITY_SYNC_FAILED',
 
     // Signaling — per-call
     CALL_INITIATION_FAILED:    'CALL_INITIATION_FAILED',
-    WHATSAPP_TRIGGER_FAILED:   'WHATSAPP_TRIGGER_FAILED',
+    PROVIDER_TRIGGER_FAILED:   'PROVIDER_TRIGGER_FAILED',
     ACCEPT_FAILED:             'ACCEPT_FAILED',
     REJECT_FAILED:             'REJECT_FAILED',
     TERMINATE_FAILED:          'TERMINATE_FAILED',
@@ -30,4 +30,5 @@ export const CallErrorCodes = {
 
     // Internal
     EVENT_HANDLER_FAILED:      'EVENT_HANDLER_FAILED',
+    CALL_ALREADY_ENDED:        'CALL_ALREADY_ENDED',
 };

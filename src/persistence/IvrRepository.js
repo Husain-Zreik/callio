@@ -1,224 +1,193 @@
 // src/persistence/IvrRepository.js
-// All DB access for IVR menus, sessions, and session inputs.
+// DB access for IVR flows, their audio, sessions and session inputs.
 import connection from '../../config/dbConnection.js';
 
+// Platform-wide default queue hold audio: an audio_assets row with no tenant
+// and this external_ref.
+const DEFAULT_HOLD_AUDIO_REF = 'default_hold';
+
+function parseJson(value, fallback) {
+    if (value == null) return fallback;
+    if (typeof value !== 'string') return value;
+    try { return JSON.parse(value); } catch { return fallback; }
+}
+
+// audio_assets rows are exposed in the { storage_key, storage_disk } shape the
+// storage resolver takes.
+function toStorageRef(row) {
+    return row ? { id: row.id, storage_key: row.storage_key, storage_disk: row.storage_provider } : null;
+}
+
 class IvrRepository {
-    // Lightweight menu fetch (id + name only) — used for lifecycle log labels.
-    async findMenuHeader(ivrMenuId, businessId = null) {
+    // Lightweight flow fetch (id + name only) — for lifecycle log labels.
+    async findFlowHeader(ivrFlowId, tenantId = null) {
         const [rows] = await connection.execute(
-            `SELECT id, name
-             FROM ivr_menus
-             WHERE id = ?
-               AND (? IS NULL OR business_id = ?)
+            `SELECT id, name FROM ivr_flows
+             WHERE id = ? AND (? IS NULL OR tenant_id = ?)
              LIMIT 1`,
-            [ivrMenuId, businessId, businessId]
+            [ivrFlowId, tenantId, tenantId]
         );
         return rows[0] ?? null;
     }
 
-    // ── Menu ─────────────────────────────────────────────────────────────────
-
-    // Fetch a single IVR menu with its structure and audio metadata.
-    // Returns { id, name, status, timeout_seconds, structure, audioFilesById }
-    // where audioFilesById is a map of { [audioFileId]: { id, storage_key, storage_disk } }.
-    async findMenu(ivrMenuId, businessId = null) {
+    // A flow with its structure and the audio its nodes reference.
+    // Returns { id, name, status, timeout_seconds, structure, audioFilesById }.
+    async findFlow(ivrFlowId, tenantId = null) {
         const [rows] = await connection.execute(
-            `SELECT
-                m.id,
-                m.name,
-                m.structure,
-                m.timeout_seconds,
-                m.status
-             FROM ivr_menus m
-             WHERE m.id = ?
-               AND (? IS NULL OR m.business_id = ?)
+            `SELECT id, tenant_id, name, structure, timeout_seconds, status
+             FROM ivr_flows
+             WHERE id = ? AND (? IS NULL OR tenant_id = ?)
              LIMIT 1`,
-            [ivrMenuId, businessId, businessId]
+            [ivrFlowId, tenantId, tenantId]
         );
 
-        const menu = rows[0];
-        if (!menu) return null;
+        const flow = rows[0];
+        if (!flow) return null;
 
-        // Parse JSON structure stored in DB
-        let structure = { nodes: [], edges: [] };
-        if (menu.structure) {
-            try {
-                structure = typeof menu.structure === 'string'
-                    ? JSON.parse(menu.structure)
-                    : menu.structure;
-            } catch {
-                console.error(`[IvrRepository] Failed to parse structure for menu ${ivrMenuId}`);
-            }
-        }
+        const structure = parseJson(flow.structure, { nodes: [], edges: [] });
 
-        // Collect every audioFileId referenced in the structure nodes
-        const audioFileIds = [];
+        const audioIds = [];
         for (const node of (structure.nodes ?? [])) {
-            const fid = node.data?.audioFileId;
-            if (fid != null) audioFileIds.push(Number(fid));
+            const id = node.data?.audioFileId;
+            if (id != null) audioIds.push(Number(id));
         }
 
-        // Fetch storage metadata for those audio files in one query
-        let audioFilesById = {};
-        if (audioFileIds.length > 0) {
-            const placeholders = audioFileIds.map(() => '?').join(',');
-            const queryParams = [...audioFileIds];
-            let audioQuery = `SELECT id, storage_key, storage_disk
-                 FROM media_files
-                 WHERE type = 'audio'
-                   AND id IN (${placeholders})`;
-
-            if (businessId != null) {
-                audioQuery += ' AND business_id = ?';
-                queryParams.push(businessId);
-            }
-
-            const [audioRows] = await connection.execute(audioQuery, queryParams);
-            for (const row of audioRows) {
-                audioFilesById[row.id] = row;
-            }
+        const audioFilesById = {};
+        if (audioIds.length > 0) {
+            const placeholders = audioIds.map(() => '?').join(',');
+            const [audioRows] = await connection.execute(
+                `SELECT id, storage_key, storage_provider
+                 FROM audio_assets
+                 WHERE id IN (${placeholders}) AND (tenant_id = ? OR tenant_id IS NULL)`,
+                [...audioIds, flow.tenant_id]
+            );
+            for (const row of audioRows) audioFilesById[row.id] = toStorageRef(row);
         }
 
         return {
-            id: menu.id,
-            name: menu.name,
-            status: menu.status,
-            timeout_seconds: menu.timeout_seconds ?? 10,
+            id: flow.id,
+            name: flow.name,
+            status: flow.status,
+            timeout_seconds: flow.timeout_seconds ?? 10,
             structure,
-            audioFilesById, // { [audioFileId]: { id, storage_key, storage_disk } }
+            audioFilesById,
         };
+    }
+
+    // Active flows that may take an inbound call on this channel: channel-specific
+    // flows first, then tenant-wide ones, then trigger_priority, then most recent.
+    async findCandidateFlows(tenantId, channelId) {
+        const [rows] = await connection.execute(
+            `SELECT id, channel_id, trigger_condition,
+                    CASE WHEN channel_id = ? THEN 0 ELSE 1 END AS scope_order
+             FROM ivr_flows
+             WHERE tenant_id = ? AND status = 'ACTIVE'
+               AND (channel_id = ? OR channel_id IS NULL)
+             ORDER BY scope_order ASC, trigger_priority ASC, updated_at DESC`,
+            [channelId, tenantId, channelId]
+        );
+        return rows;
+    }
+
+    // ── Provisioning ──────────────────────────────────────────────────────────
+
+    async findFlowByExternalRef(tenantId, externalRef) {
+        const [rows] = await connection.execute(
+            `SELECT id, tenant_id, channel_id, external_ref, name, schema_version, structure, trigger_condition,
+                    trigger_priority, timeout_seconds, agent_ring_timeout, status, updated_at
+             FROM ivr_flows WHERE tenant_id = ? AND external_ref = ? LIMIT 1`,
+            [tenantId, externalRef]
+        );
+        return rows[0] ? { ...rows[0], structure: parseJson(rows[0].structure, null) } : null;
+    }
+
+    async listFlows(tenantId) {
+        const [rows] = await connection.execute(
+            `SELECT id, channel_id, external_ref, name, schema_version, trigger_condition, trigger_priority,
+                    timeout_seconds, agent_ring_timeout, status, updated_at
+             FROM ivr_flows WHERE tenant_id = ? ORDER BY id ASC`,
+            [tenantId]
+        );
+        return rows;
+    }
+
+    async upsertFlow(tenantId, externalRef, fields) {
+        const {
+            channel_id = null, name, schema_version = 1, structure, trigger_condition = 'ALWAYS',
+            trigger_priority = 0, timeout_seconds = 10, agent_ring_timeout = 60, status = 'INACTIVE',
+        } = fields;
+        await connection.execute(
+            `INSERT INTO ivr_flows (tenant_id, channel_id, external_ref, name, schema_version, structure,
+                                    trigger_condition, trigger_priority, timeout_seconds, agent_ring_timeout,
+                                    status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+             ON DUPLICATE KEY UPDATE
+                 channel_id = VALUES(channel_id), name = VALUES(name), schema_version = VALUES(schema_version),
+                 structure = VALUES(structure), trigger_condition = VALUES(trigger_condition),
+                 trigger_priority = VALUES(trigger_priority), timeout_seconds = VALUES(timeout_seconds),
+                 agent_ring_timeout = VALUES(agent_ring_timeout), status = VALUES(status), updated_at = NOW()`,
+            [tenantId, channel_id, externalRef, name, schema_version, JSON.stringify(structure),
+                trigger_condition, trigger_priority, timeout_seconds, agent_ring_timeout, status]
+        );
+        return this.findFlowByExternalRef(tenantId, externalRef);
+    }
+
+    async createAudioAsset(tenantId, { external_ref = null, name, storage_provider = 's3', storage_key, mime_type = null,
+        duration_seconds = null, file_size_bytes = null }) {
+        const [result] = await connection.execute(
+            `INSERT INTO audio_assets (tenant_id, external_ref, name, storage_provider, storage_key, mime_type,
+                                       duration_seconds, file_size_bytes, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+            [tenantId, external_ref, name, storage_provider, storage_key, mime_type, duration_seconds, file_size_bytes]
+        );
+        return this.findAudioAsset(result.insertId, tenantId);
+    }
+
+    async findAudioAsset(assetId, tenantId) {
+        const [rows] = await connection.execute(
+            `SELECT id, tenant_id, external_ref, name, storage_provider, storage_key, mime_type, duration_seconds,
+                    file_size_bytes, created_at
+             FROM audio_assets WHERE id = ? AND (tenant_id = ? OR tenant_id IS NULL) LIMIT 1`,
+            [assetId, tenantId]
+        );
+        return rows[0] ?? null;
+    }
+
+    async listAudioAssets(tenantId) {
+        const [rows] = await connection.execute(
+            `SELECT id, tenant_id, external_ref, name, storage_provider, storage_key, mime_type, duration_seconds,
+                    file_size_bytes, created_at
+             FROM audio_assets WHERE tenant_id = ? OR tenant_id IS NULL ORDER BY id ASC`,
+            [tenantId]
+        );
+        return rows;
     }
 
     // ── Sessions ──────────────────────────────────────────────────────────────
 
-    // Create an IVR session row when a caller enters the IVR flow.
-    // Returns the new sessionId.
-    async createSession({ callId, ivrMenuId, businessId }) {
+    async createSession({ callId, ivrFlowId }) {
         const [result] = await connection.execute(
-            `INSERT INTO ivr_sessions
-                (call_id, ivr_menu_id, business_id, completed, started_at, created_at, updated_at)
-             VALUES (?, ?, ?, 0, NOW(), NOW(), NOW())`,
-            [callId, ivrMenuId, businessId ?? null]
+            `INSERT INTO ivr_sessions (call_id, ivr_flow_id, completed, started_at, created_at, updated_at)
+             VALUES (?, ?, 0, NOW(), NOW(), NOW())`,
+            [callId, ivrFlowId ?? null]
         );
         return result.insertId;
     }
 
-    // Record a single DTMF input within a session.
     // Params: { sessionId, digit, nodeId }
     async recordInput({ sessionId, digit, nodeId }) {
         await connection.execute(
-            `INSERT INTO ivr_session_inputs
-                (ivr_session_id, node_name, input, pressed_at, created_at, updated_at)
+            `INSERT INTO ivr_session_inputs (ivr_session_id, node_name, input, pressed_at, created_at, updated_at)
              VALUES (?, ?, ?, NOW(), NOW(), NOW())`,
             [sessionId, nodeId ?? '', digit]
         );
     }
 
-    // ── Queue Audio ──────────────────────────────────────────────────────────
-
-    // Resolve the queue waiting audio for a business.
-    // Priority: business override → platform default → null.
-    // Returns { source: 'business'|'platform', storage_key, storage_disk } or null.
-    async getQueueAudio(businessId) {
-        // 1. Business override — read ivr_queue_audio_file_id from call_settings JSON
-        const [bizRows] = await connection.execute(
-            `SELECT
-                CAST(JSON_EXTRACT(call_settings, '$.ivr_queue_audio_file_id') AS UNSIGNED) AS audio_file_id
-             FROM businesses WHERE id = ? LIMIT 1`,
-            [businessId]
-        );
-
-        const audioFileId = bizRows[0]?.audio_file_id ? Number(bizRows[0].audio_file_id) : null;
-
-        if (audioFileId) {
-            const [fileRows] = await connection.execute(
-                `SELECT storage_key, storage_disk
-                 FROM media_files
-                 WHERE type = 'audio' AND id = ? AND business_id = ?
-                 LIMIT 1`,
-                [audioFileId, businessId]
-            );
-            if (fileRows[0]?.storage_key) {
-                return {
-                    source: 'business',
-                    storage_key: fileRows[0].storage_key,
-                    storage_disk: fileRows[0].storage_disk ?? 'public',
-                };
-            }
-        }
-
-        // 2. Platform default — read from platform_settings table
-        const [settingRows] = await connection.execute(
-            `SELECT \`key\`, value FROM platform_settings WHERE \`key\` IN (?, ?)`,
-            ['ivr.queue_audio_storage_key', 'ivr.queue_audio_storage_disk']
-        );
-
-        const byKey = {};
-        for (const row of settingRows) {
-            // value is stored as JSON (may be a JSON string like '"some/path"' or null)
-            try { byKey[row.key] = JSON.parse(row.value); } catch { byKey[row.key] = row.value; }
-        }
-
-        const storageKey = byKey['ivr.queue_audio_storage_key'] ?? null;
-        const storageDisk = byKey['ivr.queue_audio_storage_disk'] ?? 'public';
-
-        if (storageKey) {
-            return { source: 'platform', storage_key: storageKey, storage_disk: storageDisk };
-        }
-
-        return null;
-    }
-
-    // Lightweight call row fetch for IVR agent assignment — only the fields IVR needs.
-    async findCallRecord(callId) {
-        const [rows] = await connection.execute(
-            `SELECT id, wacid, business_id, business_number_id, client_number_id,
-                    caller_name, caller_username, caller_number, callee_name, callee_username, callee_number, ringing_at, status
-             FROM calls WHERE id = ? LIMIT 1`,
-            [callId]
-        );
-        return rows[0] ?? null;
-    }
-
-    // Updates state (and optionally status) of a call. Pass status='RINGING' when moving IVR → QUEUE.
-    async updateCallState(callId, state, status = null) {
-        if (status) {
-            await connection.execute(
-                // COALESCE ensures ringing_at is set the first time a call enters RINGING
-                // state (IVR→QUEUE transition). IVR calls skip the normal RINGING phase so
-                // ringing_at is often null, which causes the manager timer to show 00:00.
-                `UPDATE calls SET state = ?, status = ?, ringing_at = COALESCE(ringing_at, NOW()), updated_at = NOW() WHERE id = ?`,
-                [state, status, callId]
-            );
-        } else {
-            await connection.execute(
-                `UPDATE calls SET state = ?, updated_at = NOW() WHERE id = ?`,
-                [state, callId]
-            );
-        }
-    }
-
-    // Fetch storage metadata for a single audio file.
-    async findAudioFile(audioFileId, businessId = null) {
-        const [rows] = await connection.execute(
-            `SELECT storage_key, storage_disk
-             FROM media_files
-             WHERE id = ?
-               AND type = 'audio'
-               AND (? IS NULL OR business_id = ?)
-             LIMIT 1`,
-            [audioFileId, businessId, businessId]
-        );
-        return rows[0] ?? null;
-    }
-
-    // Close a session with an outcome and exact timing from Node runtime.
     // outcome: 'transferred'|'hung_up'|'timeout'|'error'
     async closeSession(sessionId, outcome, endedAt = null, durationSeconds = null) {
         const normalizedDuration = Number.isFinite(Number(durationSeconds))
             ? Math.max(0, Math.floor(Number(durationSeconds)))
             : null;
-
         const endedAtValue = endedAt instanceof Date ? endedAt : null;
 
         await connection.execute(
@@ -231,6 +200,85 @@ class IvrRepository {
              WHERE id = ?`,
             [outcome, endedAtValue, normalizedDuration, endedAtValue, sessionId]
         );
+    }
+
+    async listSessionsForCall(callId) {
+        const [sessions] = await connection.execute(
+            `SELECT id, ivr_flow_id, completed, outcome, duration, started_at, ended_at
+             FROM ivr_sessions WHERE call_id = ? ORDER BY id ASC`,
+            [callId]
+        );
+        if (!sessions.length) return [];
+        const placeholders = sessions.map(() => '?').join(',');
+        const [inputs] = await connection.execute(
+            `SELECT ivr_session_id, node_name, input, pressed_at
+             FROM ivr_session_inputs WHERE ivr_session_id IN (${placeholders}) ORDER BY id ASC`,
+            sessions.map((s) => s.id)
+        );
+        return sessions.map((s) => ({ ...s, inputs: inputs.filter((i) => i.ivr_session_id === s.id) }));
+    }
+
+    // ── Audio ─────────────────────────────────────────────────────────────────
+
+    // Hold audio for a queue: the queue's own asset, else the platform default.
+    // Returns { source: 'queue'|'platform', storage_key, storage_disk } or null.
+    async getQueueAudio(queueId, tenantId) {
+        if (queueId) {
+            const [rows] = await connection.execute(
+                `SELECT a.id, a.storage_key, a.storage_provider
+                 FROM queues q
+                 JOIN audio_assets a ON a.id = q.hold_audio_asset_id
+                 WHERE q.id = ? AND q.tenant_id = ? AND (a.tenant_id = q.tenant_id OR a.tenant_id IS NULL)
+                 LIMIT 1`,
+                [queueId, tenantId]
+            );
+            if (rows[0]?.storage_key) return { source: 'queue', ...toStorageRef(rows[0]) };
+        }
+
+        const [rows] = await connection.execute(
+            `SELECT id, storage_key, storage_provider FROM audio_assets
+             WHERE tenant_id IS NULL AND external_ref = ? LIMIT 1`,
+            [DEFAULT_HOLD_AUDIO_REF]
+        );
+        return rows[0]?.storage_key ? { source: 'platform', ...toStorageRef(rows[0]) } : null;
+    }
+
+    // One audio asset, owned by the tenant or platform-wide.
+    async findAudioFile(audioAssetId, tenantId = null) {
+        const [rows] = await connection.execute(
+            `SELECT id, storage_key, storage_provider FROM audio_assets
+             WHERE id = ? AND (? IS NULL OR tenant_id = ? OR tenant_id IS NULL)
+             LIMIT 1`,
+            [audioAssetId, tenantId, tenantId]
+        );
+        return toStorageRef(rows[0]);
+    }
+
+    // ── Call row helpers ──────────────────────────────────────────────────────
+
+    // The call fields IVR agent assignment needs.
+    async findCallRecord(callId) {
+        const [rows] = await connection.execute(
+            `SELECT id, provider_call_id, tenant_id, channel_id, channel, channel_address, queue_id,
+                    customer_address, customer_address_type, customer_name, ringing_at, status
+             FROM calls WHERE id = ? LIMIT 1`,
+            [callId]
+        );
+        return rows[0] ?? null;
+    }
+
+    // Updates state (and optionally status). Pass status='RINGING' when moving IVR → QUEUE.
+    async updateCallState(callId, state, status = null) {
+        if (status) {
+            // COALESCE sets ringing_at the first time the call enters RINGING
+            // (IVR calls skip the normal RINGING phase).
+            await connection.execute(
+                `UPDATE calls SET state = ?, status = ?, ringing_at = COALESCE(ringing_at, NOW()), updated_at = NOW() WHERE id = ?`,
+                [state, status, callId]
+            );
+        } else {
+            await connection.execute(`UPDATE calls SET state = ?, updated_at = NOW() WHERE id = ?`, [state, callId]);
+        }
     }
 }
 

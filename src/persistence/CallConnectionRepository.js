@@ -5,7 +5,7 @@ class CallConnectionRepository {
     async create(data) {
         const {
             call_id,
-            business_id = null,
+            agent_id = null,
             connection_type,
             media_types = ['audio'],
             local_sdp = null,
@@ -24,13 +24,13 @@ class CallConnectionRepository {
         // caller may have already written on the existing row.
         const [result] = await connection.execute(`
             INSERT INTO call_connections (
-                call_id, business_id, connection_type,
+                call_id, agent_id, connection_type,
                 media_types, local_sdp, remote_sdp, sdp_type,
                 created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
             ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)
         `, [
-            call_id, business_id, connection_type,
+            call_id, agent_id, connection_type,
             JSON.stringify(media_types), local_sdp, remote_sdp, sdp_type
         ]);
 
@@ -103,8 +103,17 @@ class CallConnectionRepository {
         await connection.execute(query, params);
     }
 
+    // Who is on this leg now (the accepting / transferred-to agent, or the
+    // monitoring supervisor).
+    async updateAgentId(callId, connectionType, agentId) {
+        await connection.execute(
+            'UPDATE call_connections SET agent_id = ?, updated_at = NOW() WHERE call_id = ? AND connection_type = ?',
+            [agentId, callId, connectionType]
+        );
+    }
+
     // Records which durable device (not the ephemeral socket.id) is bound to
-    // this call's FRONTEND connection — read back by CallQueryService for the
+    // this call's AGENT connection — read back by CallQueryService for the
     // ongoing-calls resync (a reloaded client needs this, since its own
     // in-memory state doesn't survive the reload) and by AgentEventHandler
     // before a reconnect takes over an already-bound call from another device.
@@ -119,6 +128,15 @@ class CallConnectionRepository {
         await connection.execute(`
             UPDATE call_connections
             SET connected_at = NOW(),
+                updated_at = NOW()
+            WHERE call_id = ? AND connection_type = ?
+        `, [callId, connectionType]);
+    }
+
+    async markDisconnected(callId, connectionType) {
+        await connection.execute(`
+            UPDATE call_connections
+            SET disconnected_at = COALESCE(disconnected_at, NOW()),
                 updated_at = NOW()
             WHERE call_id = ? AND connection_type = ?
         `, [callId, connectionType]);
@@ -187,6 +205,7 @@ class CallConnectionRepository {
             SET connection_state = 'CLOSED',
                 ice_connection_state = 'CLOSED',
                 ice_gathering_state = 'COMPLETE',
+                disconnected_at = COALESCE(disconnected_at, NOW()),
                 updated_at = NOW()
             WHERE call_id = ?
         `, [callId]);

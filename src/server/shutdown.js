@@ -18,6 +18,7 @@ import { callLifecycleLogger } from '../core/calls/CallLifecycleLogger.js';
 import { ivrCoordinator } from '../core/ivr/IvrCoordinator.js';
 import CallRepository from '../persistence/CallRepository.js';
 import dbPool from '../../config/dbConnection.js';
+import { outboxDispatcher } from '../outbox/OutboxDispatcher.js';
 
 // Checked by callWebhookController before processing a new incoming-call webhook.
 // Live ES module binding — importers see updates made to this value below, not a
@@ -83,10 +84,10 @@ export async function shutdown(server, io) {
             // Fetch call records to categorise active calls before terminating them.
             const callRecords = await CallRepository.findByIds(activeCalls).catch(() => []);
             const inProgressCalls = callRecords.filter(c => c.status === 'IN_PROGRESS');
-            // IVR calls: RINGING with an ivr_menu_id — they hold a live WHATSAPP audio
+            // IVR calls: RINGING with an ivr_flow_id — they hold a live WHATSAPP audio
             // connection and must be explicitly terminated with Meta, same as IN_PROGRESS.
             const ivrCalls = callRecords.filter(
-                c => c.ivr_menu_id != null && c.status !== 'TERMINATED' && c.status !== 'FAILED'
+                c => c.ivr_flow_id != null && c.status !== 'TERMINATED' && c.status !== 'FAILED'
             );
 
             // DB updates run FIRST — these are instant (~10ms) and must complete before
@@ -140,7 +141,7 @@ export async function shutdown(server, io) {
             const callsNeedingTermination = [...inProgressCalls, ...ivrCalls];
             if (callsNeedingTermination.length > 0) {
                 await Promise.allSettled(callsNeedingTermination.map(c =>
-                    callLifecycleLogger.logTerminated(c.id, c.business_id, c.user_id ?? null, {
+                    callLifecycleLogger.logTerminated(c.id, c.tenant_id, c.agent_id ?? null, {
                         reason: 'service_maintenance',
                         message: 'Call ended due to service maintenance',
                     }).catch(err =>
@@ -169,8 +170,9 @@ export async function shutdown(server, io) {
         console.log("📦 Waiting for storage uploads to complete...");
         await streamUploader.cleanup(45_000);
 
-        // 6. Stop background cleanup job
+        // 6. Stop background jobs (Redis reaper, outbox dispatcher lease)
         await redisCleanupService.stop();
+        await outboxDispatcher.stop();
 
         // 7. Close Redis service connections (in reverse order)
         console.log("📦 Closing Redis services...");

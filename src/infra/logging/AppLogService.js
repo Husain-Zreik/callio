@@ -27,7 +27,7 @@ const LOG_BASE = path.resolve(
 
 class AppLogService {
     constructor() {
-        this._workerId   = config.runtime?.workerId ?? process.env.WORKER_ID ?? 'unknown';
+        this._workerId   = config.runtime?.workerId ?? 'unknown';
         this._workerDir  = path.join(LOG_BASE, `worker-${this._workerId}`);
 
         // Active write streams keyed by type ('all' | 'error')

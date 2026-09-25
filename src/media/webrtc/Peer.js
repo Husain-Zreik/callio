@@ -35,8 +35,8 @@ export class Peer {
 
     get callId() { return this.context.callId; }
     get isMonitor() { return this.connectionType === ConnectionType.MONITOR; }
-    get isFrontend() { return this.connectionType === ConnectionType.FRONTEND; }
-    get isWhatsapp() { return this.connectionType === ConnectionType.WHATSAPP; }
+    get isFrontend() { return this.connectionType === ConnectionType.AGENT; }
+    get isWhatsapp() { return this.connectionType === ConnectionType.CUSTOMER; }
 
     // ── Boolean state setters ──────────────────────────────────────────────────
 
@@ -126,15 +126,15 @@ export class Peer {
         this.context.update(data);
     }
 
-    setWacid(wacid) {
-        this.context.setWacid(wacid);
+    setProviderCallId(providerCallId) {
+        this.context.setProviderCallId(providerCallId);
     }
 
     // ── DB operations ─────────────────────────────────────────────────────────
 
     async insertConnectionRecord() {
         try {
-            // Fast path: reuse an already-existing row without the businessId
+            // Fast path: reuse an already-existing row without the tenantId
             // lookup/write below. This SELECT can still race a concurrent
             // caller's SELECT (both see nothing, both fall through) — that's
             // fine, CallConnectionRepository.create() below is an atomic
@@ -152,15 +152,15 @@ export class Peer {
                 return;
             }
 
-            // Use the businessId already on the context when available to avoid
+            // Use the tenantId already on the context when available to avoid
             // an extra round-trip; fall back to a DB lookup only when needed.
-            const businessId = this.context.businessId
-                ?? (await CallRepository.findById(this.context.callId))?.business_id
+            const tenantId = this.context.tenantId
+                ?? (await CallRepository.findById(this.context.callId))?.tenant_id
                 ?? null;
 
             const { id } = await CallConnectionRepository.create({
                 call_id: this.context.callId,
-                business_id: businessId,
+                tenant_id: tenantId,
                 connection_type: this.connectionType,
             });
 
