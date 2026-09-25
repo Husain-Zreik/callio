@@ -10,6 +10,8 @@ Callio is a standalone Node.js WebRTC call-center service. It was extracted from
 
 **`SIP_INTEGRATION.md`** documents the SIP trunk work (Phase 2 of the roadmap below, now underway): the drachtio-server + rtpengine gateway architecture, why that stack was chosen over Janus/FreeSWITCH/Asterisk, and the full Milestone B (application-code integration) scope. Read it before touching anything under `deploy/sip-gateway/` or `src/services/call/signaling/sip/`.
 
+**`PLATFORM_ARCHITECTURE.md`** is the target design: Callio as a standalone call service that any external product integrates with (Management API, event webhooks, agent gateway, channel ingress, push), the ports/adapters split, the target `src/` layout and the build order. Read it before restructuring code or adding anything a consumer would depend on. `migrations/README.md` describes the matching data model (Callio's own database).
+
 `ARCHITECTURE.md` is the detailed developer guide carried over from the original codebase (folder-by-folder breakdown, call flow diagrams, architectural patterns, naming conventions). It predates the extraction, so it still has some prose mentioning the chat/orders/templates/activities/ticket namespaces that no longer exist in this repo — treat those specific mentions as stale, everything else in it is accurate and worth reading for depth beyond this file.
 
 ## Where this came from — reference these if you need context this repo doesn't have

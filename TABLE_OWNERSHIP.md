@@ -16,6 +16,14 @@ as a second, never-wired-up writer for `call_lifecycle_events`/
 on a table you don't own, call the owning service's API — don't write the
 row directly.**
 
+**Being phased out.** Callio is moving to its own database with a
+consumer-agnostic schema (tenants, agents, channels, IVR flows — see
+`migrations/README.md`), provisioned by consumers through Callio's API rather
+than read out of midlr's tables. This document describes how the code
+*currently* runs against midlr's shared database, and stays accurate until
+the repository layer is ported to the new schema; at that point the shared
+tables, the "accepted debt" reads below and this ownership contract go away.
+
 | Table | Writer(s) | Contract |
 |---|---|---|
 | `calls` | **node/ only** | Laravel never writes directly. Stale/zombie-call cleanup goes through `POST /api/internal/calls/release-stale` (see `CallCleanupService.releaseStaleCallsForUser`), gated behind `services.node_server.use_remote_stale_cleanup` during rollout. Laravel may still read freely (dashboards, billing, `activeCall` relation). |
