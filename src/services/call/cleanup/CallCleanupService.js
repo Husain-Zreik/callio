@@ -3,6 +3,7 @@
 // getOngoingCalls lives in CallManager (it's a query, not a cleanup operation).
 import CallRepository from '../../../repositories/CallRepository.js';
 import AgentRepository from '../../../repositories/AgentRepository.js';
+import RecordingRepository from '../../../repositories/RecordingRepository.js';
 import BusinessRepository from '../../../repositories/BusinessRepository.js';
 import EventBus from '../../core/EventBus.js';
 import { peerRegistry } from '../signaling/webrtc/PeerRegistry.js';
@@ -182,6 +183,10 @@ class CallCleanupService {
         // wrtc peers for calls already terminated elsewhere (runs every cycle, even when
         // the DB stuck-call scan below finds nothing).
         await this._reconcileOrphanedPeers();
+
+        await RecordingRepository.markStaleRecordingsFailed().catch((err) =>
+            console.error('[Cleanup] Stale recording scan failed:', err)
+        );
 
         try {
             const stuckCalls = await CallRepository.findAllStuckCalls(1);

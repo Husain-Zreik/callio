@@ -84,15 +84,22 @@ class RecordingRepository {
         `, [errorMessage, recordingId]);
     }
 
-    // Called at startup to mark recordings left in-progress by unclean exits as failed.
+    // Marks recordings still 'recording'/'processing' whose call ended more than
+    // 10 minutes ago — long enough for a normal upload to finish, so anything
+    // left is from a worker that died mid-call. Scoped by call state, not by
+    // "this worker just started", so one worker's restart never fails another
+    // worker's live recordings.
     async markStaleRecordingsFailed() {
         const [result] = await connection.execute(`
-            UPDATE call_recordings
-            SET status        = 'failed',
-                error_message = 'Server restarted while recording was in progress',
-                completed_at  = NOW(),
-                updated_at    = NOW()
-            WHERE status IN ('recording', 'processing')
+            UPDATE call_recordings r
+            JOIN calls c ON c.id = r.call_id
+            SET r.status        = 'failed',
+                r.error_message = 'Recording never finalized — worker exited while recording',
+                r.completed_at  = NOW(),
+                r.updated_at    = NOW()
+            WHERE r.status IN ('recording', 'processing')
+              AND c.status IN ('TERMINATED', 'FAILED')
+              AND COALESCE(c.ended_at, c.updated_at) < NOW() - INTERVAL 10 MINUTE
         `);
         if (result.affectedRows > 0) {
             console.log(`[RecordingRepository] ⚠️ Marked ${result.affectedRows} stale recording(s) as failed`);

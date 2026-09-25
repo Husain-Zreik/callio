@@ -26,10 +26,13 @@ export async function handleConnection(socket) {
         `[WS] User connected - Name: ${userName}, UserID: ${userId}, BusinessID: ${businessId}, SocketID: ${socket.id}, Purpose: ${socket.connectionPurpose || 'session'}, Worker: ${redisPubSubService.workerId}`,
     );
 
-    if (userId !== "Unknown" && businessId !== "Unknown" && isSessionConnection) {
+    const tracksPresence = userId !== "Unknown" && businessId !== "Unknown"
+        && businessId !== "SUPER_ADMIN" && isSessionConnection;
+
+    if (tracksPresence) {
         let isFirstSocket = false;
         try {
-            await presenceService.trackConnection(userId, businessId, socket.id, socket.user?.fcmToken);
+            await presenceService.trackConnection(userId, socket.id);
             const socketCount = await presenceService.getUserSocketCount(userId);
             isFirstSocket = socketCount === 1;
         } catch (error) {
@@ -56,8 +59,8 @@ export async function handleConnection(socket) {
         console.log(
             `[WS] User disconnected - Name: ${userName}, UserID: ${userId}, SocketID: ${socket.id}, Reason: ${reason}, Purpose: ${socket.connectionPurpose || 'session'}`,
         );
-        if (userId !== "Unknown" && businessId !== "Unknown" && isSessionConnection) {
-            await presenceService.trackDisconnection(userId, businessId, socket.id);
+        if (tracksPresence) {
+            await presenceService.trackDisconnection(userId, socket.id);
 
             // Intentional logout — clear the role cache so the next login always
             // fetches a fresh role from the DB. Transport drops ('transport close',

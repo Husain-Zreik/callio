@@ -82,6 +82,15 @@ class IvrEngine {
         this._navigateTo(firstEdge.target);
     }
 
+    // Run the flow again from ivr_start after it completed (e.g. a transfer
+    // target was unavailable and the node says to replay).
+    restart() {
+        this._stopped = false;
+        this._currentNodeId = null;
+        this._replayCount = 0;
+        this.start();
+    }
+
     stop() {
         if (this._stopped) return;
         this._stopped = true;

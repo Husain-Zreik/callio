@@ -1,5 +1,4 @@
 // src/websocket/managers/RoomManager.js
-// src/websocket/managers/RoomManager.js
 import { presenceService } from "../../services/redis/PresenceService.js";
 
 class RoomManager {
@@ -65,32 +64,10 @@ class RoomManager {
         this.io.to(`managers:${businessId}`).emit(event, data);
     }
 
-    // Broadcasts to the target business AND the SUPER_ADMIN room.
-    // Use for ticket events where both the tenant and admins need the update.
-    broadcastToBusinessAndAdmins(businessId, event, data) {
-        this.io.to(`business:${businessId}`).emit(event, data);
-        if (businessId !== "SUPER_ADMIN") {
-            this.io.to("business:SUPER_ADMIN").emit(event, data);
-        }
-    }
-
     // ── Domain broadcasts ─────────────────────────────────────────────────────
 
     broadcastToCall(callId, event, data) {
         this.io.to(`call:${callId}`).emit(event, data);
-    }
-
-    broadcastToChat(chatId, event, data) {
-        this.io.to(`chat:${chatId}`).emit(event, data);
-    }
-
-    // Excludes the sender — use when the sender's UI already applied the update optimistically.
-    broadcastToTicketRoom(socket, ticketId, event, data) {
-        socket.to(`ticket:${ticketId}`).emit(event, data);
-    }
-
-    broadcastToTicketAdminRoom(socket, ticketId, event, data) {
-        socket.to(`ticket:${ticketId}:admin`).emit(event, data);
     }
 
     // ── Room joins ────────────────────────────────────────────────────────────
@@ -111,37 +88,13 @@ class RoomManager {
         socket.join(`call:${callId}`);
     }
 
-    joinChatRoom(socket, chatId) {
-        socket.join(`chat:${chatId}`);
-    }
-
-    joinTicketRoom(socket, ticketId) {
-        socket.join(`ticket:${ticketId}`);
-        if (socket.user?.isAdmin) {
-            socket.join(`ticket:${ticketId}:admin`);
-        }
-    }
-
     // ── Room leaves ───────────────────────────────────────────────────────────
-
-    leaveBusinessRoom(socket, businessId) {
-        if (businessId) socket.leave(`business:${businessId}`);
-    }
 
     leaveCallRoom(socket, callId) {
         if (callId) {
             socket.leave(`call:${callId}`);
             delete socket.callId;
         }
-    }
-
-    leaveChatRoom(socket, chatId) {
-        if (chatId) socket.leave(`chat:${chatId}`);
-    }
-
-    leaveTicketRoom(socket, ticketId) {
-        socket.leave(`ticket:${ticketId}`);
-        socket.leave(`ticket:${ticketId}:admin`);
     }
 
     // ── Cross-worker room management ──────────────────────────────────────────

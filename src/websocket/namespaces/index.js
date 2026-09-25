@@ -1,10 +1,8 @@
 // src/websocket/namespaces/index.js
-// callio only serves the call + device namespaces — chat/orders/templates/
-// activities/ticket stayed behind in the monorepo (see TABLE_OWNERSHIP.md /
-// this repo's README for the extraction boundary).
+// Registers the call-domain socket listeners. Push-token registration is an
+// HTTP concern, not a socket one.
 import registerCallSocketHandlers from "./call/socketHandlers.js";
 import registerCallBusHandlers from "./call/busHandlers.js";
-import registerDeviceSocketHandlers from "./device/socketHandlers.js";
 
 export function registerAllEventBusListeners() {
     registerCallBusHandlers();
@@ -12,5 +10,4 @@ export function registerAllEventBusListeners() {
 
 export function registerAllSocketListeners(socket) {
     registerCallSocketHandlers(socket);
-    registerDeviceSocketHandlers(socket);
 }

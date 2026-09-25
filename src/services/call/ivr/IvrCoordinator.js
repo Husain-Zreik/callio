@@ -36,6 +36,9 @@ class IvrCoordinator {
         // this doesn't grow unbounded across the process lifetime.
         this._completedCallIds = new Set();
         EventBus.on('call:terminated', ({ callId }) => this._completedCallIds.delete(callId));
+        // IvrTransferHandler emits this when a transfer target was unavailable and
+        // the node's action is 'replay': run the flow again on the same session.
+        EventBus.on('call:ivr_replay', ({ callId }) => this._replay(callId));
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -237,10 +240,13 @@ class IvrCoordinator {
             });
 
             // 7. Listen for IVR completion
+            // terminationHandler stays registered after completion: a transfer to
+            // an unavailable target keeps the session alive while it plays the
+            // offline/busy message and possibly replays the menu, and a hang-up in
+            // that window must still tear the session down. stopSession() removes it.
             const completeHandler = ({ callId: cid, action, transferData }) => {
                 if (cid !== callId) return;
                 EventBus.off('call:ivr_complete', completeHandler);
-                EventBus.off('call:terminated', terminationHandler);
                 this._onComplete(callId, action, callMeta, transferData ?? {}).catch((err) =>
                     console.error(`[IvrCoordinator] Completion error for call ${callId}:`, err.message)
                 );
@@ -443,6 +449,15 @@ class IvrCoordinator {
     }
 
     // ── Internals ─────────────────────────────────────────────────────────────
+
+    _replay(callId) {
+        const session = this._sessions.get(callId);
+        if (!session || session._pending) return;
+
+        EventBus.on('call:ivr_complete', session.completeHandler);
+        session.engine.restart();
+        console.log(`[IvrCoordinator] Replaying IVR for call ${callId}`);
+    }
 
     /**
      * Build a Map from nodeId → resolved audio for every node that references

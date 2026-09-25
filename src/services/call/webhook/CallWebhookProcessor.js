@@ -13,7 +13,7 @@ import OneSignalService from '../../notifications/OneSignalService.js';
 import { NotificationPresets, NotificationIcons, absoluteUrl } from '../../notifications/notificationPresets.js';
 import { callOwnershipService } from '../../redis/CallOwnershipService.js';
 import { redisPubSubService } from '../../redis/RedisPubSubService.js';
-import { redisUtilityService } from '../../redis/RedisUtilityService.js';
+import { redisCleanupService } from '../../redis/RedisCleanupService.js';
 import { redisBaseService } from '../../redis/RedisBaseService.js';
 import { callAgentAssignmentService } from '../../redis/CallAgentAssignmentService.js';
 import { agentMissedCallTracker } from '../../redis/AgentMissedCallTracker.js';
@@ -137,12 +137,12 @@ class CallWebhookProcessor {
             console.error(`[Webhook:event] Error on "${event}" for call ${wacid}:`, error);
         } finally {
             if (event === 'terminate') {
-                await redisUtilityService.cleanupCall(wacid);
+                await redisCleanupService.cleanupCall(wacid);
                 console.log(`[Webhook:event] Cleaned up ownership for call ${wacid}`);
             } else if (event === 'connect') {
                 const latestCall = await CallRepository.findByWacid(wacid);
                 if (!latestCall || [CallStatus.TERMINATED, CallStatus.FAILED].includes(latestCall.status)) {
-                    await redisUtilityService.cleanupCall(wacid);
+                    await redisCleanupService.cleanupCall(wacid);
                     return;
                 }
                 const madePermanent = await callOwnershipService.setCallOwnershipPermanent(wacid);

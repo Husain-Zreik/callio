@@ -17,6 +17,7 @@ import { terminateWhatsAppCall } from '../services/call/signaling/webrtc/WhatsAp
 import { callLifecycleLogger } from '../services/call/lifecycle/CallLifecycleLogger.js';
 import { ivrCoordinator } from '../services/call/ivr/IvrCoordinator.js';
 import CallRepository from '../repositories/CallRepository.js';
+import dbPool from '../../config/dbConnection.js';
 
 // Checked by callWebhookController before processing a new incoming-call webhook.
 // Live ES module binding — importers see updates made to this value below, not a
@@ -33,6 +34,10 @@ import CallRepository from '../repositories/CallRepository.js';
 export let isShuttingDown = false;
 
 export async function shutdown(server, io) {
+    // SIGINT followed by SIGTERM (or PM2 sending both) must not run the
+    // sequence twice — the second run would re-terminate calls and close
+    // already-closed clients.
+    if (isShuttingDown) return;
     console.log("🛑 Shutting down server...");
     isShuttingDown = true;
 
@@ -177,6 +182,9 @@ export async function shutdown(server, io) {
 
         // 9. Close storage client
         await storageClient.close();
+
+        // 10. Close the MySQL pool — last, since every step above may still write.
+        await dbPool.end().catch((err) => console.warn("[Shutdown] DB pool close failed:", err));
 
         console.log("✅ All services closed");
     } catch (err) {

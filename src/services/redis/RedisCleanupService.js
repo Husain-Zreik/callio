@@ -2,7 +2,6 @@
 import CallRepository from '../../repositories/CallRepository.js';
 import { callOwnershipService } from './CallOwnershipService.js';
 import { redisBaseService } from './RedisBaseService.js';
-import { callStateCache } from './CallStateCache.js';
 import { CallStatus } from '../call/constants/CallConstants.js';
 import { config } from '../../../config/envConfig.js';
 
@@ -23,7 +22,6 @@ class RedisCleanupService {
     async init() {
         await redisBaseService.init();
         await callOwnershipService.init();
-        await callStateCache.init();
         console.log(`[RedisCleanup] Worker ${this.workerId} initialized`);
     }
 
@@ -137,10 +135,7 @@ class RedisCleanupService {
     // would block cleanup of calls owned by other (possibly crashed) workers.
     async cleanupCall(callId) {
         try {
-            await Promise.all([
-                redisBaseService.del(callOwnershipService.getKey(callId)),
-                callStateCache.deleteCallState(callId)
-            ]);
+            await redisBaseService.del(callOwnershipService.getKey(callId));
 
             console.log(`[RedisCleanup] Cleaned up all data for call ${callId}`);
             return true;

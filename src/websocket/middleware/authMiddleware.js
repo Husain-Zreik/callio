@@ -1,7 +1,6 @@
 // src/websocket/middleware/authMiddleware.js
 import jwt from "jsonwebtoken";
 import { roomManager } from "../managers/RoomManager.js";
-import NotificationRepository from "../../repositories/NotificationRepository.js";
 import AgentRepository from "../../repositories/AgentRepository.js";
 import BusinessRepository from "../../repositories/BusinessRepository.js";
 import { redisBaseService } from "../../services/redis/RedisBaseService.js";
@@ -79,9 +78,6 @@ export async function authMiddleware(socket, next) {
         // caller that predates this field behaves exactly as before.
         const connectionPurpose = socket.handshake.auth?.purpose || 'session';
 
-        // FCM token fetch — NotificationRepository handles in-process caching
-        // to avoid repeated DB hits on rapid reconnects (e.g. PM2 restart).
-        user.fcmToken = await NotificationRepository.getUserFcmToken(user.id, deviceId);
         user.deviceId = deviceId;
 
         socket.user = user;

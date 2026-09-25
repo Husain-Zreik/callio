@@ -9,7 +9,6 @@ import { redisCleanupService } from '../services/redis/RedisCleanupService.js';
 import { storageClient } from '../services/storage/StorageClient.js';
 import { encodingWorkerBridge } from '../services/call/audio/recording/encoding/EncodingWorkerBridge.js';
 import { dtmfWorkerBridge } from '../services/call/audio/dtmf/DTMFWorkerBridge.js';
-import RecordingRepository from '../repositories/RecordingRepository.js';
 
 function logOptional(label, result, disabledFeature) {
     if (result.status === 'fulfilled')
@@ -35,17 +34,13 @@ export async function initRedis() {
 // Redis or on each other — run together. All are optional: failure warns but
 // does not abort startup.
 export async function initOptionalServices() {
-    const [storageResult, encodingResult, dtmfResult, staleResult] = await Promise.allSettled([
+    const [storageResult, encodingResult, dtmfResult] = await Promise.allSettled([
         storageClient.init(),
         encodingWorkerBridge.init(),
         dtmfWorkerBridge.init(),
-        RecordingRepository.markStaleRecordingsFailed(),
     ]);
 
     logOptional('Storage service',  storageResult,  'recording');
     logOptional('Encoding worker',  encodingResult, 'recording');
     logOptional('DTMF worker',      dtmfResult,     'IVR digit detection');
-
-    if (staleResult.status === 'rejected')
-        console.warn("⚠️ Stale recording cleanup failed:", staleResult.reason.message);
 }

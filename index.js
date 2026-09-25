@@ -56,7 +56,7 @@ async function startServer() {
             next();
         });
 
-        await presenceService.clearAllPresence();
+        await presenceService.clearOwnStalePresence();
         redisCleanupService.start();
         callCleanupService.start();
 

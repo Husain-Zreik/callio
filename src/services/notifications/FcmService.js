@@ -1,7 +1,6 @@
 import admin from "firebase-admin";
 import { config } from "../../../config/envConfig.js";
 import { notifyLog } from "./notificationLogger.js";
-import { presenceService } from "../redis/PresenceService.js";
 import notificationRepository from "../../repositories/NotificationRepository.js";
 
 class FcmService {
@@ -140,18 +139,9 @@ class FcmService {
 
                         if (isInvalidToken) {
                             invalidTokenCount++;
-                            const [removed] = await Promise.all([
-                                presenceService.removeFcmToken(token).catch(err => {
-                                    console.error(`[FCM] Failed to remove stale token from Redis: ${err.message}`);
-                                    return false;
-                                }),
-                                notificationRepository.removeFcmToken(token).catch(err => {
-                                    console.error(`[FCM] Failed to remove stale token from DB: ${err.message}`);
-                                }),
-                            ]);
-                            if (removed) {
-                                console.log(`[FCM] Removed stale/invalid token for index ${idx}: ${token?.substring(0, 10)}... (Code: ${errCode})`);
-                            }
+                            await notificationRepository.removeFcmToken(token).catch(err => {
+                                console.error(`[FCM] Failed to remove stale token from DB:`, err);
+                            });
                         }
                     }
                 }
@@ -181,33 +171,6 @@ class FcmService {
                 error.message,
             );
         }
-    }
-
-    /**
-     * Send to all registered devices of a single user (from Redis presence cache).
-     * @param {string|number} userId
-     * @param {object} payload - { title, body, data }
-     */
-    async sendToUser(userId, payload) {
-        const tokens = await presenceService.getCachedFcmTokens(userId);
-        if (!tokens.length) return null;
-        return this.sendToTokens(tokens, payload);
-    }
-
-    /**
-     * Send to all registered devices of multiple users/agents.
-     * Deduplicates tokens so a device shared across accounts gets notified once.
-     * @param {Array<string|number>} userIds
-     * @param {object} payload - { title, body, data }
-     */
-    async sendToUsers(userIds, payload) {
-        const allTokens = new Set();
-        for (const userId of userIds) {
-            const tokens = await presenceService.getCachedFcmTokens(userId);
-            tokens.forEach((t) => allTokens.add(t));
-        }
-        if (!allTokens.size) return null;
-        return this.sendToTokens([...allTokens], payload);
     }
 
     formatData(data) {

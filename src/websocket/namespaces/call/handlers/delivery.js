@@ -264,7 +264,6 @@ export function registerCallDeliveryListeners() {
             const emittedSockets = socketIds.length;
 
             try {
-                const devices = await presenceService.getDevices(userId);
                 await callLifecycleLogger.logDeliveryAttempt(callId, businessId, userId, {
                     agent_connected: isConnected,
                     presence_socket_count: socketIds.length,
@@ -272,11 +271,6 @@ export function registerCallDeliveryListeners() {
                     joined_sockets: joinedSockets || 0,
                     emitted_sockets: emittedSockets || 0,
                     delivered: emittedSockets > 0,
-                    registered_devices: devices.map(d => ({
-                        device_id: d.device_id,
-                        platform: d.device_info?.platform || null,
-                        last_seen_at: d.last_seen_at || null,
-                    })),
                 });
             } catch (err) {
                 console.error(`[EventBus] Failed to log delivery attempt for call ${callId}:`, err.message);
