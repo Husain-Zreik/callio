@@ -1,7 +1,7 @@
 {
   "name": "callio",
   "version": "0.1.0",
-  "description": "Standalone WhatsApp WebRTC call-center service (extracted calls infrastructure)",
+  "description": "Standalone call-center service: WhatsApp and SIP calls, queues, IVR, recording — integrated by any product through an API",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -13,7 +13,10 @@
     "migrate:status": "knex migrate:status",
     "migrate:latest": "knex migrate:latest",
     "migrate:rollback": "knex migrate:rollback",
-    "migrate:make": "knex migrate:make"
+    "migrate:make": "knex migrate:make",
+    "test:e2e": "node test/e2e/run.mjs",
+    "consumer:create": "node scripts/create-consumer.js",
+    "seed:dev": "node scripts/seed-dev.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.990.0",
@@ -36,7 +39,8 @@
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.10"
+    "nodemon": "^3.1.10",
+    "socket.io-client": "^4.8.1"
   },
   "overrides": {
     "uuid": "^11.1.1",
@@ -46,10 +50,12 @@
     "node": ">=18.0.0"
   },
   "keywords": [
-    "whatsapp",
     "webrtc",
-    "calling",
-    "nodejs"
+    "call-center",
+    "whatsapp",
+    "sip",
+    "ivr",
+    "contact-center"
   ],
   "author": "HUZK",
   "license": "MIT",

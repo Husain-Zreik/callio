@@ -254,12 +254,19 @@ class AgentRepository {
     }
 
     // RING_ALL accept: the call was offered without claiming anyone, so the
-    // accepting agent is flipped ON_CALL here.
-    async markOnCall(agentId) {
+    // accepting agent is flipped ON_CALL here — but only while that call is
+    // still active and theirs. A hang-up racing the end of the accept flow
+    // releases the agent first; flipping them back would strand them ON_CALL.
+    async markOnCall(agentId, callId) {
         const [result] = await connection.execute(
             `UPDATE agents SET availability = 'ON_CALL', availability_changed_at = NOW(), updated_at = NOW()
-             WHERE id = ? AND availability != 'ON_CALL' AND deleted_at IS NULL`,
-            [agentId]
+             WHERE id = ? AND availability != 'ON_CALL' AND deleted_at IS NULL
+               AND EXISTS (
+                   SELECT 1 FROM calls c
+                   WHERE c.id = ? AND c.agent_id = agents.id
+                     AND c.status IN ('INITIATED', 'RINGING', 'IN_PROGRESS')
+               )`,
+            [agentId, callId]
         );
         return result.affectedRows > 0;
     }

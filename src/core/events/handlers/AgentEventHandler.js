@@ -82,6 +82,17 @@ export class AgentEventHandler {
             if (preGateStatus === CallStatus.RINGING) {
                 const claimed = await CallRepository.assignCallToAgentIfEligible(callId, userId);
                 if (!claimed) throw new Error('Call assignment conflict. Call ownership changed.');
+
+                // A RING_ALL call was offered without claiming anyone: the agent who
+                // just won it goes ON_CALL now, not at the end of the accept flow —
+                // otherwise the queue drain could offer them a second call during
+                // the media/provider round trips. (A no-op when routing already
+                // claimed them; failure paths below release them again.)
+                if (await AgentRepository.markOnCall(userId, callId)) {
+                    EventBus.emit('call:agent_availability', {
+                        tenantId, userId, availability: AgentAvailability.ON_CALL, updatedAt: new Date().toISOString(),
+                    });
+                }
             }
 
             iceCoordinator.setConnectionInfo(callId, ConnectionType.AGENT, socketId);
@@ -171,15 +182,9 @@ export class AgentEventHandler {
                 result.data.context.update({ userId, tenantId });
             }
 
-            // Who is on the AGENT leg now, and — for a RING_ALL call that was
-            // offered without claiming anyone — flip the accepting agent ON_CALL.
+            // Who is on the AGENT leg now.
             CallConnectionRepository.updateAgentId(callId, ConnectionType.AGENT, userId)
                 .catch((err) => console.error(`[AgentEventHandler] Failed to persist agent for call ${callId}:`, err));
-            if (await AgentRepository.markOnCall(userId)) {
-                EventBus.emit('call:agent_availability', {
-                    tenantId, userId, availability: AgentAvailability.ON_CALL, updatedAt: new Date().toISOString(),
-                });
-            }
 
             const agentName = await AgentRepository.getNameById(userId);
 
