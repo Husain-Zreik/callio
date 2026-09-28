@@ -99,11 +99,11 @@ class IvrTransferHandler {
         await CallRepository.updateTimestamp(callId, 'ringing_at').catch((err) =>
             console.error(`[IvrTransferHandler] Failed to reset ringing_at for call ${callId}:`, err.message)
         );
-        if (targetType === 'queue' && targetId && String(targetId) !== String(callMeta.queueId)) {
-            await CallRepository.updateQueue(callId, targetId).catch((err) =>
-                console.warn(`[IvrTransferHandler] Failed to move call ${callId} to queue ${targetId}:`, err)
-            );
-        }
+        // queued_at starts the queue's max wait; the queue changes if the node names another.
+        const enteringQueueId = targetType === 'queue' && targetId && String(targetId) !== String(callMeta.queueId) ? targetId : null;
+        await CallRepository.enterQueue(callId, enteringQueueId).catch((err) =>
+            console.warn(`[IvrTransferHandler] Failed to put call ${callId} in its queue:`, err)
+        );
         await sdpCoordinator.createSDPOffer(
             callId,
             ConnectionType.AGENT,

@@ -46,6 +46,18 @@ class CallLifecycleLogger {
         await this.#insert(callId, agentId, 'inbound_rejected', metadata, normalizedTenantId);
     }
 
+    // A queue offer that rang out (ring timeout) and passed to the next member.
+    async logOfferMissed(callId, tenantId, agentId, metadata = {}) {
+        const normalizedTenantId = this.#requireTenantId(tenantId, callId, 'logOfferMissed');
+        await this.#insert(callId, agentId, 'inbound_offer_missed', metadata, normalizedTenantId, { skipDuplicateCheck: true });
+    }
+
+    // The call waited its queue's max_wait_seconds and moved to the overflow queue.
+    async logOverflowed(callId, tenantId, metadata = {}) {
+        const normalizedTenantId = this.#requireTenantId(tenantId, callId, 'logOverflowed');
+        await this.#insert(callId, null, 'inbound_overflowed', metadata, normalizedTenantId, { skipDuplicateCheck: true });
+    }
+
     async logDisconnected(callId, tenantId, agentId, metadata = {}) {
         const normalizedTenantId = this.#requireTenantId(tenantId, callId, 'logDisconnected');
         await this.#insert(callId, agentId, 'inbound_disconnected', metadata, normalizedTenantId);

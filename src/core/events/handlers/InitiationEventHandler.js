@@ -19,8 +19,9 @@ import EventBus from '../../EventBus.js';
 import { iceCoordinator } from '../../../media/webrtc/ice/ICECandidateCoordinator.js';
 import { agentAssignmentCoordinator } from '../../routing/AgentAssignmentCoordinator.js';
 import { toCallView } from '../../calls/CallView.js';
+import { callTerminator } from '../../calls/CallTerminator.js';
 import {
-    ConnectionType, CallDirection, CallStatus, AgentAvailability,
+    ConnectionType, CallDirection, CallStatus, AgentAvailability, TerminationReason, TerminatedBy,
 } from '../../constants/CallConstants.js';
 
 export class OutboundCallError extends Error {
@@ -171,30 +172,17 @@ export class InitiationEventHandler {
                 error: error.message,
             }).catch(() => { });
 
-            await peerRegistry.closePeerConnection(callId);
-
             emitCallError({ callId, code: CallErrorCodes.PROVIDER_TRIGGER_FAILED, message: error.message });
-            await CallRepository.markCallFailed(
-                callId,
-                [{ code: CallErrorCodes.PROVIDER_TRIGGER_FAILED, title: error.message }],
-                null,
-                'PROVIDER_TRIGGER_FAILED',
-                'PROVIDER'
-            );
-            EventBus.emit('call:terminated', { callId, tenantId, reason: 'PROVIDER_TRIGGER_FAILED' });
-
-            // Release the agent, else they stay stuck ON_CALL on a FAILED call.
-            // Outbound → OFFLINE (safer than auto-queueing them into inbound).
-            if (agentId) {
-                try {
-                    await agentAssignmentCoordinator.releaseAgentOfflineIfIdle(agentId);
-                } catch (releaseErr) {
-                    console.error(
-                        `[InitiationEventHandler] AGENT STUCK: failed to release agent ${agentId} after dial failure on call ${callId}:`,
-                        releaseErr
-                    );
-                }
-            }
+            // Ends FAILED and releases the agent (outbound → OFFLINE, safer than
+            // auto-queueing them into inbound).
+            await callTerminator.end(callId, {
+                reason: TerminationReason.PROVIDER_TRIGGER_FAILED,
+                terminatedBy: TerminatedBy.PROVIDER,
+                failure: { errors: [{ code: CallErrorCodes.PROVIDER_TRIGGER_FAILED, title: error.message }] },
+                provider: 'none',
+                media: 'local',
+                source: 'dial_failed',
+            });
         }
     }
 }

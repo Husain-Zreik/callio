@@ -63,7 +63,7 @@ acting. A socket receives:
 | `call:agent-availability:sync` | `{ userId? }` | Re-broadcast an agent's current availability (self by default). |
 | `call:agent-queue:sync` | — | Replies with the tenant's queue snapshots. |
 | `call:accept` | `{ callId, sdpAnswer }` | Accept an offered call (answer to `call:incoming.sdpOffer`). |
-| `call:reject` | `{ callId }` | Decline. On a `RING_ALL` call nobody has taken, this only withdraws the offer for this agent. |
+| `call:reject` | `{ callId }` | Decline. On a `RING_ALL` call nobody has taken, this only withdraws the offer for this agent. On a `ROUND_ROBIN` / `PRIORITY` offer it passes the call to the next member and you are not offered it again. With no queue to pass it to, it declines the call. |
 | `call:start` | `{ callId, sdpOffer }` | Start an outbound call the consumer created via `POST /v1/tenants/{t}/calls`. Only the agent the intent names may start it. Replies `call:started { ...call, sdpAnswer }`. |
 | `call:terminate` | `{ callId, reason? }` | Hang up. `reason: 'system_failed'` when the client gave up reconnecting media. |
 | `call:cancel` | `{ callId }` | Cancel an outbound call before it's answered. |
@@ -83,7 +83,7 @@ acting. A socket receives:
 | Event | Payload |
 |---|---|
 | `call:incoming` | A call offered to this agent (see *Call payload*). `assignmentType`: `DIRECT` (claimed for you), `QUEUED` (from a queue; with `agentId: null` it's a `RING_ALL` offer — first accept wins), `TRANSFERRED`. Carries `sdpOffer`. |
-| `call:offer_withdrawn` | `{ callId, reason }` — stop ringing for this call (you declined it on another device, or someone else took it). |
+| `call:offer_withdrawn` | `{ callId, reason }` — stop ringing for this call. `reason`: `declined` (you declined, possibly on another device), `taken` (another member answered a `RING_ALL` call), `timeout` (the queue's ring timeout passed it to someone else), `overflow` (it waited too long and moved to another queue). |
 | `call:started` | Reply to `call:start`: the call plus `sdpAnswer`. |
 | `call:handled` | `{ callId, userId, agentName, deviceId, action: 'accepted'\|'rejected' }` — someone answered/declined; other agents should stop ringing. |
 | `call:status` | `{ callId, status, userId, ringingAt?, answeredAt? }` — provider status changes (`RINGING`, `ACCEPTED`, ...). |

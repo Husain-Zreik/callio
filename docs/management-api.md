@@ -73,6 +73,9 @@ ahead of time.
 {
   "name": "Sales",
   "strategy": "ROUND_ROBIN",
+  "ring_timeout_seconds": 20,
+  "max_wait_seconds": 120,
+  "overflow_queue_ref": "sales-backup",
   "max_active_calls": null,
   "hold_audio_asset_id": 12,
   "status": "ACTIVE"
@@ -83,9 +86,11 @@ ahead of time.
   - `RING_ALL` — every available member is offered the call at once; the first to accept takes it; a decline withdraws it only for that agent.
   - `ROUND_ROBIN` — one available member at a time, longest-available first.
   - `PRIORITY` — lowest `priority` member first, then by agent id.
+  - With `ROUND_ROBIN` and `PRIORITY`, a decline passes the call to the next member; the customer keeps waiting. An agent who declined is not offered that call again. Once every member has declined, the call waits until someone new becomes available, its `max_wait_seconds` runs out, or the customer hangs up.
+- `ring_timeout_seconds` (5–600, `ROUND_ROBIN` / `PRIORITY`) — how long one member is offered a call before it passes to the next member. It counts as a missed offer for the tenant's auto-offline policy. A member who missed it is skipped until every other available member has had it; then a new round starts, so a lone member is offered it again. `null`: an offer rings until it is answered or the customer hangs up. `RING_ALL` rings everyone at once and ignores this.
+- `max_wait_seconds` (5–86400) — how long a call may wait unanswered after entering the queue (on arrival, or when an IVR transfers it). After that it moves to `overflow_queue_ref` and waits again there, up to 3 hops. With no overflow queue, or after 3 hops, it ends as `TIMEOUT` (`terminatedBy: SYSTEM`). `null`: no limit. Callio still ends a call that has rung unanswered for about a minute, the lifetime of a ringing WhatsApp call, in case the provider's end event is lost.
 - `max_active_calls` — cap on calls being handled from this queue at once (e.g. `1` for a single shared line).
 - `hold_audio_asset_id` — what customers hear while waiting after an IVR transfer.
-- Accepted and stored, not yet enforced: `ring_timeout_seconds`, `max_wait_seconds`, `overflow_queue_ref`. WhatsApp itself ends an unanswered call after about a minute.
 
 ## Channels
 

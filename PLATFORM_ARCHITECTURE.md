@@ -438,7 +438,7 @@ Each phase leaves the service working end to end.
 | 0 | Delete dead code; fix multi-worker startup wipes, IVR replay, shutdown bugs | done |
 | 1 | New schema + seed; `src/` restructured into the layout above; constants renamed | done |
 | 2 | Persistence on the new schema, tenant-scoped; midlr repositories deleted | done |
-| 3 | One end-of-call path (`CallTerminator` + `releaseAgentAfterCall`) | partly — termination reordered so agents are freed before media teardown; paths not yet unified |
+| 3 | One end-of-call path (`CallTerminator`); queue timers (ring timeout, max wait, overflow) | done |
 | 4 | Routing on queues (`QueueRouter`) | done |
 | 5 | Channels as adapters: `CustomerChannel` port, `ChannelIngress`; WhatsApp ingress with signature verification, payloads scoped per channel | done |
 | 6 | Agent gateway: consumer JWT, room authorization, protocol v1 doc, `call:start` outbound | done |

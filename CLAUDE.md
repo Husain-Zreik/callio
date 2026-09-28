@@ -50,8 +50,8 @@ There is no unit-test suite and no lint/format config. **Verify behaviour change
 ### Layout (`src/`, see PLATFORM_ARCHITECTURE.md §7)
 
 - `core/` — the call engine; no HTTP/socket/provider imports expected here (a few existing handlers still import `realtime/managers/RoomManager` — don't add more).
-  - `calls/` — `CallView` (the one call shape for agents and consumers), `IncomingCallPayload`, `CallAccess`, `CallQueryService`, `CallCleanupService` (stuck calls, expired outbound intents, stale recordings), `CallLifecycleLogger`, `CustomerLookup`.
-  - `routing/` — `QueueRouter` (the only place that interprets `queues.strategy`), `CallAgentAssignmentService` (per-queue Redis lock, round-robin order), `AgentAssignmentCoordinator` (single entry point for availability changes, releasing agents, draining queues, transfers into queues).
+  - `calls/` — `CallTerminator` (the one way a call ends: guarded commit, then call:terminated → agent release → provider → media → log, in that order; every end path goes through it), `CallView` (the one call shape for agents and consumers), `IncomingCallPayload`, `CallAccess`, `CallQueryService`, `CallCleanupService` (stuck calls, expired outbound intents, stale recordings), `CallLifecycleLogger`, `CustomerLookup`.
+  - `routing/` — `QueueRouter` (the only place that interprets `queues.strategy`), `CallAgentAssignmentService` (per-queue Redis lock, round-robin order), `AgentAssignmentCoordinator` (single entry point for availability changes, releasing agents, draining queues, transfers into queues, passing an offer on, overflow), `QueueTimeoutService` (enforces `ring_timeout_seconds` / `max_wait_seconds` / overflow from `calls.offered_at` / `queued_at`), `OfferHistory` (who declined or missed a waiting call), `AutoOfflinePolicy`.
   - `events/` — `CallEventHandler` routes Redis-delivered call events to handlers (`handlers/`: initiation/outbound, agent accept/reconnect, connection, customer, termination, rejection, transfer, monitor); `ConsumerEventPublisher` bridges in-process events to the outbox.
   - `ivr/` — `IvrEngine` (flow graph), `IvrCoordinator`, `IvrTransferHandler`, `IvrTerminationHandler`.
   - `agents/PresenceService` — which agents have live sockets (per-worker bookkeeping).
@@ -72,7 +72,7 @@ There is no unit-test suite and no lint/format config. **Verify behaviour change
 
 PM2 runs multiple fork-mode workers (`ecosystem.config.cjs`, `WORKER_COUNT`, each on `BASE_PORT + i`). Workers share no memory — everything cross-worker goes through Redis. A call's media lives on one worker (`CallOwnershipService` lock); call events are routed to it over Redis pub/sub (`RedisPubSubService.publishCallEvent`). Socket.IO's Redis adapter propagates room emits to every worker. `EventBus` (`core/EventBus.js`) is strictly in-process.
 
-Background loops (`CallCleanupService`, `RedisCleanupService`, `OutboxDispatcher`) run on every worker; the ones that must not run N times hold a Redis lock/lease.
+Background loops (`CallCleanupService`, `QueueTimeoutService`, `RedisCleanupService`, `OutboxDispatcher`) run on every worker; the ones that must not run N times hold a Redis lock/lease.
 
 ### Entry point and lifecycle
 
@@ -82,7 +82,8 @@ Background loops (`CallCleanupService`, `RedisCleanupService`, `OutboxDispatcher
 
 - **Singletons**: a class instantiated at the bottom of its file and exported as a lowercase instance (`export const queueRouter = new QueueRouter()`). Import the instance.
 - **Coordinators** own a multi-step operation end to end; **handlers** process one category of event and are instantiated by a coordinator.
-- **Race-safe SQL**: state transitions are guarded `UPDATE ... WHERE <expected state>` and callers act on `affectedRows` (see `finalizeFromWebhook`, `claimAgentAndAssignCall`, `markOnCall`). Keep that shape; many comments document real races these guards close.
+- **Race-safe SQL**: state transitions are guarded `UPDATE ... WHERE <expected state>` and callers act on `affectedRows` (see `finalizeFromWebhook`, `claimAgentAndAssignCall`, `markOnCall`, `withdrawOffer`). Keep that shape; many comments document real races these guards close.
+- **Time is UTC** end to end: the mysql2 pool and Knex use `timezone: 'Z'` and set each session's `time_zone` to `+00:00`, so JS-written and SQL-written (`NOW()`) timestamps agree on any host.
 
 ### Validation, errors, logging
 
@@ -98,7 +99,7 @@ Background loops (`CallCleanupService`, `RedisCleanupService`, `OutboxDispatcher
 
 - WhatsApp inbound and outbound, queues (`RING_ALL`/`ROUND_ROBIN`/`PRIORITY`), IVR, transfer, monitoring, recording, push, the Management API and consumer events are implemented and covered by `test/e2e`.
 - Deployed dev environment: `callio.pcg-ms.com` (nginx → PM2). The SIP gateway under `deploy/sip-gateway/` has handled a real inbound call from the carrier; the SIP **channel** in `src/channels/sip/` (Milestone B in SIP_INTEGRATION.md) is next.
-- Not yet: per-consumer push credentials (push uses platform credentials from env), queue `ring_timeout_seconds` / `max_wait_seconds` / overflow enforcement, an agent client SDK.
+- Not yet: per-consumer push credentials (push uses platform credentials from env), an agent client SDK. A live call transferred to an agent who doesn't answer has no timeout yet (queue timers cover calls that are waiting, not answered calls being handed over).
 
 ## History
 

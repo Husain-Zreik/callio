@@ -19,6 +19,7 @@ import { callPushNotifier } from '../../../push/CallPushNotifier.js';
 import { queueRouter } from '../../routing/QueueRouter.js';
 import { IncomingCallPayload } from '../../calls/IncomingCallPayload.js';
 import { toCallView } from '../../calls/CallView.js';
+import { callTerminator } from '../../calls/CallTerminator.js';
 import { AssignmentType, AgentAvailability } from '../../constants/CallConstants.js';
 
 // Max wait for the agent's inbound audio track to arrive on the AGENT peer
@@ -527,39 +528,19 @@ export class AgentEventHandler {
         console.error(`[AgentEventHandler] Aborting accept for call ${callId} — ${reason}`);
 
         try {
-            await customerChannels.terminate(callId);
-        } catch (err) {
-            console.warn(`[AgentEventHandler] Provider terminate failed during media-not-ready abort for ${callId}: ${err.message}`);
-        }
-
-        try {
-            await CallRepository.markCallFailedIfNotFinal(
-                callId,
-                [{ code: 'AGENT_MEDIA_NOT_READY', title: 'Microphone not detected — audio did not reach the server' }],
-                null,
-                TerminationReason.AGENT_MEDIA_NOT_READY,
-                TerminatedBy.SYSTEM
-            );
-        } catch (err) {
-            console.warn(`[AgentEventHandler] markCallFailedIfNotFinal failed for ${callId}: ${err.message}`);
-        }
-
-        try { await peerRegistry.closePeerConnection(callId); } catch (_) { /* best effort */ }
-
-        if (userId) {
-            try {
-                const call = await CallRepository.findById(callId);
-                if (call?.direction === CallDirection.OUTBOUND) {
-                    await agentAssignmentCoordinator.releaseAgentOfflineIfIdle(userId);
-                } else {
-                    await agentAssignmentCoordinator.releaseAgentIfIdle(userId);
-                    if (call?.tenant_id) {
-                        await agentAssignmentCoordinator.assignOldestUnassignedCall(call.tenant_id);
-                    }
-                }
-            } catch (err) {
-                console.error(`[AgentEventHandler] Failed to release agent ${userId} after media-not-ready abort:`, err.message);
+            const call = await CallRepository.findById(callId);
+            if (call) {
+                await callTerminator.end({ ...call, agent_id: call.agent_id ?? userId }, {
+                    reason: TerminationReason.AGENT_MEDIA_NOT_READY,
+                    terminatedBy: TerminatedBy.SYSTEM,
+                    failure: { errors: [{ code: 'AGENT_MEDIA_NOT_READY', title: 'Microphone not detected — audio did not reach the server' }] },
+                    provider: 'terminate',
+                    media: 'local',
+                    source: 'agent_media_not_ready',
+                });
             }
+        } catch (err) {
+            console.error(`[AgentEventHandler] Ending call ${callId} after media-not-ready abort failed:`, err);
         }
 
         emitCallError({

@@ -23,7 +23,6 @@
 import EventBus from '../EventBus.js';
 import CallRepository from '../../persistence/CallRepository.js';
 import AgentRepository from '../../persistence/AgentRepository.js';
-import TenantRepository from '../../persistence/TenantRepository.js';
 import IvrRepository from '../../persistence/IvrRepository.js';
 import CallConnectionRepository from '../../persistence/CallConnectionRepository.js';
 import { callEventHandler } from '../events/CallEventHandler.js';
@@ -32,7 +31,6 @@ import { callOwnershipService } from '../../infra/cluster/CallOwnershipService.j
 import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
 import { redisCleanupService } from '../../infra/cluster/RedisCleanupService.js';
 import { redisBaseService } from '../../infra/redis/RedisBaseService.js';
-import { agentMissedCallTracker } from '../routing/AgentMissedCallTracker.js';
 import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinator.js';
 import { queueRouter } from '../routing/QueueRouter.js';
 import { callLifecycleLogger } from '../calls/CallLifecycleLogger.js';
@@ -43,6 +41,8 @@ import { emitCallError } from '../events/CallErrorEmitter.js';
 import { presenceService } from '../agents/PresenceService.js';
 import { IncomingCallPayload } from '../calls/IncomingCallPayload.js';
 import { customerChannels } from './CustomerChannels.js';
+import { callTerminator } from '../calls/CallTerminator.js';
+import { autoOfflinePolicy } from '../routing/AutoOfflinePolicy.js';
 import {
     CallStatus,
     CallDirection,
@@ -208,6 +208,9 @@ class ChannelIngress {
                 // state='IVR' set at insert closes the window where the queue drain
                 // could see this call as assignable before IVR claims it.
                 state: ivrFlowId ? 'IVR' : null,
+                // An IVR call enters the queue when the flow transfers it.
+                queued_at: ivrFlowId ? null : ringingAt,
+                offered_at: userId ? new Date() : null,
                 metadata,
             });
             consumerEventPublisher.publishForCall(callId, 'call.created');
@@ -219,7 +222,7 @@ class ChannelIngress {
             });
 
             if (lookup.reject) {
-                await this._rejectByConsumer(callId, tenantId, userId);
+                await this._rejectByConsumer(callId);
                 return;
             }
 
@@ -238,24 +241,12 @@ class ChannelIngress {
                     callDuration: 0,
                     ringingDuration: 0,
                 });
-                if (userId) {
-                    await agentAssignmentCoordinator.releaseAgentIfIdle(userId).catch((err) =>
-                        console.error(`[ChannelIngress:incoming] race-release agent ${userId} failed:`, err)
-                    );
-                }
-                callLifecycleLogger.logTerminated(callId, tenantId, userId ?? null, {
-                    reason: 'TERMINATED',
-                    terminated_by: TerminatedBy.CUSTOMER,
-                    direction: CallDirection.INBOUND,
-                    out_of_order_terminate: true,
-                    race: 'offer_create_after_terminate_tombstone',
-                }).catch((err) => console.error(`[ChannelIngress:incoming] race-log error:`, err));
                 await redisBaseService.del(tombstoneKey(channel, providerCallId));
-                EventBus.emit('call:terminated', {
-                    callId,
-                    tenantId,
-                    reason: 'provider_termination_race',
-                    terminationReason: TerminationReason.CANCELLED,
+                await callTerminator.settle(callId, {
+                    reason: TerminationReason.CANCELLED,
+                    terminatedBy: TerminatedBy.CUSTOMER,
+                    source: 'provider_end_before_offer',
+                    log: { out_of_order_terminate: true, race: 'offer_create_after_terminate_tombstone' },
                 });
                 console.log(`[ChannelIngress:incoming] Race detected for ${providerCallId}: finalized call ${callId} as CANCELLED.`);
                 return;
@@ -356,22 +347,14 @@ class ChannelIngress {
     }
 
     // The consumer's lookup hook asked to reject this call.
-    async _rejectByConsumer(callId, tenantId, userId) {
-        try {
-            await customerChannels.reject(callId);
-        } catch (err) {
-            console.error(`[ChannelIngress:incoming] Reject (consumer lookup) failed at provider for call ${callId}:`, err);
-        }
-        await CallRepository.terminateCallIfNotTerminated(callId, TerminationReason.REJECTED, TerminatedBy.SYSTEM);
-        if (userId) await agentAssignmentCoordinator.releaseAgentIfIdle(userId).catch(() => { });
-        callLifecycleLogger.logTerminated(callId, tenantId, null, {
+    async _rejectByConsumer(callId) {
+        await callTerminator.end(callId, {
             reason: TerminationReason.REJECTED,
-            terminated_by: TerminatedBy.SYSTEM,
-            direction: CallDirection.INBOUND,
-            rejected_by_lookup: true,
-        }).catch(() => { });
-        EventBus.emit('call:terminated', { callId, tenantId, reason: 'rejected_by_consumer' });
-        console.log(`[ChannelIngress:incoming] Call ${callId} rejected by consumer lookup hook`);
+            terminatedBy: TerminatedBy.SYSTEM,
+            provider: 'reject',
+            source: 'rejected_by_consumer',
+            log: { rejected_by_lookup: true },
+        });
     }
 
     // Persists an inbound call directly as missed when the provider ended it
@@ -431,18 +414,11 @@ class ChannelIngress {
             out_of_order_terminate: true,
         }).catch((err) => console.error(`[ChannelIngress:incoming] missed-call logQueued error:`, err));
 
-        callLifecycleLogger.logTerminated(callId, baseRow.tenant_id, null, {
-            reason: isFailed ? CallStatus.FAILED : CallStatus.TERMINATED,
-            terminated_by: TerminatedBy.CUSTOMER,
-            direction: CallDirection.INBOUND,
-            out_of_order_terminate: true,
-        }).catch((err) => console.error(`[ChannelIngress:incoming] missed-call logTerminated error:`, err));
-
-        EventBus.emit('call:terminated', {
-            callId,
-            tenantId: baseRow.tenant_id,
-            reason: 'provider_termination_before_connect',
-            terminationReason,
+        await callTerminator.settle(callId, {
+            reason: isFailed ? TerminationReason.PROVIDER_ERROR : terminationReason,
+            terminatedBy: isFailed ? TerminatedBy.PROVIDER : TerminatedBy.CUSTOMER,
+            source: 'provider_end_before_offer',
+            log: { out_of_order_terminate: true },
         });
 
         console.log(
@@ -562,21 +538,18 @@ class ChannelIngress {
                         );
                         await CallRepository.updateDuration(callId, 'ringing_duration', rejRingingDuration);
                     }
-                    await CallRepository.terminateCall(callId, TerminationReason.REJECTED, TerminatedBy.CUSTOMER);
                     if (call.direction === CallDirection.OUTBOUND) {
                         callLifecycleLogger.logOutboundRejected(callId, call.tenant_id, agentId, {
                             providerCallId, previousState: previousStatus,
                         }).catch(() => { });
                     }
-                    await redisPubSubService.publishCallEvent(callId, EventTypes.CALL_REJECTED, {
-                        callId,
-                        providerCallId,
-                        tenantId: call.tenant_id,
-                        userId: agentId,
-                        direction: call.direction,
-                        reason: 'CUSTOMER_REJECTED',
-                        timestamp: timestampValue,
-                    });
+                    if (await CallRepository.terminateCallIfNotTerminated(callId, TerminationReason.REJECTED, TerminatedBy.CUSTOMER, timestampValue)) {
+                        await callTerminator.settle(call, {
+                            reason: TerminationReason.REJECTED,
+                            terminatedBy: TerminatedBy.CUSTOMER,
+                            source: 'customer_rejected',
+                        });
+                    }
                     break;
 
                 case 'FAILED': {
@@ -610,30 +583,10 @@ class ChannelIngress {
                     // and an end-of-call — only the path that finalized fires them.
                     if (failedFinalized) {
                         emitCallError({ callId, code: null, message: 'Call failed (provider status)' });
-
-                        await redisPubSubService.publishCallEvent(callId, EventTypes.CALL_TERMINATED, {
-                            callId,
-                            userId: agentId,
-                            reason: 'failed',
-                        });
-
-                        if (agentId) {
-                            agentAssignmentCoordinator.releaseAgentIfIdle(agentId)
-                                .catch((e) => console.error(`[ChannelIngress:status/FAILED] Agent release error:`, e));
-                            agentAssignmentCoordinator.emitQueueUpdate(call.tenant_id, call.queue_id)
-                                .catch(() => { });
-                        }
-
-                        callLifecycleLogger.logTerminated(callId, call.tenant_id, agentId, {
-                            reason: 'FAILED',
-                            terminated_by: TerminatedBy.PROVIDER,
-                            direction: call.direction,
-                        }).catch(() => { });
-
-                        EventBus.emit('call:terminated', {
-                            callId,
-                            tenantId: call.tenant_id,
-                            reason: 'provider_termination',
+                        await callTerminator.settle(call, {
+                            reason: TerminationReason.PROVIDER_ERROR,
+                            terminatedBy: TerminatedBy.PROVIDER,
+                            source: 'provider_status_failed',
                         });
                     }
                     break;
@@ -837,89 +790,23 @@ class ChannelIngress {
                 await CallRepository.updateTimestamp(callId, 'ended_at');
             }
 
-            // ── Post-termination side effects ─────────────────────────────────────
-            // Only when this event caused the transition — the agent hang-up path
-            // already released/logged if it won the race.
-            if (finalizedByThisEvent && userId) {
-                try {
-                    if (direction === CallDirection.OUTBOUND) {
-                        await agentAssignmentCoordinator.releaseAgentOfflineIfIdle(userId);
-                    } else {
-                        await agentAssignmentCoordinator.releaseAgentIfIdle(userId);
-                        await agentAssignmentCoordinator.assignOldestUnassignedCall(tenantId);
-                    }
-                    await agentAssignmentCoordinator.emitQueueUpdate(tenantId, queueId);
-                } catch (err) {
-                    console.error(`[ChannelIngress:ended] Agent release error for call ${providerCallId}:`, err);
-                }
-
-                if (direction === CallDirection.INBOUND && terminationReason === TerminationReason.NO_ANSWER) {
-                    await this._applyAutoOffline({ callId, tenantId, queueId, userId });
-                }
-            }
-
+            // ── Side effects ──────────────────────────────────────────────────────
+            // Only when this event caused the transition — if the agent hang-up
+            // path won the race it already settled the call.
             if (finalizedByThisEvent) {
-                callLifecycleLogger.logTerminated(callId, tenantId, userId ?? null, {
-                    reason: failed ? 'FAILED' : (providerStatus ?? 'COMPLETED'),
-                    terminated_by: endTerminatedBy,
-                    direction,
-                }).catch((err) => {
-                    console.error(`[ChannelIngress:ended] Lifecycle log error for call ${providerCallId}:`, err);
+                await callTerminator.settle(existingCall, {
+                    reason: terminationReason,
+                    terminatedBy: endTerminatedBy,
+                    source: 'provider_end',
+                    log: { provider_status: providerStatus },
                 });
-
-                // Only the path that caused the transition notifies — the owning
-                // worker already told clients if the agent path won.
-                await redisPubSubService.publishCallEvent(callId, EventTypes.CALL_TERMINATED, {
-                    callId,
-                    userId: userId ?? null,
-                    reason: failed ? 'failed' : 'completed',
-                });
-
-                EventBus.emit('call:terminated', { callId, tenantId, reason: 'provider_termination' });
+                // The customer gave up while it rang this agent: a missed offer.
+                if (userId && direction === CallDirection.INBOUND && terminationReason === TerminationReason.NO_ANSWER) {
+                    await autoOfflinePolicy.recordMiss({ callId, tenantId, queueId, agentId: userId });
+                }
             }
         } catch (error) {
             console.error(`[ChannelIngress:ended] Error for call ${providerCallId}:`, error);
-        }
-    }
-
-    // Auto-offline policy: an agent who misses N consecutive offers is taken
-    // offline. Only for queues that offer to one agent at a time — under
-    // RING_ALL nobody in particular "missed" the call.
-    async _applyAutoOffline({ callId, tenantId, queueId, userId }) {
-        try {
-            const queue = queueId ? await queueRouter.getQueue(queueId) : null;
-            if (!queue || queueRouter.isRingAll(queue)) return;
-
-            const policy = await TenantRepository.getAutoOfflineSettings(tenantId);
-            if (!policy.enabled) return;
-
-            // A NO_ANSWER while the agent is on another active call was a
-            // double-dispatch race, not negligence — don't count it.
-            if (await CallRepository.hasAgentActiveCall(userId, callId)) {
-                console.log(`[AutoOffline] Skipping missed-streak for agent ${userId} — on an active call (missed=${callId})`);
-                return;
-            }
-
-            const streak = await agentMissedCallTracker.increment(userId);
-            console.log(`[AutoOffline] Agent ${userId} missed-streak=${streak}/${policy.threshold} (tenant=${tenantId}, call=${callId})`);
-            if (streak < policy.threshold) return;
-
-            const flipped = await AgentRepository.updateAgentAvailability(userId, AgentAvailability.OFFLINE);
-            await agentMissedCallTracker.reset(userId);
-            if (flipped) {
-                EventBus.emit('call:agent_availability', {
-                    tenantId,
-                    userId,
-                    availability: AgentAvailability.OFFLINE,
-                    reason: 'auto_offline_missed_calls',
-                    consecutiveMissed: streak,
-                    updatedAt: new Date().toISOString(),
-                });
-                await agentAssignmentCoordinator.emitQueueUpdate(tenantId).catch(() => { });
-                console.log(`[AutoOffline] Flipped agent ${userId} OFFLINE after ${streak} consecutive missed calls`);
-            }
-        } catch (err) {
-            console.error(`[AutoOffline] policy check failed for agent ${userId}:`, err);
         }
     }
 }

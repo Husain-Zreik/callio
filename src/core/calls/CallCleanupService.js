@@ -1,14 +1,13 @@
 // src/core/calls/CallCleanupService.js
 // Owns stuck-call detection, cleanup queue processing, and periodic scan.
 import CallRepository from '../../persistence/CallRepository.js';
-import AgentRepository from '../../persistence/AgentRepository.js';
 import RecordingRepository from '../../persistence/RecordingRepository.js';
-import TenantRepository from '../../persistence/TenantRepository.js';
 import EventBus from '../EventBus.js';
 import { peerRegistry } from '../../media/webrtc/PeerRegistry.js';
-import { AgentAvailability, CallStatus, TerminationReason } from '../constants/CallConstants.js';
-import { agentMissedCallTracker } from '../routing/AgentMissedCallTracker.js';
+import { CallStatus, TerminationReason, TerminatedBy } from '../constants/CallConstants.js';
 import { callLifecycleLogger } from './CallLifecycleLogger.js';
+import { callTerminator } from './CallTerminator.js';
+import { autoOfflinePolicy } from '../routing/AutoOfflinePolicy.js';
 import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinator.js';
 
 const CLEANUP_COOLDOWN = 30_000;
@@ -72,82 +71,43 @@ class CallCleanupService {
         });
     }
 
+    // Ends each stuck call through the CallTerminator (which also tells the
+    // provider, so the customer stops ringing). Returns the ids actually ended.
+    //
+    // NO_ANSWER means "was RINGING, timed out unanswered", and is the one
+    // reason where the call may have been genuinely accepted between the scan
+    // and now (a real bug: an agent's call ended itself moments after they
+    // accepted it) — so it only ends a call still RINGING. Other reasons (a
+    // stuck IN_PROGRESS call that already has its termination_reason) end
+    // unconditionally.
     async batchCleanupCalls(callItems) {
-        if (!callItems?.length) return;
+        if (!callItems?.length) return new Set();
+        const calls = await CallRepository.findByIds(callItems.map((item) => item.callId));
+        const byId = new Map(calls.map((c) => [String(c.id), c]));
 
-        const callIds = callItems.map(item => item.callId);
-        const tenantId = callItems[0].tenantId;
-
-        console.log(`[Cleanup] 🧹 Batch cleaning ${callIds.length} calls for tenant ${tenantId}`);
-
-        const calls = await CallRepository.findByIds(callIds);
-        if (calls.length === 0) { console.log(`[Cleanup] ⚠️ No calls found`); return; }
-
-        // Group by reason for accurate batch updates
-        const byReason = {};
-        callItems.forEach(item => {
-            const reason = item.reason || 'UNKNOWN';
-            (byReason[reason] ??= []).push(item.callId);
-        });
-
-        // Real bug found and fixed (2026-09-01, live-reported: an agent's
-        // call ended itself moments after they accepted it) — see
-        // CallRepository.batchTerminateCalls's own doc comment for the full
-        // race. NO_ANSWER specifically means "was RINGING, timed out
-        // unanswered" per _runPeriodicCleanup's own reason assignment — the
-        // only reason value in this whole function where "the call already
-        // moved on to IN_PROGRESS via a genuine accept" is possible and
-        // wrong to terminate for. Other reasons (a stuck IN_PROGRESS call
-        // that already has its own termination_reason set, see
-        // findAllStuckCalls) aren't subject to this same race, so they keep
-        // the unconditional behavior.
-        //
-        // terminatedIds accumulates only what batchTerminateCalls confirms
-        // was ACTUALLY terminated — the DB-level guard alone isn't enough:
-        // emitting call:terminated for an id this UPDATE didn't touch would
-        // just move the same "silent wrong termination" bug from the
-        // database into the event stream instead of fixing it.
         const terminatedIds = new Set();
-        for (const [reason, ids] of Object.entries(byReason)) {
-            const requireStatus = reason === TerminationReason.NO_ANSWER ? CallStatus.RINGING : null;
-            const actuallyTerminated = await CallRepository.batchTerminateCalls(ids, reason, 'SYSTEM', requireStatus);
-            actuallyTerminated.forEach(id => terminatedIds.add(id));
-            const skipped = ids.length - actuallyTerminated.length;
-            console.log(`[Cleanup] ✅ Terminated ${actuallyTerminated.length} calls with reason: ${reason}`
-                + (skipped > 0 ? ` (${skipped} skipped — already moved past the expected status)` : ''));
-        }
-
-        // Computed from the terminated set, not the original batch — same
-        // reasoning as terminatedIds itself: an agent whose call raced to
-        // IN_PROGRESS and was correctly excluded above is still genuinely on
-        // that call; marking them AVAILABLE would hand a second inbound call
-        // to someone mid-conversation.
-        const agentIds = [...new Set(
-            calls.filter(c => terminatedIds.has(c.id) && c.agent_id).map(c => c.agent_id)
-        )];
-        if (agentIds.length > 0) {
-            await AgentRepository.batchUpdateAgentAvailability(agentIds, AgentAvailability.AVAILABLE);
-            console.log(`[Cleanup] ✅ Released ${agentIds.length} agents`);
-        }
-
-        terminatedIds.forEach(id => {
-            peerRegistry.closePeerConnection(id).catch(err =>
-                console.error(`[Cleanup] Error closing connection ${id}:`, err)
-            );
-        });
-
-        calls.forEach(call => {
-            if (!terminatedIds.has(call.id)) return;
-            const item = callItems.find(i => i.callId === call.id);
-            EventBus.emit('call:terminated', {
-                callId: call.id,
-                tenantId: call.tenant_id,
-                reason: 'cleanup_queued',
-                terminationReason: item?.reason || 'UNKNOWN',
+        for (const item of callItems) {
+            const call = byId.get(String(item.callId));
+            if (!call) continue;
+            const reason = item.reason || TerminationReason.SYSTEM_ERROR;
+            const ended = await callTerminator.end(call, {
+                reason,
+                terminatedBy: TerminatedBy.SYSTEM,
+                onlyIfStatus: reason === TerminationReason.NO_ANSWER || reason === TerminationReason.IVR_AGENT_NO_ANSWER
+                    ? CallStatus.RINGING
+                    : null,
+                provider: 'end',
+                source: 'cleanup',
+            }).catch((err) => {
+                console.error(`[Cleanup] Ending stuck call ${call.id} failed:`, err);
+                return false;
             });
-        });
+            if (ended) terminatedIds.add(call.id);
+        }
 
-        console.log(`[Cleanup] ✅ Batch cleanup completed for ${terminatedIds.size}/${calls.length} calls`);
+        const skipped = callItems.length - terminatedIds.size;
+        console.log(`[Cleanup] Ended ${terminatedIds.size}/${callItems.length} stuck call(s)`
+            + (skipped > 0 ? ` (${skipped} skipped — already ended or moved on)` : ''));
         return terminatedIds;
     }
 
@@ -214,16 +174,12 @@ class CallCleanupService {
     async _expireOutboundIntents() {
         const expired = await CallRepository.findExpiredOutboundIntents(OUTBOUND_INTENT_TTL_MINUTES);
         for (const call of expired) {
-            const committed = await CallRepository.terminateCallIfNotTerminated(
-                call.id, TerminationReason.CANCELLED, 'SYSTEM'
-            );
-            if (!committed) continue;
-            console.log(`[Cleanup] Outbound intent ${call.id} expired without call:start — cancelled`);
-            EventBus.emit('call:terminated', {
-                callId: call.id,
-                tenantId: call.tenant_id,
-                reason: 'outbound_intent_expired',
-                terminationReason: TerminationReason.CANCELLED,
+            await callTerminator.end(call.id, {
+                reason: TerminationReason.CANCELLED,
+                terminatedBy: TerminatedBy.SYSTEM,
+                onlyIfStatus: CallStatus.INITIATED,
+                provider: 'none',
+                source: 'outbound_intent_expired',
             });
         }
     }
@@ -237,18 +193,6 @@ class CallCleanupService {
 
             console.log(`[Cleanup] ⏰ IVR ring timeout: ${stuckCalls.length} call(s) exceeded agent ring timeout`);
 
-            const policyCache = new Map(
-                await Promise.all(
-                    [...new Set(stuckCalls.map(c => c.tenant_id))].map(async bId => {
-                        try {
-                            return [bId, await TenantRepository.getAutoOfflineSettings(bId)];
-                        } catch {
-                            return [bId, { enabled: false }];
-                        }
-                    })
-                )
-            );
-
             for (const call of stuckCalls) {
                 // Lifecycle event — written before termination so the duration is accurate.
                 callLifecycleLogger.logIvrAgentMissed(call.id, call.tenant_id, call.agent_id, {
@@ -261,53 +205,13 @@ class CallCleanupService {
                     console.error(`[Cleanup] IVR lifecycle log failed for call ${call.id}:`, err.message)
                 );
 
-                // AutoOffline streak — mirrors the logic in ChannelIngress but fires
-                // here because the cleanup service terminates the call first, so
-                // finalizedByThisWebhook=false in the webhook path and the streak block there
-                // never runs. We skip the routing-strategy guard used for regular QUEUE calls
-                // because the IVR path is its own routing overlay (not strategy-specific).
-                try {
-                    const policy = policyCache.get(call.tenant_id) ?? { enabled: false };
-                    if (policy.enabled && call.agent_id) {
-                        const agentIsOnActiveCall = await CallRepository.hasAgentActiveCall(call.agent_id, call.id);
-                        if (agentIsOnActiveCall) {
-                            console.log(
-                                `[AutoOffline] Skipping IVR missed-streak for agent ${call.agent_id} — agent is on ` +
-                                `an active call (tenant=${call.tenant_id}, missed=${call.id})`
-                            );
-                        } else {
-                            const streak = await agentMissedCallTracker.increment(call.agent_id);
-                            console.log(
-                                `[AutoOffline] Agent ${call.agent_id} IVR missed-streak=${streak}/${policy.threshold} ` +
-                                `(tenant=${call.tenant_id}, call=${call.id})`
-                            );
-                            if (streak >= policy.threshold) {
-                                const flipped = await AgentRepository.updateAgentAvailability(
-                                    call.agent_id, AgentAvailability.OFFLINE
-                                );
-                                await agentMissedCallTracker.reset(call.agent_id);
-                                if (flipped) {
-                                    EventBus.emit('call:agent_availability', {
-                                        tenantId: call.tenant_id,
-                                        userId: call.agent_id,
-                                        availability: AgentAvailability.OFFLINE,
-                                        reason: 'auto_offline_missed_calls',
-                                        consecutiveMissed: streak,
-                                        updatedAt: new Date().toISOString(),
-                                    });
-                                    await agentAssignmentCoordinator.emitQueueUpdate(call.tenant_id).catch(() => { });
-                                    console.log(
-                                        `[AutoOffline] Flipped agent ${call.agent_id} OFFLINE after ${streak} consecutive ` +
-                                        `IVR missed calls (threshold=${policy.threshold}, tenant=${call.tenant_id})`
-                                    );
-                                }
-                            }
-                        }
-                    }
-                } catch (err) {
-                    console.error(
-                        `[Cleanup] IVR AutoOffline check failed for call ${call.id}:`, err.message
-                    );
+                // A missed offer for the auto-offline policy. Counted here because
+                // this path ends the call itself, so the provider's end never sees
+                // an unanswered offer. Any queue: IVR → agent is its own overlay.
+                if (await autoOfflinePolicy.recordMiss({
+                    callId: call.id, tenantId: call.tenant_id, queueId: call.queue_id, agentId: call.agent_id, anyQueue: true,
+                })) {
+                    await agentAssignmentCoordinator.emitQueueUpdate(call.tenant_id).catch(() => { });
                 }
 
                 this.enqueue(call.id, call.tenant_id, TerminationReason.IVR_AGENT_NO_ANSWER);

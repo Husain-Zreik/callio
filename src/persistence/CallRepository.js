@@ -36,6 +36,8 @@ class CallRepository {
             type = 'AUDIO',
             status = 'INITIATED',
             ringing_at = null,
+            queued_at = null,
+            offered_at = null,
             metadata = null,
         } = data;
 
@@ -45,15 +47,15 @@ class CallRepository {
                 queue_id, agent_id, ivr_flow_id, state,
                 customer_address, customer_address_type, customer_name,
                 external_ref, consumer_metadata,
-                direction, type, status, ringing_at, metadata,
+                direction, type, status, ringing_at, queued_at, offered_at, metadata,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
         `, [
             tenant_id, channel_id, channel, channel_address, provider_call_id,
             queue_id, agent_id, ivr_flow_id, state,
             customer_address, customer_address_type, customer_name,
             external_ref, consumer_metadata ? JSON.stringify(consumer_metadata) : null,
-            direction, type, status, ringing_at, metadata ? JSON.stringify(metadata) : null,
+            direction, type, status, ringing_at, queued_at, offered_at, metadata ? JSON.stringify(metadata) : null,
         ]);
 
         return result.insertId;
@@ -278,7 +280,13 @@ class CallRepository {
                AND c.agent_id IS NOT NULL
                AND c.ivr_flow_id IS NOT NULL
                AND c.ringing_at IS NOT NULL
-               AND c.ringing_at < DATE_SUB(NOW(), INTERVAL COALESCE(f.agent_ring_timeout, 60) SECOND)`
+               AND c.ringing_at < DATE_SUB(NOW(), INTERVAL COALESCE(f.agent_ring_timeout, 60) SECOND)
+               -- A queue with its own ring timeout passes the offer on instead
+               -- (QueueTimeoutService).
+               AND NOT EXISTS (
+                   SELECT 1 FROM queues q
+                   WHERE q.id = c.queue_id AND q.ring_timeout_seconds IS NOT NULL AND q.strategy != 'RING_ALL'
+               )`
         );
         return rows;
     }
@@ -295,6 +303,11 @@ class CallRepository {
                   -- IVR-transferred RINGING calls: handled only by _runIvrRingCleanup,
                   -- to keep the IVR_AGENT_NO_ANSWER reason regardless of timeout
                   AND NOT (direction = 'INBOUND' AND agent_id IS NOT NULL AND ivr_flow_id IS NOT NULL AND state = 'QUEUE')
+                  -- Waiting in a queue with max_wait_seconds: QueueTimeoutService ends
+                  -- or overflows it on the queue's own schedule.
+                  AND NOT (direction = 'INBOUND' AND EXISTS (
+                      SELECT 1 FROM queues q WHERE q.id = calls.queue_id AND q.max_wait_seconds IS NOT NULL
+                  ))
                  )
                  OR
                  (status = 'IN_PROGRESS' AND termination_reason IS NOT NULL)
@@ -467,7 +480,7 @@ class CallRepository {
     async assignCallToAgentIfUnassigned(callId, agentId) {
         const [result] = await connection.execute(
             `UPDATE calls
-             SET agent_id = ?, updated_at = NOW()
+             SET agent_id = ?, offered_at = NOW(), updated_at = NOW()
              WHERE id = ?
              AND agent_id IS NULL
              AND status = 'RINGING'
@@ -478,10 +491,12 @@ class CallRepository {
         return result.affectedRows > 0;
     }
 
+    // The accept claim. Clearing offered_at stops the ring timeout: from here
+    // the offered agent is answering, and the offer can't be passed on.
     async assignCallToAgentIfEligible(callId, agentId) {
         const [result] = await connection.execute(
             `UPDATE calls
-             SET agent_id = ?, updated_at = NOW()
+             SET agent_id = ?, offered_at = NULL, updated_at = NOW()
              WHERE id = ?
              AND status IN ${ACTIVE_STATUSES}
              AND (agent_id IS NULL OR agent_id = ?)
@@ -511,6 +526,81 @@ class CallRepository {
             [agentId, excludeCallId]
         );
         return rows.length > 0 ? rows[0].id : null;
+    }
+
+    // ── Queue timing (QueueTimeoutService) ──────────────────────────────────────
+
+    // The call entered a queue now (IVR transfer); optionally a different one.
+    async enterQueue(callId, queueId = null) {
+        await connection.execute(
+            `UPDATE calls SET queued_at = NOW(), queue_id = COALESCE(?, queue_id), updated_at = NOW() WHERE id = ?`,
+            [queueId, callId]
+        );
+    }
+
+    // Takes a ringing offer back from the agent it was made to. Only while the
+    // agent hasn't started answering (offered_at still set) and, for a ring
+    // timeout, only if the offer began before expiredBefore — so an offer made
+    // again since the scan read it isn't withdrawn. True if withdrawn.
+    async withdrawOffer(callId, agentId, expiredBefore = null) {
+        const [result] = await connection.execute(
+            `UPDATE calls SET agent_id = NULL, offered_at = NULL, updated_at = NOW()
+             WHERE id = ? AND agent_id = ? AND status = 'RINGING' AND direction = 'INBOUND'
+               AND offered_at IS NOT NULL
+               ${expiredBefore ? 'AND offered_at <= ?' : ''}`,
+            expiredBefore ? [callId, agentId, expiredBefore] : [callId, agentId]
+        );
+        return result.affectedRows > 0;
+    }
+
+    // Moves a waiting call to its overflow queue, taking back any offer that
+    // is still ringing. Guarded on the queue and offer the scan saw. True if moved.
+    async overflowToQueue(callId, fromQueueId, toQueueId, offeredAgentId) {
+        const [result] = await connection.execute(
+            `UPDATE calls
+             SET queue_id = ?, queued_at = NOW(), overflow_count = overflow_count + 1,
+                 agent_id = NULL, offered_at = NULL, updated_at = NOW()
+             WHERE id = ? AND queue_id = ? AND status = 'RINGING' AND direction = 'INBOUND'
+               AND agent_id <=> ? AND (agent_id IS NULL OR offered_at IS NOT NULL)`,
+            [toQueueId, callId, fromQueueId, offeredAgentId]
+        );
+        return result.affectedRows > 0;
+    }
+
+    // Offers that have rung longer than their queue's ring_timeout_seconds.
+    // RING_ALL queues offer to everyone at once and have no per-agent timeout.
+    async findExpiredOffers(limit = 50) {
+        const [rows] = await connection.execute(
+            `SELECT c.*, q.ring_timeout_seconds
+             FROM calls c
+             JOIN queues q ON q.id = c.queue_id
+             WHERE c.status = 'RINGING' AND c.direction = 'INBOUND'
+               AND c.agent_id IS NOT NULL AND c.offered_at IS NOT NULL
+               AND (c.state IS NULL OR c.state = 'QUEUE')
+               AND q.ring_timeout_seconds IS NOT NULL AND q.strategy != 'RING_ALL'
+               AND c.offered_at <= DATE_SUB(NOW(), INTERVAL q.ring_timeout_seconds SECOND)
+             ORDER BY c.offered_at ASC
+             LIMIT ${Math.max(1, Math.min(Number(limit) || 50, 200))}`
+        );
+        return rows;
+    }
+
+    // Calls that have waited longer than their queue's max_wait_seconds —
+    // unanswered, and not being answered right now.
+    async findExpiredWaits(limit = 50) {
+        const [rows] = await connection.execute(
+            `SELECT c.*, q.max_wait_seconds, q.overflow_queue_id
+             FROM calls c
+             JOIN queues q ON q.id = c.queue_id
+             WHERE c.status = 'RINGING' AND c.direction = 'INBOUND'
+               AND (c.state IS NULL OR c.state = 'QUEUE')
+               AND (c.agent_id IS NULL OR c.offered_at IS NOT NULL)
+               AND q.max_wait_seconds IS NOT NULL
+               AND COALESCE(c.queued_at, c.ringing_at, c.created_at) <= DATE_SUB(NOW(), INTERVAL q.max_wait_seconds SECOND)
+             ORDER BY c.queued_at ASC
+             LIMIT ${Math.max(1, Math.min(Number(limit) || 50, 200))}`
+        );
+        return rows;
     }
 
     // ── Termination & Finalization ───────────────────────────────────────────────
@@ -551,14 +641,18 @@ class CallRepository {
 
     // Returns true if this call caused the status transition — for callers that
     // need to know whether they "won" the race to terminate the call.
-    async terminateCallIfNotTerminated(callId, terminationReason = null, terminatedBy = 'AGENT', endedAt = null) {
+    // requireStatus (optional): only if the call is still in that status.
+    async terminateCallIfNotTerminated(callId, terminationReason = null, terminatedBy = 'AGENT', endedAt = null, requireStatus = null) {
         const [result] = await connection.execute(
             `UPDATE calls
-             SET status = 'TERMINATED', state = NULL,
+             SET status = 'TERMINATED', state = NULL, offered_at = NULL,
                  termination_reason = ?, terminated_by = ?,
                  ended_at = COALESCE(?, NOW()), updated_at = NOW()
-             WHERE id = ? AND status NOT IN ('TERMINATED', 'FAILED')`,
-            [terminationReason, terminatedBy, endedAt, callId]
+             WHERE id = ? AND status NOT IN ('TERMINATED', 'FAILED')
+               ${requireStatus ? 'AND status = ?' : ''}`,
+            requireStatus
+                ? [terminationReason, terminatedBy, endedAt, callId, requireStatus]
+                : [terminationReason, terminatedBy, endedAt, callId]
         );
         return result.affectedRows > 0;
     }

@@ -31,3 +31,4 @@ Connection settings: `TEST_DB_HOST/PORT/USERNAME/PASSWORD/DATABASE`,
 |---|---|
 | `calls.test.mjs` | agent auth, inbound routing and bridging, hang-up, outbound intent → `call:start` → dial, API terminate, call detail, consumer events, isolation |
 | `routing.test.mjs` | queue wait and drain, customer hang-up, PRIORITY, RING_ALL with decline and taken offers, supervisor monitoring, transfer, access checks, IVR with in-band DTMF |
+| `queues.test.mjs` | ring timeout passing an offer on, a decline passed on and never offered back, a lone member re-offered, max wait overflowing to another queue, max wait ending the call as TIMEOUT |

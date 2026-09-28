@@ -91,6 +91,7 @@ The same signature header is sent on lookup-hook requests.
 | `call.ringing` | The provider reports the customer's phone ringing (outbound) | — |
 | `call.answered` | Media connected between customer and agent | — |
 | `call.transferred` | Moved to another agent or queue | `from_agent_id`, `to_agent_id`, `to_queue_id` |
+| `call.overflowed` | Waited `max_wait_seconds` and moved to the queue's overflow queue | `from_queue_id`, `to_queue_id` |
 | `call.ivr.completed` | An IVR session ended | `outcome` (`transferred`/`hung_up`/`timeout`/`error`), `duration_seconds` |
 | `call.ended` | Terminated or failed — see `terminationReason`, `terminatedBy`, `durations` | — |
 | `recording.completed` | The call's recording is stored; fetch it with `GET /v1/calls/{id}/recording` | `recording_id`, `duration_seconds` |

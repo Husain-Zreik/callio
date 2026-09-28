@@ -1,7 +1,8 @@
 // src/core/routing/AgentAssignmentCoordinator.js
 // Single entry point for anything that changes agent/queue state: releasing
 // agents after a call, availability changes, draining queues when an agent
-// frees up, and assigning transferred calls.
+// frees up, assigning transferred calls, and passing an offer on (declined,
+// rang out) or moving a call to its overflow queue.
 import EventBus from '../EventBus.js';
 import CallRepository from '../../persistence/CallRepository.js';
 import AgentRepository from '../../persistence/AgentRepository.js';
@@ -14,6 +15,8 @@ import { callLifecycleLogger } from '../calls/CallLifecycleLogger.js';
 import { ConnectionType, AssignmentType, AgentAvailability, AgentRole } from '../constants/CallConstants.js';
 import { IncomingCallPayload } from '../calls/IncomingCallPayload.js';
 import { presenceService } from '../agents/PresenceService.js';
+import { offerHistory } from './OfferHistory.js';
+import { autoOfflinePolicy } from './AutoOfflinePolicy.js';
 
 class AgentAssignmentCoordinator {
     constructor() {
@@ -194,7 +197,8 @@ class AgentAssignmentCoordinator {
 
             let raceLost = false;
             for (const call of waiting) {
-                const { agent, takenByAnotherWorker } = await queueRouter.claimForWaitingCall(queue, call.id, members);
+                const eligible = await offerHistory.eligible(call.id, members);
+                const { agent, takenByAnotherWorker } = await queueRouter.claimForWaitingCall(queue, call.id, eligible);
                 if (!agent) {
                     if (takenByAnotherWorker) raceLost = true;
                     continue;
@@ -230,18 +234,7 @@ class AgentAssignmentCoordinator {
             if (queue && !queueRouter.isRingAll(queue)) {
                 ({ agent } = await queueRouter.claimForWaitingCall(queue, callId));
             } else if (queue) {
-                // RING_ALL: offer to everyone available; first accept claims it.
-                const call = await CallRepository.findById(callId);
-                const offered = await queueRouter.ringAllTargets(queue, tenantId);
-                if (call && offered.length) {
-                    const sdpOffer = await this.#agentOffer(callId);
-                    EventBus.emit('call:incoming', IncomingCallPayload.fromCall(call, {
-                        agentId: null,
-                        offeredAgentIds: offered.map((a) => a.id),
-                        sdpOffer,
-                        assignmentType: AssignmentType.QUEUED,
-                    }));
-                }
+                await this.#offerToAll(queue, callId);
                 await this.emitQueueUpdate(tenantId, queue.id);
                 return false;
             }
@@ -259,6 +252,116 @@ class AgentAssignmentCoordinator {
         EventBus.emit('call:waiting', { callId, tenantId, queueId: callRecord.queue_id });
         console.log(`[AgentAssignment] Transferred call ${callId} waiting in queue (no available agent)`);
         return false;
+    }
+
+    // ── Offers passing on ──────────────────────────────────────────────────────
+
+    /**
+     * An offer from a queue that the agent declined, or that rang out
+     * (queues.ring_timeout_seconds): the call keeps its place in the queue and
+     * is offered to the next member. kind: 'declined' | 'missed'.
+     * expiredBefore (ring timeout): only withdraw an offer made before then.
+     * Returns false if the offer was no longer this agent's to pass on
+     * (answered meanwhile, or already withdrawn).
+     */
+    async passOffer(call, agentId, kind, { expiredBefore = null } = {}) {
+        if (!await CallRepository.withdrawOffer(call.id, agentId, expiredBefore)) return false;
+        await offerHistory.record(call.id, agentId, kind);
+
+        EventBus.emit('call:offer_withdrawn', {
+            callId: call.id,
+            tenantId: call.tenant_id,
+            agentIds: [agentId],
+            reason: kind === 'missed' ? 'timeout' : 'declined',
+        });
+        await this.releaseAgentIfIdle(agentId);
+
+        if (kind === 'missed') {
+            callLifecycleLogger.logOfferMissed(call.id, call.tenant_id, agentId, { queue_id: call.queue_id })
+                .catch((err) => console.error(`[AgentAssignment] Missed-offer log failed for call ${call.id}:`, err));
+            await autoOfflinePolicy.recordMiss({ callId: call.id, tenantId: call.tenant_id, queueId: call.queue_id, agentId });
+        } else {
+            callLifecycleLogger.logRejected(call.id, call.tenant_id, agentId, { reason: 'agent_declined_offer', queue_id: call.queue_id })
+                .catch((err) => console.error(`[AgentAssignment] Decline log failed for call ${call.id}:`, err));
+        }
+        console.log(`[AgentAssignment] Offer of call ${call.id} to agent ${agentId} ${kind} — passing it on`);
+
+        await this.routeWaitingCall({ ...call, agent_id: null });
+        return true;
+    }
+
+    /**
+     * A waiting call moved to its overflow queue (CallRepository.overflowToQueue
+     * already committed the move). Whoever it was ringing stops ringing, and the
+     * new queue offers it.
+     */
+    async callOverflowed(call, toQueue) {
+        const fromQueue = await QueueRepository.findById(call.queue_id);
+        const withdrawFrom = call.agent_id
+            ? [call.agent_id]
+            : (fromQueue && queueRouter.isRingAll(fromQueue) ? await QueueRepository.getMemberIds(fromQueue.id) : []);
+        if (withdrawFrom.length) {
+            EventBus.emit('call:offer_withdrawn', {
+                callId: call.id, tenantId: call.tenant_id, agentIds: withdrawFrom, reason: 'overflow',
+            });
+        }
+        if (call.agent_id) await this.releaseAgentIfIdle(call.agent_id);
+        await offerHistory.clearMissed(call.id);
+
+        callLifecycleLogger.logOverflowed(call.id, call.tenant_id, {
+            from_queue_id: call.queue_id, to_queue_id: toQueue.id, waited_seconds: call.max_wait_seconds ?? null,
+        }).catch((err) => console.error(`[AgentAssignment] Overflow log failed for call ${call.id}:`, err));
+        EventBus.emit('call:overflowed', {
+            callId: call.id, tenantId: call.tenant_id, fromQueueId: call.queue_id, toQueueId: toQueue.id,
+        });
+        console.log(`[AgentAssignment] Call ${call.id} overflowed from queue ${call.queue_id} to ${toQueue.id}`);
+
+        await this.emitQueueUpdate(call.tenant_id, call.queue_id);
+        await this.routeWaitingCall({ ...call, queue_id: toQueue.id, agent_id: null });
+    }
+
+    /**
+     * Offers a call that is waiting in its queue: RING_ALL rings every
+     * available member; otherwise the queue drains (oldest waiting call
+     * first — FIFO holds even when this call is the one that just moved).
+     */
+    async routeWaitingCall(call) {
+        const queue = await queueRouter.getQueue(call.queue_id);
+        if (!queue) {
+            EventBus.emit('call:waiting', { callId: call.id, tenantId: call.tenant_id, queueId: call.queue_id ?? null });
+            return false;
+        }
+        if (queueRouter.isRingAll(queue)) {
+            await this.#offerToAll(queue, call.id);
+            await this.emitQueueUpdate(call.tenant_id, queue.id);
+            return false;
+        }
+        await this.drainQueue(queue);
+        const after = await CallRepository.findById(call.id);
+        const offered = after?.agent_id != null;
+        if (!offered && after?.status === 'RINGING') {
+            EventBus.emit('call:waiting', { callId: call.id, tenantId: call.tenant_id, queueId: queue.id });
+        }
+        await this.emitQueueUpdate(call.tenant_id, queue.id);
+        return offered;
+    }
+
+    // RING_ALL: every available member is offered the call; first accept claims it.
+    async #offerToAll(queue, callId) {
+        const call = await CallRepository.findById(callId);
+        if (!call) return;
+        const offered = (await offerHistory.eligible(callId, await queueRouter.ringAllTargets(queue, call.tenant_id)));
+        if (!offered.length) {
+            EventBus.emit('call:waiting', { callId, tenantId: call.tenant_id, queueId: queue.id });
+            return;
+        }
+        const sdpOffer = await this.#agentOffer(callId);
+        EventBus.emit('call:incoming', IncomingCallPayload.fromCall(call, {
+            agentId: null,
+            offeredAgentIds: offered.map((a) => a.id),
+            sdpOffer,
+            assignmentType: AssignmentType.QUEUED,
+        }));
     }
 
     // The AGENT-leg SDP offer for a call: reuse one already created on this

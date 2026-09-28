@@ -220,7 +220,7 @@ class AgentRepository {
 
             const [callResult] = await conn.execute(
                 `UPDATE calls
-                 SET agent_id = ?, updated_at = NOW()
+                 SET agent_id = ?, offered_at = NOW(), updated_at = NOW()
                  WHERE id = ?
                  AND agent_id IS NULL
                  AND status = 'RINGING'

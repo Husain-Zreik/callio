@@ -13,6 +13,7 @@ import { callCleanupService } from '../core/calls/CallCleanupService.js';
 import { consumerEventPublisher } from '../core/events/ConsumerEventPublisher.js';
 import { ivrTerminationHandler } from '../core/ivr/IvrTerminationHandler.js';
 import { outboxDispatcher } from '../outbox/OutboxDispatcher.js';
+import { queueTimeoutService } from '../core/routing/QueueTimeoutService.js';
 
 function logOptional(label, result, disabledFeature) {
     if (result.status === 'fulfilled')
@@ -58,5 +59,6 @@ export async function startCoreServices() {
     await presenceService.clearOwnStalePresence();
     redisCleanupService.start();
     callCleanupService.start();
+    queueTimeoutService.start();
     outboxDispatcher.start();
 }

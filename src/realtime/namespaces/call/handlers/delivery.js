@@ -97,6 +97,19 @@ export function registerCallDeliveryListeners() {
         roomManager.emitToUser(userId, 'call:offer_withdrawn', { callId, reason: 'declined' });
     });
 
+    // The core took an offer back (ring timeout, a decline passed on, overflow):
+    // stop the ring on those agents' sockets and devices.
+    EventBus.on('call:offer_withdrawn', async ({ callId, agentIds, reason }) => {
+        try {
+            if (!agentIds?.length) return;
+            roomManager.emitToUsers(agentIds, 'call:offer_withdrawn', { callId, reason });
+            await Promise.all(agentIds.map((id) => roomManager.removeUserFromCallRoom(id, callId)));
+            await callPushNotifier.notifyCancelled(callId, agentIds);
+        } catch (err) {
+            console.error(`[delivery] Failed to withdraw offer for call ${callId}:`, err);
+        }
+    });
+
     // Another member took a RING_ALL call: withdraw it from everyone else.
     EventBus.on('call:offer_taken', async ({ callId, takenBy, queueId }) => {
         try {

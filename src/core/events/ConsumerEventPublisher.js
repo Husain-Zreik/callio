@@ -121,6 +121,9 @@ class ConsumerEventPublisher {
                 to_queue_id: targetQueueId ?? null,
             })
         );
+        EventBus.on('call:overflowed', ({ callId, fromQueueId, toQueueId }) =>
+            this.publishForCall(callId, 'call.overflowed', { from_queue_id: fromQueueId, to_queue_id: toQueueId })
+        );
         EventBus.on('call:terminated', ({ callId }) => this.publishForCall(callId, 'call.ended'));
         EventBus.on('call:ivr_session_closed', ({ callId, outcome, durationSeconds }) =>
             this.publishForCall(callId, 'call.ivr.completed', { outcome, duration_seconds: durationSeconds ?? null })

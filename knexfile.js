@@ -16,10 +16,13 @@ export default {
         password: config.database.password,
         database: config.database.database,
         charset: "utf8mb4",
+        // UTC, same as config/dbConnection.js.
+        timezone: "Z",
     },
     pool: {
         min: 0,
         max: config.database.poolLimit,
+        afterCreate: (conn, done) => conn.query("SET time_zone = '+00:00'", (err) => done(err, conn)),
     },
     migrations: {
         directory: "./migrations",

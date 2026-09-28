@@ -17,6 +17,15 @@ const pool = mysql.createPool({
     queueLimit: 1000,
     enableKeepAlive: true,
     keepAliveInitialDelay: 0,
+    // Everything in UTC: JS Dates are written and read as UTC, and each
+    // session's NOW() is UTC too (below), whatever the host's or server's
+    // time zone. Mixing the two once stored JS-written times hours away from
+    // SQL-written ones on any non-UTC host.
+    timezone: 'Z',
+});
+
+pool.on('connection', (conn) => {
+    conn.query("SET time_zone = '+00:00'");
 });
 
 // mysql2 pool does not validate connections before lending them out.

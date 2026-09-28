@@ -19,6 +19,7 @@ import { ivrCoordinator } from '../core/ivr/IvrCoordinator.js';
 import CallRepository from '../persistence/CallRepository.js';
 import dbPool from '../../config/dbConnection.js';
 import { outboxDispatcher } from '../outbox/OutboxDispatcher.js';
+import { queueTimeoutService } from '../core/routing/QueueTimeoutService.js';
 
 // Checked by callWebhookController before processing a new incoming-call webhook.
 // Live ES module binding — importers see updates made to this value below, not a
@@ -172,6 +173,7 @@ export async function shutdown(server, io) {
 
         // 6. Stop background jobs (Redis reaper, outbox dispatcher lease)
         await redisCleanupService.stop();
+        queueTimeoutService.stop();
         await outboxDispatcher.stop();
 
         // 7. Close Redis service connections (in reverse order)
