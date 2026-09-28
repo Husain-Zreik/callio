@@ -28,15 +28,29 @@ class SipGateway {
         this.srf.invite(onInvite);
         this.srf.on('connect', (err, hostport) => {
             if (err) {
-                console.error('[SIP] drachtio connection failed:', err);
+                // drachtio-srf's errors are often plain objects that log as {}.
+                const reason = err.message ?? err.code ?? (typeof err === 'string' ? err : JSON.stringify(err, Object.getOwnPropertyNames(err)));
+                const key = String(reason);
+                if (key !== this._lastError) {
+                    this._lastError = key;
+                    console.error(`[SIP] drachtio connection to ${drachtio.host}:${drachtio.port} failed: ${reason} — check that the gateway is running and DRACHTIO_SECRET matches drachtio.conf.xml`);
+                }
                 return;
             }
+            this._lastError = null;
             this.connected = true;
             console.log(`[SIP] Connected to drachtio-server (${hostport})`);
         });
         // drachtio-srf reconnects by itself; this only tracks the state.
         this.srf.on('error', (err) => {
-            if (this.connected) console.warn(`[SIP] drachtio connection lost: ${err.message}`);
+            const reason = err?.message ?? err?.code ?? String(err);
+            if (this.connected) {
+                console.warn(`[SIP] drachtio connection lost: ${reason}`);
+            } else if (reason !== this._lastError) {
+                // Not reachable at all (e.g. ECONNREFUSED: the gateway isn't running).
+                this._lastError = reason;
+                console.error(`[SIP] drachtio at ${drachtio.host}:${drachtio.port} unreachable: ${reason} — is the SIP gateway running?`);
+            }
             this.connected = false;
         });
         this.srf.connect({ host: drachtio.host, port: drachtio.port, secret: drachtio.secret });
