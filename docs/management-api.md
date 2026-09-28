@@ -113,6 +113,24 @@ WhatsApp line:
 }
 ```
 
+SIP line (a DID on a carrier trunk):
+
+```json
+{
+  "type": "SIP",
+  "display_name": "Beirut office",
+  "address": "+9611234567",
+  "sip_trunk_id": 1,
+  "inbound_queue_ref": "support"
+}
+```
+
+`address` is the DID in E.164 form — inbound calls to that number reach this
+channel, and outbound calls from it show it as the caller. `sip_trunk_id` is
+a trunk the Callio operator set up (`npm run sip:trunk`): a platform trunk or
+one of this consumer's own. Outbound customers are E.164 numbers or `sip:`
+URIs.
+
 Credentials are encrypted at rest and never returned. Omit `credentials` to
 keep the stored ones. A number/phone_number_id can belong to only one channel.
 

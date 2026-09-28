@@ -14,6 +14,7 @@ import { consumerEventPublisher } from '../core/events/ConsumerEventPublisher.js
 import { ivrTerminationHandler } from '../core/ivr/IvrTerminationHandler.js';
 import { outboxDispatcher } from '../outbox/OutboxDispatcher.js';
 import { queueTimeoutService } from '../core/routing/QueueTimeoutService.js';
+import { customerChannels } from '../core/channels/CustomerChannels.js';
 
 function logOptional(label, result, disabledFeature) {
     if (result.status === 'fulfilled')
@@ -61,4 +62,8 @@ export async function startCoreServices() {
     callCleanupService.start();
     queueTimeoutService.start();
     outboxDispatcher.start();
+
+    // Channels that hold a connection to their provider (SIP's drachtio) take
+    // calls from here on.
+    for (const channel of customerChannels.all()) await channel.start?.();
 }

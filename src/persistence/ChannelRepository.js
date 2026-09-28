@@ -40,6 +40,16 @@ class ChannelRepository {
         return rows;
     }
 
+    // SIP ingress identifies a line by the dialled number (the DID).
+    async findActiveByAddress(type, address) {
+        const [rows] = await connection.execute(
+            `SELECT ${CHANNEL_COLUMNS} FROM channels
+             WHERE type = ? AND address = ? AND status = 'ACTIVE' LIMIT 1`,
+            [type, String(address)]
+        );
+        return rows[0] ?? null;
+    }
+
     // Channel ingress identifies a line by the provider's account id for it
     // (WhatsApp: Meta's phone_number_id).
     async findActiveByProviderAccount(type, providerAccountId) {

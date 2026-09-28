@@ -11,9 +11,16 @@
 # (drachtio.local.conf.xml / rtpengine.local.conf) already document, just
 # achieved via Docker port publishing instead of a literal network namespace.
 #
-# RTP range narrowed to 11 ports (30000-30010) — plenty for one or two test
-# calls, keeps the port list short. The production file's wider range
-# doesn't need to change.
+# RTP range narrowed to 100 ports (30000-30099) — enough for the e2e suite's
+# back-to-back calls, keeps the port list short. The production file's wider
+# range doesn't need to change.
+#
+# rtpengine.local.conf (no comments in it: rtpengine's parser rejects them):
+#   interface = eth0!127.0.0.1   bind the container's interface (what the
+#                                published ports reach), advertise 127.0.0.1
+#                                in SDP (how this machine reaches it)
+#   delete-delay = 0             free a deleted call's ports at once (default
+#                                30 s), so back-to-back test calls don't run out
 #
 # Usage: docker compose -f docker-compose.local.yml up -d
 #        docker compose -f docker-compose.local.yml down
@@ -56,7 +63,7 @@ services:
     command: ["--config-file", "/etc/rtpengine.conf"]
     ports:
       - "127.0.0.1:22222:22222/udp"
-      - "127.0.0.1:30000-30010:30000-30010/udp"
+      - "127.0.0.1:30000-30099:30000-30099/udp"
     volumes:
       - ./rtpengine/rtpengine.local.conf:/etc/rtpengine.conf:ro
       # Same reason as drachtio's /config: the image declares /tmp a volume.

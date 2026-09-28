@@ -5,6 +5,7 @@
 // Needs MySQL 8 and Redis reachable — `docker compose -f test/e2e/docker-compose.yml up -d`
 // gives both on the default ports below. Override with TEST_DB_* / TEST_REDIS_*.
 import { spawn, spawnSync } from 'child_process';
+import net from 'net';
 import { createRequire } from 'module';
 import { randomBytes } from 'crypto';
 import { mkdtempSync, writeFileSync, readdirSync, readFileSync, existsSync } from 'fs';
@@ -20,6 +21,17 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
 const work = mkdtempSync(join(tmpdir(), 'callio-e2e-'));
 const port = Number(process.env.TEST_CALLIO_PORT || 3901);
+
+// The SIP suite needs the local SIP gateway (deploy/sip-gateway/docker-compose.local.yml).
+const drachtioUp = await new Promise((resolve) => {
+    const s = net.connect(9022, '127.0.0.1', () => { s.destroy(); resolve(true); });
+    s.on('error', () => resolve(false));
+    s.setTimeout(1500, () => { s.destroy(); resolve(false); });
+});
+const sipEnv = drachtioUp ? {
+    DRACHTIO_HOST: '127.0.0.1', DRACHTIO_PORT: '9022', DRACHTIO_SECRET: process.env.TEST_DRACHTIO_SECRET || 'CHANGE_ME',
+    RTPENGINE_HOST: '127.0.0.1', RTPENGINE_NG_PORT: '22222',
+} : {};
 
 const env = {
     ...process.env,
@@ -40,6 +52,7 @@ const env = {
     // Keep real provider credentials out of the test process.
     AWS_ACCESS_KEY_ID: '', AWS_SECRET_ACCESS_KEY: '', ONESIGNAL_APP_ID: '', APNS_KEY_ID: '',
     FIREBASE_SERVICE_ACCOUNT_PATH: join(work, 'no-firebase.json'),
+    ...sipEnv,
 };
 
 const run = (args, opts = {}) => {
@@ -75,7 +88,11 @@ async function startCallio(logFile) {
 
 function suiteFiles() {
     const only = process.argv.slice(2);
-    const all = readdirSync(here).filter((f) => f.endsWith('.test.mjs')).sort();
+    let all = readdirSync(here).filter((f) => f.endsWith('.test.mjs')).sort();
+    if (!drachtioUp) {
+        console.log('[e2e] SIP gateway not running — skipping sip.test.mjs (docker compose -f deploy/sip-gateway/docker-compose.local.yml up -d)');
+        all = all.filter((f) => f !== 'sip.test.mjs');
+    }
     return only.length ? all.filter((f) => only.some((o) => f.includes(o))) : all;
 }
 
@@ -90,7 +107,9 @@ try {
 
     run([join(root, 'node_modules/knex/bin/cli.js'), 'migrate:latest']);
     const seedOut = run(['scripts/seed-dev.js', '--phone-number-id', '111222333', '--whatsapp-token', 'fake-token',
-        '--whatsapp-number', '+96170000000', '--webhook-url', 'http://127.0.0.1:3999/events']);
+        '--whatsapp-number', '+96170000000', '--webhook-url', 'http://127.0.0.1:3999/events',
+        // The trunk points at the fake carrier (sipCarrier.mjs) as the gateway's containers see this machine.
+        '--sip-did', '+96170000001', '--sip-trunk-host', 'host.docker.internal', '--sip-trunk-port', '5070']);
     const seedFile = join(work, 'seed.json');
     writeFileSync(seedFile, seedOut.slice(seedOut.indexOf('{')));
 

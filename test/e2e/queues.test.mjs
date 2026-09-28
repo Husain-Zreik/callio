@@ -142,7 +142,9 @@ try {
     const r5 = await callRow(row5.id);
     check('after the max wait with no overflow the call ends as TIMEOUT', r5.termination_reason === 'TIMEOUT' && r5.terminated_by === 'SYSTEM',
         `${r5.termination_reason}/${r5.terminated_by}`);
-    check('the provider is told to end the call', meta.calls.some((c) => c.body.call_id === c5.id && ['terminate', 'reject'].includes(c.body.action)));
+    // The terminator commits first and tells the provider a moment later.
+    const told = await waitFor(() => meta.calls.some((c) => c.body.call_id === c5.id && ['terminate', 'reject'].includes(c.body.action)), 5000, 'provider end').catch(() => false);
+    check('the provider is told to end the call', told);
     await waitFor(() => receiver.events.some((e) => e.callId === row5.id && e.type === 'call.ended'), 8000, 'call.ended').catch(() => null);
     check('the consumer gets call.ended with TIMEOUT', receiver.events.some((e) => e.callId === row5.id && e.type === 'call.ended'
         && e.body.data.call.terminationReason === 'TIMEOUT'));

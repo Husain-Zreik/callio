@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-Callio is a standalone contact-center call engine that **any product** integrates with. Customers call over a channel (WhatsApp Calling today, SIP/PSTN in progress); agents answer in a browser or app over WebRTC; Callio owns routing (queues), IVR, availability, transfers, supervisor monitoring, recording and the call record. It has **its own MySQL database** and knows nothing about any consuming product.
+Callio is a standalone contact-center call engine that **any product** integrates with. Customers call over a channel (WhatsApp Calling, or SIP/PSTN through a carrier trunk); agents answer in a browser or app over WebRTC; Callio owns routing (queues), IVR, availability, transfers, supervisor monitoring, recording and the call record. It has **its own MySQL database** and knows nothing about any consuming product.
 
 Read these before changing anything a consumer depends on:
 
 - **`PLATFORM_ARCHITECTURE.md`** — the integration contract (Management API, event webhooks, agent gateway, channel ingress, push), the ports/adapters rules, the code layout and the build order.
 - **`docs/management-api.md`, `docs/events.md`, `docs/agent-protocol.md`** — the three public surfaces, as implemented. If you change behaviour a consumer can observe, update the matching doc in the same change.
 - **`migrations/README.md`** — the data model. Every schema change is a new Knex migration (`npm run migrate:make -- <name>`); never edit a migration that has run anywhere real.
-- **`SIP_INTEGRATION.md`** — the SIP gateway (drachtio-server + rtpengine under `deploy/sip-gateway/`) and the SIP channel plan.
+- **`SIP_INTEGRATION.md`** — the SIP gateway (drachtio-server + rtpengine under `deploy/sip-gateway/`) and the SIP channel (`src/channels/sip/`): how it works, configuration, testing, what's left for the real trunk.
 
 `ARCHITECTURE.md` is the older internals guide (media pipeline, call-flow narrative). Its media/IVR/recording detail is still accurate; anything in it about businesses, midlr tables, Laravel or chat is historical.
 
@@ -33,9 +33,11 @@ npm start                         # node index.js
 pm2 start ecosystem.config.cjs    # multi-worker fleet (production shape)
 
 npm run consumer:create -- --name "Acme" --slug acme [--webhook-url URL] [--lookup-url URL]
-npm run seed:dev -- --phone-number-id <id> --whatsapp-token <token>   # dev consumer/tenant/agents/queue/channel
+npm run seed:dev -- --phone-number-id <id> --whatsapp-token <token> [--sip-did +961…]   # dev consumer/tenant/agents/queue/channels
+npm run sip:trunk -- --name <name> --host <carrier> [--cidr <source/32>]   # create/update a SIP trunk (operator)
 
 docker compose -f test/e2e/docker-compose.yml up -d   # MySQL + Redis for tests
+docker compose -f deploy/sip-gateway/docker-compose.local.yml up -d   # SIP gateway, for the SIP suite
 npm run test:e2e                  # end-to-end suites with real WebRTC media (test/e2e/README.md)
 npm run test:e2e -- routing       # one suite
 
@@ -58,7 +60,7 @@ There is no unit-test suite and no lint/format config. **Verify behaviour change
   - `tenancy/ConsumerProvisioning` — operator-side consumer/key creation.
   - `constants/CallConstants.js` — frozen enums; never use raw string literals for statuses, leg types (`AGENT`/`CUSTOMER`/`MONITOR`), channels, strategies.
   - `channels/` — the customer-channel boundary: `CustomerChannels` (the port every adapter implements, and the registry the core calls by `calls.channel`) and `ChannelIngress` (where adapters report provider events: inbound offer, outbound answer, status, end — all call decisions live here, once for every channel).
-- `channels/` — channel adapters, registered in `channels/index.js`. `whatsapp/`: `WhatsAppChannel` (the port), `WhatsAppCallApi` (Graph API with the channel's credentials), `WhatsAppWebhookTranslator` (Meta payloads → `ChannelIngress`), `webhookRoutes` (Meta signature + forward endpoint), `whatsappSdp` (customer-leg SDP rules). A new channel is a new folder plus one registration line; nothing in `core/` or `media/` changes.
+- `channels/` — channel adapters, registered in `channels/index.js`. `whatsapp/`: `WhatsAppChannel` (the port), `WhatsAppCallApi` (Graph API with the channel's credentials), `WhatsAppWebhookTranslator` (Meta payloads → `ChannelIngress`), `webhookRoutes` (Meta signature + forward endpoint), `whatsappSdp` (customer-leg SDP rules). `sip/`: `SipChannel` (the port), `SipIngress` (INVITE/CANCEL/BYE → `ChannelIngress`), `SipGateway` (drachtio-srf + rtpengine connections), `SipDialogs` (SIP legs held on this worker; routes actions from other workers to the owner), `RtpEngineClient` (carrier RTP ⇄ WebRTC), `sipSdp`. A new channel is a new folder plus one registration line; nothing in `core/` or `media/` changes.
 - `media/` — WebRTC engine: `webrtc/` (peers, SDP, ICE), `bridge/` (AudioBridge, monitor mixing, customer network/silence watchdogs), `dtmf/` (in-band detection in a worker thread), `recording/` (stereo OGG/Opus in worker threads), `playback/` (IVR/queue audio).
 - `http/` — Fastify routes: `v1/` Management API (API key via `auth/apiKeyAuth.js`, errors via `errors.js`), health; each registered channel adds its own ingress routes.
 - `realtime/` — the agent gateway: Socket.IO server (websocket only), `middleware/authMiddleware` (consumer JWT), `namespaces/call/socketHandlers.js` (client → server), `namespaces/call/handlers/*` (EventBus → socket relays, thin), `managers/RoomManager`.
@@ -97,8 +99,8 @@ Background loops (`CallCleanupService`, `QueueTimeoutService`, `RedisCleanupServ
 
 ## Status
 
-- WhatsApp inbound and outbound, queues (`RING_ALL`/`ROUND_ROBIN`/`PRIORITY`), IVR, transfer, monitoring, recording, push, the Management API and consumer events are implemented and covered by `test/e2e`.
-- Deployed dev environment: `callio.pcg-ms.com` (nginx → PM2). The SIP gateway under `deploy/sip-gateway/` has handled a real inbound call from the carrier; the SIP **channel** in `src/channels/sip/` (Milestone B in SIP_INTEGRATION.md) is next.
+- WhatsApp and SIP, inbound and outbound; queues (`RING_ALL`/`ROUND_ROBIN`/`PRIORITY`) with ring timeout / max wait / overflow; IVR, transfer, monitoring, recording, push, the Management API and consumer events are implemented and covered by `test/e2e` (SIP against the local gateway and a fake carrier).
+- Deployed dev environment: `callio.pcg-ms.com` (nginx → PM2), not yet moved to the new database. The SIP gateway there has handled a real inbound call from the carrier (Digitalk); the SIP channel hasn't been run against the real trunk yet (SIP_INTEGRATION.md, last section).
 - Not yet: per-consumer push credentials (push uses platform credentials from env), an agent client SDK. A live call transferred to an agent who doesn't answer has no timeout yet (queue timers cover calls that are waiting, not answered calls being handed over).
 
 ## History

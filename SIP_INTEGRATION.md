@@ -1,9 +1,9 @@
 # SIP Trunk Integration
 
-Status: **Milestone A complete and validated with a real inbound call.**
-Milestone B (application code, wiring SIP into the call domain) has not
-started — this doc exists so it doesn't have to re-derive the scope from
-scratch.
+Status: **Milestone A** (the gateway) is validated with a real inbound call.
+**Milestone B** (the SIP channel in `src/channels/sip/`) is implemented and
+passes the local end-to-end suite with real audio; the run against the real
+trunk is pending (see the end of this doc).
 
 ## Goal
 
@@ -116,81 +116,90 @@ application code. See `deploy/sip-gateway/`:
    ran for ~12s, but audio quality/correctness wasn't specifically checked),
    and outbound calling (rejected by the provider, see above — not pursued).
 
-## Milestone B scope (not started) — the SIP channel adapter
+## Milestone B — the SIP channel (implemented; real-trunk run pending)
 
-The channel boundary SIP plugs into already exists and WhatsApp runs on it
-(PLATFORM_ARCHITECTURE.md §6, "Channels are adapters"):
+SIP is a customer channel like WhatsApp (PLATFORM_ARCHITECTURE.md §6,
+"Channels are adapters"), in `src/channels/sip/`:
 
-- `src/core/channels/CustomerChannels.js` — the `CustomerChannel` port
-  (accept, reject, terminate, initiate, `sdp` profile, address rules,
-  provisioning validation, optional routes) and the registry the core calls
-  by `calls.channel`.
-- `src/core/channels/ChannelIngress.js` — where an adapter reports provider
-  events in Callio's terms: `inboundCall`, `outboundAnswered`,
-  `statusChanged`, `callEnded`. Dedup, the consumer lookup, IVR vs. queue,
-  offering agents, termination reasons and timing, agent release and
-  auto-offline all live there once, for every channel.
-- `src/channels/whatsapp/` — the reference adapter: `WhatsAppChannel` (the
-  port), `WhatsAppCallApi`, `WhatsAppWebhookTranslator`, `webhookRoutes`,
-  `whatsappSdp`.
+| File | Role |
+|---|---|
+| `SipChannel.js` | The `CustomerChannel` port: accept (rtpengine answer + 200 OK), reject / terminate (final error, BYE or CANCEL), `initiate` (INVITE through the trunk), address rules, channel validation, `start`/`stop` |
+| `SipIngress.js` | INVITE → `ChannelIngress.inboundCall`: the dialled number resolves the channel, the channel's trunk vouches for the source (`inbound_source_cidrs`), rtpengine turns the offer into WebRTC; CANCEL / BYE → `callEnded` |
+| `SipGateway.js` | This worker's drachtio-srf connection and rtpengine client |
+| `SipDialogs.js` | The SIP legs this worker holds; routes reject/terminate from other workers to the owner (Redis) |
+| `sipLegs.js` | Ending a leg: rtpengine delete, and the provider-side timing to the core |
+| `RtpEngineClient.js` | rtpengine ng protocol (promoted from `deploy/sip-gateway/test/`), with the two conversions: carrier RTP ⇄ WebRTC |
+| `sipSdp.js` | The channel's SDP rules: add `a=group:BUNDLE` (Callio's peers are max-bundle), drop telephone-event (see DTMF) |
+| `sipAddress.js` | DID / caller parsing, the user part to dial, the CIDR check |
 
-The media engine, IVR, recording, DTMF, routing, the agent gateway and the
-Management API need **no changes** for SIP; neither do the enums or schema
-(`channels.type` and `calls.channel` already accept `SIP`,
-`CustomerAddressType.SIP_URI` exists).
+**Media:** rtpengine converts the carrier's plain RTP (G.711) to and from a
+WebRTC session (ICE + DTLS-SRTP) that Callio's media engine terminates as the
+call's `CUSTOMER` leg — so the audio bridge, IVR, recording, monitoring and
+DTMF detection are the same code as for WhatsApp. Codecs pass through
+(PCMU/PCMA); rtpengine doesn't transcode.
 
-### Key design insight: a SIP leg is still a real Node-side WebRTC peer connection
+**Workers:** every worker connects to drachtio-server; drachtio spreads new
+INVITEs across them and sends in-dialog requests (BYE) back to the owner. The
+worker that receives an INVITE claims the call (ChannelIngress ownership), so
+its media and its SIP leg are on the same worker. Actions started elsewhere
+(a queue timeout, cleanup, the API) reach the owner through `SipDialogs`.
 
-There are two ways drachtio+rtpengine could bridge a SIP call: (1) rtpengine
-relays raw RTP directly between the trunk and the agent's browser, with media
-never touching Node's process at all, or (2) rtpengine converts the trunk's
-plain RTP into a genuine WebRTC session that **Node itself terminates** via
-`@roamhq/wrtc` — exactly like the WhatsApp customer leg. Option 2 is the one
-to build: `AudioBridge`, recording, DTMF and IVR see a SIP call as just
-another `CUSTOMER` `RTCPeerConnection`.
+**DTMF:** Callio detects keys in the customer's audio. Carriers send DTMF
+in-band or as RFC 4733 telephone-events, which a WebRTC peer consumes as
+events, not audio. `sipSdp.js` leaves telephone-event out of what we accept, so
+the carrier falls back to in-band DTMF. Found along the way: the detector's
+power floor was tuned for 48 kHz and rejected every key at 8 kHz (G.711) —
+now scaled to the sample rate (`media/dtmf/DTMFDetector.js`).
 
-Inbound flow: drachtio-srf receives the trunk's INVITE → the adapter resolves
-the dialled DID to a `channels` row (`channels.address`) → rtpengine `offer`
-turns the trunk's SDP into a WebRTC offer → `channelIngress.inboundCall(channel,
-{ providerCallId: <SIP Call-ID>, customer: { address, addressType: E164 | SIP_URI },
-sdpOffer, ... })`. From there the core does what it does for WhatsApp; when it
-answers (`SipChannel.accept(call, sdpAnswer)`), the adapter runs rtpengine
-`answer` and replies 200 OK via `srf.createUAS`. BYE/CANCEL from the trunk →
-`channelIngress.callEnded`; `SipChannel.terminate` sends BYE.
+**Outbound:** `POST /v1/tenants/{t}/calls` on a SIP channel → the agent's
+`call:start` → INVITE to `sip:<number>@<trunk host>:<port>` with the channel's
+DID as `From`, digest credentials if the trunk has them. 180/183 → RINGING,
+200 → answered, 486/600/603 → REJECTED, other failures → FAILED with the SIP
+status in `failure_details`. Digitalk rejected outbound with `503` during
+Milestone A, so outbound is only proven against the local fake carrier.
 
-`PeerEventManager.handleIceCandidate` already skips trickling outbound ICE for
-the `CUSTOMER` leg (the whole SDP is exchanged in one round trip), which is
-what rtpengine needs too.
+### Configuration
 
-### New surface
+Callio, per worker (`.env`):
 
 ```
-src/channels/sip/
-├── SipChannel.js            the CustomerChannel port: accept → rtpengine answer + 200 OK,
-│                            reject → 486/603, terminate → BYE, initiate → INVITE via the trunk,
-│                            sdp profile (if rtpengine's WebRTC SDP needs any rewrite),
-│                            normalizeCustomerAddress (E.164 / SIP URI), validateChannelConfig
-├── SipIngress.js            srf.invite / dialog events → ChannelIngress (DID → channel,
-│                            Call-ID → providerCallId, SIP response codes → failed/errors)
-├── DrachtioClient.js        owns the srf connection singleton
-└── RtpEngineClient.js       promoted from deploy/sip-gateway/test/rtpengine-ng-client.js;
-                             needs real test coverage before being trusted in the app
+DRACHTIO_HOST=127.0.0.1        # unset = SIP disabled
+DRACHTIO_PORT=9022
+DRACHTIO_SECRET=…              # = <admin secret> in drachtio.conf.xml
+RTPENGINE_HOST=127.0.0.1
+RTPENGINE_NG_PORT=22222
+# Only when rtpengine has several named interfaces (e.g. private + public):
+# RTPENGINE_CARRIER_INTERFACE=… RTPENGINE_WEBRTC_INTERFACE=…
 ```
 
-plus `customerChannels.register(sipChannel)` in `src/channels/index.js` and a
-drachtio connection started from `server/bootstrap.js`. **No HTTP route is
-needed** — drachtio-srf delivers SIP messages to Node's own process.
+Provisioning:
 
-Open points for the implementation:
-- **Media ownership.** A SIP dialog lives on the worker whose drachtio
-  connection received the INVITE; `ChannelIngress` claims call ownership on
-  the worker that handles `inboundCall`, which must be the same one. One
-  drachtio connection per worker (drachtio-server load-balances INVITEs
-  across connected apps) satisfies this; BYE for a dialog arrives on its own
-  worker.
-- **Failure attribution.** Map SIP final responses to `failed` / `errors`
-  (e.g. 5xx/6xx from the trunk → PROVIDER, 486/603 → customer rejection via
-  `statusChanged(REJECTED)`), the way the WhatsApp translator maps Meta's
-  relay error codes.
-- **e2e.** Add a SIP scenario to `test/e2e` (a SIP UA against the local
-  gateway in `deploy/sip-gateway/docker-compose.local.yml`).
+```bash
+npm run sip:trunk -- --name digitalk --host 185.231.78.58 --cidr 185.231.78.58/32
+# → prints the trunk id
+curl -X PUT …/v1/tenants/{t}/channels/sip-main -d '{ "type": "SIP", "address": "+961…", "sip_trunk_id": 1, "inbound_queue_ref": "main" }'
+```
+
+A trunk without `--cidr` accepts INVITEs from any source — development only.
+
+### Testing
+
+`npm run test:e2e` runs `test/e2e/sip.test.mjs` when the local gateway is up
+(`docker compose -f deploy/sip-gateway/docker-compose.local.yml up -d`), with
+a fake carrier (`test/e2e/sipCarrier.mjs`: a SIP UA plus G.711 RTP) calling
+in and answering outbound calls: audio both ways, hang-up from either side,
+CANCEL, unknown number (404), a queue timeout (480), IVR with in-band DTMF,
+outbound answered and declined (486). The local rtpengine binds its container
+interface and advertises 127.0.0.1 (`interface = eth0!127.0.0.1`), which is
+how Docker Desktop's published ports reach it; production uses host
+networking and the public IP.
+
+### Still to do on the real trunk
+
+1. Move the dev server to the new database, deploy, set the env above,
+   create the Digitalk trunk (with its CIDR) and a SIP channel for the DID.
+2. A real inbound call: two-way audio, hang-up both ways, IVR key presses —
+   and whether Digitalk falls back to in-band DTMF when telephone-event is
+   declined (if it insists on RFC 4733, Callio needs to take DTMF from the
+   events instead: rtpengine can report them).
+3. Outbound needs Digitalk to enable it (the `503` from Milestone A).

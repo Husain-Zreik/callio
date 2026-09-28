@@ -23,6 +23,8 @@
 //                                → { address, addressType } for outbound intents
 //   validateChannelConfig(body)  → error message or null, for channel provisioning
 //   registerRoutes(fastify)      optional HTTP ingress (webhooks)
+//   start() / stop()             optional: connect to the provider at startup
+//                                (e.g. SIP's drachtio connection), disconnect at shutdown
 // `call` is a calls row. Adapters read their credentials from the call's channel.
 import CallRepository from '../../persistence/CallRepository.js';
 

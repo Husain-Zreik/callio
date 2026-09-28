@@ -12,9 +12,14 @@
 //      resetting the active digit) and a per-digit cooldown floor.
 //   3. Sample rate mismatch — wrtc delivers the first frame at 16kHz then
 //      switches to 48kHz. Fixed by re-initializing when the rate changes.
+//   4. Rate-dependent power floor — a Goertzel bin's power grows with the
+//      square of the window's sample count, so a fixed minPower tuned at
+//      48kHz rejected every key at 8kHz (G.711 / SIP calls: 36x less power).
+//      minPower is now defined for a 48kHz window and scaled to the actual one.
 //
 // Tuning guide:
 //   minPower      — raise if speech still triggers; lower if real DTMF misses.
+//                   Defined for a 48kHz window; scaled for other rates.
 //   thresholdRatio — raise to suppress speech (real DTMF is a pure tone, ratio >> 5).
 //   confirmWindows — raise for fewer false positives, lower for faster response.
 //   silenceWindows — raise to prevent multi-fire on the same keypress.
@@ -139,6 +144,8 @@ export class DTMFDetector {
 
         this._sampleRate = sampleRate;
         this._windowSize = Math.max(64, Math.round(sampleRate * this._windowMs / 1000));
+        const referenceSize = Math.round(48000 * this._windowMs / 1000);
+        this._scaledMinPower = this._minPower * (this._windowSize / referenceSize) ** 2;
     }
 
     _analyzeWindow(samples) {
@@ -244,7 +251,7 @@ export class DTMFDetector {
         }
 
         const bestPower = powers[best];
-        if (bestPower < this._minPower) return null;
+        if (bestPower < this._scaledMinPower) return null;
 
         for (let i = 0; i < powers.length; i++) {
             if (i === best) continue;

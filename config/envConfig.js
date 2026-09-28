@@ -138,6 +138,23 @@ export const config = {
             ttlSeconds: parseInt(process.env.TURN_CREDENTIAL_TTL_SECONDS || "86400", 10) || 86400,
         },
     },
+    // SIP channel: the drachtio-server + rtpengine gateway (deploy/sip-gateway).
+    // Unset DRACHTIO_HOST = SIP disabled on this worker.
+    sip: {
+        drachtio: {
+            host: process.env.DRACHTIO_HOST || null,
+            port: parseInt(process.env.DRACHTIO_PORT || "9022", 10),
+            secret: process.env.DRACHTIO_SECRET || null,
+        },
+        rtpengine: {
+            host: process.env.RTPENGINE_HOST || "127.0.0.1",
+            port: parseInt(process.env.RTPENGINE_NG_PORT || "22222", 10),
+            // Named rtpengine interfaces for the carrier and WebRTC sides, when
+            // rtpengine has more than one (rtpengine.conf interface = name/…).
+            carrierInterface: process.env.RTPENGINE_CARRIER_INTERFACE || null,
+            webrtcInterface: process.env.RTPENGINE_WEBRTC_INTERFACE || null,
+        },
+    },
     call: {
         recordingStorageLimitGb: parseInt(process.env.RECORDING_STORAGE_LIMIT_GB || "1", 10) || 1,
         workers: {

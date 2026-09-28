@@ -175,6 +175,9 @@ export async function shutdown(server, io) {
         await redisCleanupService.stop();
         queueTimeoutService.stop();
         await outboxDispatcher.stop();
+        for (const channel of customerChannels.all()) {
+            await Promise.resolve(channel.stop?.()).catch((err) => console.warn(`[Shutdown] ${channel.type} channel stop failed:`, err.message));
+        }
 
         // 7. Close Redis service connections (in reverse order)
         console.log("📦 Closing Redis services...");

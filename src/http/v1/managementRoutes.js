@@ -6,6 +6,7 @@ import TenantRepository from '../../persistence/TenantRepository.js';
 import AgentRepository from '../../persistence/AgentRepository.js';
 import QueueRepository from '../../persistence/QueueRepository.js';
 import ChannelRepository from '../../persistence/ChannelRepository.js';
+import SipTrunkRepository from '../../persistence/SipTrunkRepository.js';
 import IvrRepository from '../../persistence/IvrRepository.js';
 import PushTokenRepository from '../../persistence/PushTokenRepository.js';
 import { agentAssignmentCoordinator } from '../../core/routing/AgentAssignmentCoordinator.js';
@@ -29,7 +30,7 @@ const queueView = (q) => q && ({
 });
 const channelView = (c) => c && ({
     id: c.id, ref: c.external_ref, type: c.type, displayName: c.display_name, address: c.address,
-    providerAccountId: c.provider_account_id, inboundQueueId: c.inbound_queue_id,
+    providerAccountId: c.provider_account_id, sipTrunkId: c.sip_trunk_id ?? null, inboundQueueId: c.inbound_queue_id,
     recordingEnabled: Boolean(c.recording_enabled), status: c.status,
 });
 const tenantView = (t) => t && ({ id: t.id, ref: t.external_ref, name: t.name, status: t.status, settings: t.settings });
@@ -200,6 +201,11 @@ export default async function managementRoutes(fastify) {
         // Each channel adapter validates its own provider fields.
         const configError = customerChannels.has(type) ? customerChannels.get(type).validateChannelConfig?.(body) : null;
         if (configError) throw badRequest(configError);
+        // A SIP channel's trunk: a platform trunk, or one of this consumer's own.
+        const sipTrunkId = body.sip_trunk_id != null ? optionalInt(body, 'sip_trunk_id', { min: 1 }) : null;
+        if (sipTrunkId != null && !SipTrunkRepository.usableBy(await SipTrunkRepository.findById(sipTrunkId), request.consumer.id)) {
+            throw badRequest('sip_trunk_id is not a trunk this consumer can use');
+        }
 
         let channel;
         try {
@@ -208,6 +214,7 @@ export default async function managementRoutes(fastify) {
                 display_name: requireString(body, 'display_name', { optional: true }),
                 address: requireString(body, 'address', { max: 50 }),
                 provider_account_id: body.provider_account_id != null ? String(body.provider_account_id) : null,
+                sip_trunk_id: sipTrunkId,
                 credentials,
                 inbound_queue_id: inboundQueue?.id ?? null,
                 recording_enabled: Boolean(body.recording_enabled),

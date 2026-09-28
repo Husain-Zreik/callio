@@ -443,7 +443,7 @@ Each phase leaves the service working end to end.
 | 5 | Channels as adapters: `CustomerChannel` port, `ChannelIngress`; WhatsApp ingress with signature verification, payloads scoped per channel | done |
 | 6 | Agent gateway: consumer JWT, room authorization, protocol v1 doc, `call:start` outbound | done |
 | 7 | Management API v1 + outbox dispatcher + event catalog | done; per-consumer push credentials pending |
-| 8 | `SipChannel` (SIP Milestone B) on the `CustomerChannel` port and `ChannelIngress` | next |
+| 8 | `SipChannel` (SIP Milestone B) on the `CustomerChannel` port and `ChannelIngress` | done (local e2e with real audio); real-trunk run pending |
 | 9 | Agent SDK; midlr integration against the public contract | planned |
 
 End-to-end coverage for everything marked done: `test/e2e` (`npm run test:e2e`).

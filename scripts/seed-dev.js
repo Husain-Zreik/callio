@@ -5,6 +5,7 @@
 //
 //   node scripts/seed-dev.js [--phone-number-id <meta id>] [--whatsapp-token <token>]
 //                            [--whatsapp-number +9617...] [--sip-did +9611...]
+//                            [--sip-trunk-host <host>] [--sip-trunk-port 5060]
 //                            [--webhook-url <url>] [--lookup-url <url>]
 import { createConsumer } from '../src/core/tenancy/ConsumerProvisioning.js';
 import ConsumerRepository from '../src/persistence/ConsumerRepository.js';
@@ -12,6 +13,7 @@ import TenantRepository from '../src/persistence/TenantRepository.js';
 import AgentRepository from '../src/persistence/AgentRepository.js';
 import QueueRepository from '../src/persistence/QueueRepository.js';
 import ChannelRepository from '../src/persistence/ChannelRepository.js';
+import SipTrunkRepository from '../src/persistence/SipTrunkRepository.js';
 import connection from '../config/dbConnection.js';
 
 function arg(name, fallback = null) {
@@ -58,8 +60,14 @@ try {
     }
     const did = arg('sip-did');
     if (did) {
+        // A platform trunk; any source may send INVITEs (development).
+        const trunk = await SipTrunkRepository.upsert({
+            name: 'dev-trunk',
+            host: arg('sip-trunk-host', '127.0.0.1'),
+            port: Number(arg('sip-trunk-port', 5060)),
+        });
         channels.push(await ChannelRepository.upsert(tenant.id, 'sip-main', {
-            type: 'SIP', display_name: 'SIP line', address: did, inbound_queue_id: queue.id,
+            type: 'SIP', display_name: 'SIP line', address: did, sip_trunk_id: trunk.id, inbound_queue_id: queue.id,
         }));
     }
 
