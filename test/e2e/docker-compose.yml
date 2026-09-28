@@ -1,13 +1,36 @@
 # MySQL + Redis for the end-to-end suites (npm run test:e2e).
-#   docker compose -f test/e2e/docker-compose.yml up -d
+#   docker compose -f test/e2e/docker-compose.yml up -d --wait
+#   docker compose -f test/e2e/docker-compose.yml down
+# Data lives in memory: run.mjs recreates the test database on every run.
+name: callio-test
+
 services:
   mysql:
     image: mysql:8.0
+    container_name: callio-test-mysql
     environment:
       MYSQL_ROOT_PASSWORD: callio
     ports:
-      - "33306:3306"
+      - "127.0.0.1:33306:3306"
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pcallio"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
   redis:
     image: redis:7-alpine
+    container_name: callio-test-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
     ports:
-      - "36379:6379"
+      - "127.0.0.1:36379:6379"
+    # The image declares /data a volume; in memory, like MySQL's data.
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20

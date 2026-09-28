@@ -16,6 +16,9 @@
 # doesn't need to change.
 #
 # Usage: docker compose -f docker-compose.local.yml up -d
+#        docker compose -f docker-compose.local.yml down
+name: callio-sip-local
+
 services:
   drachtio:
     image: drachtio/drachtio-server:latest
@@ -28,6 +31,9 @@ services:
     volumes:
       - ./drachtio/drachtio.local.conf.xml:/etc/drachtio.conf.xml:ro
       - drachtio-local-log:/var/log/drachtio
+      # The image declares /config as a volume; naming it keeps a recreate
+      # from leaving an anonymous volume behind each time.
+      - drachtio-local-config:/config
 
   rtpengine:
     image: drachtio/rtpengine:latest
@@ -53,6 +59,10 @@ services:
       - "127.0.0.1:30000-30010:30000-30010/udp"
     volumes:
       - ./rtpengine/rtpengine.local.conf:/etc/rtpengine.conf:ro
+      # Same reason as drachtio's /config: the image declares /tmp a volume.
+      - rtpengine-local-tmp:/tmp
 
 volumes:
   drachtio-local-log:
+  drachtio-local-config:
+  rtpengine-local-tmp:
