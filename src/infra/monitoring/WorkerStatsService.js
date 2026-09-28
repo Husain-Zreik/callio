@@ -1,7 +1,7 @@
 // src/infra/monitoring/WorkerStatsService.js
 //
 // Writes per-worker resource metrics to a dedicated daily log file:
-//   logs/stats/worker-{id}-{YYYY-MM-DD}.log
+//   storage/logs/stats/worker-{id}-{YYYY-MM-DD}.log
 //
 // Each line is a human-readable summary followed by the raw JSON on the same
 // line, separated by "  ||  ", so you can read it with the naked eye and also
@@ -26,7 +26,7 @@ const RETENTION_DAYS = 7;       // keep the last 7 days of stat files
 
 // Resolve log directory relative to the project root (two levels above src/)
 const LOG_DIR = path.resolve(
-    new URL('../../../logs/stats', import.meta.url).pathname
+    new URL('../../../storage/logs/stats', import.meta.url).pathname
         .replace(/^\/([A-Z]:)/, '$1')   // fix Windows paths like /C:/...
 );
 

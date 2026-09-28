@@ -1,7 +1,7 @@
 // scripts/logs.js
 //
 // Merges the per-worker log files written by AppLogService
-// (logs/app/worker-{id}/YYYY-MM-DD.log.log + .error.log) into a single,
+// (storage/logs/app/worker-{id}/YYYY-MM-DD.log.log + .error.log) into a single,
 // timestamp-ordered stream so you don't have to open N files by hand to see
 // what happened across all workers.
 //
@@ -24,7 +24,7 @@
 import fs   from 'fs';
 import path from 'path';
 
-const LOG_BASE = path.resolve(new URL('../logs/app', import.meta.url).pathname
+const LOG_BASE = path.resolve(new URL('../storage/logs/app', import.meta.url).pathname
     .replace(/^\/([A-Z]:)/, '$1'));
 
 const TS_RE = /^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\]/;

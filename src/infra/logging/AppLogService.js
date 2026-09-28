@@ -2,8 +2,8 @@
 //
 // Replaces the two accumulating PM2 log files with per-worker, per-day files:
 //
-//   logs/app/worker-1/2026-05-18.log        ← all levels (info, warn, error)
-//   logs/app/worker-1/2026-05-18.error.log  ← errors only, quick triage
+//   storage/logs/app/worker-1/2026-05-18.log        ← all levels (info, warn, error)
+//   storage/logs/app/worker-1/2026-05-18.error.log  ← errors only, quick triage
 //
 // Call AppLogService.install() FIRST in index.js, before any other import
 // that might log, so every line gets captured.
@@ -19,9 +19,9 @@ import { config } from '../../../config/envConfig.js';
 
 const RETENTION_DAYS = 14;
 
-// Resolve logs/app relative to the project root (three directories above this file).
+// Resolve storage/logs/app relative to the project root (three directories above this file).
 const LOG_BASE = path.resolve(
-    new URL('../../../logs/app', import.meta.url).pathname
+    new URL('../../../storage/logs/app', import.meta.url).pathname
         .replace(/^\/([A-Z]:)/, '$1')   // strip leading slash on Windows paths
 );
 

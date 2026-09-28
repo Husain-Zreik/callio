@@ -13,7 +13,7 @@ function logStartupCrash(err) {
     const ts = now.toISOString().replace('T', ' ').slice(0, 23);
 
     const logFile = path.join(
-        __dirname, 'logs', 'app', `worker-${workerId}`,
+        __dirname, 'storage', 'logs', 'app', `worker-${workerId}`,
         `${date}.error.log`
     );
 
