@@ -165,8 +165,9 @@ as a message catalog in `docs/agent-protocol.md`. Client → server:
 `call:transfer`, `call:reconnect`, `connection:ice-candidate`,
 `call:monitor{,:mode,:stop}`, `call:agent:private`, `call:agent:muted`,
 `agent:availability:set`, `calls:sync`. Server → client: `call:incoming`,
-`call:assigned`, `call:answered`, `call:terminated`, `call:transferred`,
-`queue:snapshot`, `agent:availability`, ICE/SDP replies, supervisor events.
+`call:offer_withdrawn`, `call:started`, `call:handled`, `call:terminated`,
+`call:transferred`, `call:agent_queue`, `call:agent_availability`, ICE/SDP
+replies, supervisor events. The full catalog is in `docs/agent-protocol.md`.
 
 **Rules the gateway enforces** (fixing today's gaps): a socket only joins a
 call's room after the core confirms it is that call's agent or a supervisor
@@ -196,9 +197,10 @@ supported way to use it.
 ### (E) Push — Callio → agent devices
 
 When an agent's app isn't connected, Callio wakes it with FCM (Android),
-APNs VoIP/PushKit (iOS CallKit) or OneSignal (web), using the consumer's own
-`push_credentials` so pushes come from the consumer's app. Tokens are
-registered through (A). The payload is one documented shape
+APNs VoIP/PushKit (iOS CallKit) or OneSignal (web). Tokens are registered
+through (A). Today the push credentials are the platform's (env); per-consumer
+credentials (`consumers.push_credentials`, so pushes come from each
+consumer's own app) are the next step. The payload is one documented shape
 (`{ type: "call.incoming" | "call.cancelled", call_id, tenant_ref,
 customer_name, customer_address, channel }`); anything app-specific (deep-link
 URLs, CallKit field names) is per-consumer configuration, not code.
@@ -364,7 +366,7 @@ src/
     bridge/  dtmf/  recording/  playback/
   push/                         PushNotifier: fcm/, apns/, onesignal/
   outbox/                       webhook dispatcher worker, signing
-  persistence/                  knex repositories (tenant-scoped)
+  persistence/                  mysql2 repositories (tenant-scoped; Knex runs migrations only)
   infra/                        redis/ (client, pubsub, keys.js), db/, storage/,
                                 crypto/ (secret encryption), logging/, monitoring/
   server/                       bootstrap (composition root), shutdown
@@ -409,15 +411,17 @@ Using midlr as the worked example; any product does the same.
 
 Each phase leaves the service working end to end.
 
-| Phase | Delivers |
-|---|---|
-| 0 | Delete dead code; fix multi-worker startup wipes, IVR replay, shutdown bugs (on `main`) |
-| 1 | New schema + seed; `src/` restructured into the layout above; `infra/redis/keys.js`; constants renamed |
-| 2 | Persistence on knex, tenant-scoped; midlr repositories deleted |
-| 3 | `CallTerminator` + `releaseAgentAfterCall`; all end-of-call paths use them |
-| 4 | Routing on queues (`QueueRouter`, `AgentPicker`); `CallWebhookProcessor` split up |
-| 5 | `CustomerChannel` port with `WhatsAppChannel`; Meta webhook ingress with signature verification |
-| 6 | Agent gateway: consumer JWT, room authorization, protocol v1 doc, `call:start` outbound |
-| 7 | Management API v1 + outbox dispatcher + event catalog; push on per-consumer credentials |
-| 8 | `SipChannel` (SIP Milestone B) — plugs into the same port |
-| 9 | Agent SDK; midlr integration against the public contract |
+| Phase | Delivers | Status |
+|---|---|---|
+| 0 | Delete dead code; fix multi-worker startup wipes, IVR replay, shutdown bugs | done |
+| 1 | New schema + seed; `src/` restructured into the layout above; constants renamed | done |
+| 2 | Persistence on the new schema, tenant-scoped; midlr repositories deleted | done |
+| 3 | One end-of-call path (`CallTerminator` + `releaseAgentAfterCall`) | partly — termination reordered so agents are freed before media teardown; paths not yet unified |
+| 4 | Routing on queues (`QueueRouter`) | done; `CallWebhookProcessor` reduced from 1,800 to ~800 lines |
+| 5 | Meta webhook ingress with signature verification, payloads scoped per channel | done; the `CustomerChannel` port lands with SIP |
+| 6 | Agent gateway: consumer JWT, room authorization, protocol v1 doc, `call:start` outbound | done |
+| 7 | Management API v1 + outbox dispatcher + event catalog | done; per-consumer push credentials pending |
+| 8 | `SipChannel` (SIP Milestone B) behind a `CustomerChannel` port shared with WhatsApp | next |
+| 9 | Agent SDK; midlr integration against the public contract | planned |
+
+End-to-end coverage for everything marked done: `test/e2e` (`npm run test:e2e`).

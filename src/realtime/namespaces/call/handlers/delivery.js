@@ -9,6 +9,7 @@ import { callLifecycleLogger } from '../../../../core/calls/CallLifecycleLogger.
 import CallRepository from '../../../../persistence/CallRepository.js';
 import { AssignmentType } from '../../../../core/constants/CallConstants.js';
 import { callPushNotifier } from '../../../../push/CallPushNotifier.js';
+import QueueRepository from '../../../../persistence/QueueRepository.js';
 
 async function logDelivery(callId, tenantId, agentId, extra) {
     try {
@@ -94,6 +95,18 @@ export function registerCallDeliveryListeners() {
     // A RING_ALL offer this agent declined: dismiss it on their other tabs/devices.
     EventBus.on('call:offer_declined', ({ callId, userId }) => {
         roomManager.emitToUser(userId, 'call:offer_withdrawn', { callId, reason: 'declined' });
+    });
+
+    // Another member took a RING_ALL call: withdraw it from everyone else.
+    EventBus.on('call:offer_taken', async ({ callId, takenBy, queueId }) => {
+        try {
+            const others = (await QueueRepository.getMemberIds(queueId)).filter((id) => String(id) !== String(takenBy));
+            if (!others.length) return;
+            roomManager.emitToUsers(others, 'call:offer_withdrawn', { callId, reason: 'taken', takenBy });
+            await Promise.all(others.map((id) => roomManager.removeUserFromCallRoom(id, callId)));
+        } catch (err) {
+            console.error(`[delivery] Failed to withdraw RING_ALL offer for call ${callId}:`, err);
+        }
     });
 
     EventBus.on('call:transferred', (data) => {

@@ -104,6 +104,8 @@ try {
     await waitFor(async () => (await callRow(row3.id)).status === 'IN_PROGRESS', 15000, 'call 3 answered');
     const r3 = await callRow(row3.id);
     check('the first agent to accept claims the call', r3.agent_id === id['agent-1'] && (await availability('agent-1')) === 'ON_CALL');
+    const taken = await waitFor(() => a2.events.find((e) => e.event === 'call:offer_withdrawn' && e.payload.callId === row3.id && e.payload.reason === 'taken'), 5000, 'taken withdrawal').catch(() => null);
+    check('the other members are told the offer was taken', Boolean(taken));
     const cust3 = await c3.customer.received;
     await hear(cust3);
     check('customer is bridged to the accepting agent', cust3.dominant() === 880, `tone=${cust3.dominant()}`);

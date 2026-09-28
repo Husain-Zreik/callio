@@ -1,0 +1,33 @@
+# End-to-end tests
+
+`npm run test:e2e` runs real calls through Callio, with WebRTC media on both
+legs:
+
+- **fake Meta Graph API** (port 3990) — receives Callio's accept / terminate /
+  connect calls and answers like Meta, including follow-up webhooks;
+- **simulated WhatsApp customers** — `wrtc` peers that post Meta-shaped
+  webhooks and send a 440 Hz tone;
+- **simulated agents** — Socket.IO clients with consumer-signed JWTs and `wrtc`
+  peers sending their own tones (880 / 660 Hz), so every audio check proves
+  who is actually bridged to whom;
+- **consumer event receiver** (port 3999) — verifies the signature of every
+  event Callio delivers.
+
+`run.mjs` drops and recreates the test database (`callio_test` by default),
+migrates and seeds it, then for each `*.test.mjs` resets call state, starts a
+fresh Callio process, runs the suite and stops Callio. Callio's logs are kept
+in a temp directory printed at the end.
+
+```bash
+docker compose -f test/e2e/docker-compose.yml up -d
+npm run test:e2e              # all suites
+npm run test:e2e -- routing   # suites whose file name contains "routing"
+```
+
+Connection settings: `TEST_DB_HOST/PORT/USERNAME/PASSWORD/DATABASE`,
+`TEST_REDIS_HOST/PORT/DB`, `TEST_CALLIO_PORT` (defaults match the compose file).
+
+| Suite | Covers |
+|---|---|
+| `calls.test.mjs` | agent auth, inbound routing and bridging, hang-up, outbound intent → `call:start` → dial, API terminate, call detail, consumer events, isolation |
+| `routing.test.mjs` | queue wait and drain, customer hang-up, PRIORITY, RING_ALL with decline and taken offers, supervisor monitoring, transfer, access checks, IVR with in-band DTMF |

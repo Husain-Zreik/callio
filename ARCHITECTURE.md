@@ -1,3 +1,5 @@
+> **Historical internals guide.** Written before Callio became a standalone service. The media pipeline, IVR and recording internals below are still accurate; anything about businesses, client numbers, midlr tables, Laravel, chat or the old `src/services/...` paths is historical. Current layout and rules: `CLAUDE.md` and `PLATFORM_ARCHITECTURE.md`.
+
 # Node (WebRTC) Server — Architecture & Developer Guide
 
 ## Overview

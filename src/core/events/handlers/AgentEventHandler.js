@@ -209,6 +209,11 @@ export class AgentEventHandler {
             // devices, and — for a RING_ALL call — every other member's device.
             // excludeDeviceId: the device that just answered must never receive its
             // own "dismiss stale ring" push (it tears the live call down natively).
+            // The other members a RING_ALL call was offered to stop ringing.
+            if (queueRouter.isRingAll(callQueue) && callQueue) {
+                EventBus.emit('call:offer_taken', { callId, tenantId, takenBy: userId, queueId: callQueue.id });
+            }
+
             callPushNotifier.notifyCallResolved(callId, {
                 resolvedAgentId: userId,
                 ringAllQueue: queueRouter.isRingAll(callQueue) ? callQueue : null,
