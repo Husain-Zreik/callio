@@ -15,10 +15,18 @@ function parseJson(value) {
     try { return JSON.parse(value); } catch { return null; }
 }
 
+// A UUID-shaped id for the call, for native call UIs that require one
+// (CallKit, Android Telecom). Deterministic, and sent with every call payload
+// and push, so clients never derive it themselves.
+export function callUuid(callId) {
+    return `00000000-0000-0000-0000-${String(callId).padStart(12, '0')}`;
+}
+
 export function toCallView(call, { agentName = null, deviceId = undefined } = {}) {
     if (!call) return null;
     const view = {
         callId: call.id,
+        callUuid: callUuid(call.id),
         tenantId: call.tenant_id,
         channel: call.channel,
         channelId: call.channel_id ?? null,

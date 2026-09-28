@@ -127,10 +127,15 @@ export const config = {
         },
     },
     webrtc: {
+        stunUrls: (process.env.STUN_SERVER_URLS || "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302")
+            .split(",").map((s) => s.trim()).filter(Boolean),
         turn: {
             serverUrl: process.env.TURN_SERVER_URL || null,
             username: process.env.TURN_USERNAME || null,
             credential: process.env.TURN_CREDENTIAL || null,
+            // Set to issue short-lived credentials per agent (coturn use-auth-secret).
+            secret: process.env.TURN_SECRET || null,
+            ttlSeconds: parseInt(process.env.TURN_CREDENTIAL_TTL_SECONDS || "86400", 10) || 86400,
         },
     },
     call: {

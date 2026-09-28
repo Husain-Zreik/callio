@@ -44,6 +44,33 @@ update the name, and the role when present. Queue membership is managed only
 through the Management API. A rejected connection fails with
 `connect_error: Authentication failed: <reason>`.
 
+The token is only checked when the socket connects. Give the client a way to
+fetch a fresh one for every reconnect (e.g. `auth: (cb) => getToken().then((token) => cb({ token, ... }))`
+with socket.io-client) — a token captured once expires under a long session.
+
+### session:ready
+
+The first event on every connection, before anything that can deliver a call:
+
+```json
+{
+  "protocol": 1,
+  "agent": { "id": 7, "ref": "user-7", "name": "Agent One", "role": "AGENT" },
+  "tenant": { "id": 1, "ref": "biz-123" },
+  "deviceId": "phone-5c1e…",
+  "purpose": "session",
+  "iceServers": [{ "urls": "stun:…" }, { "urls": ["turn:…", "turns:…"], "username": "…", "credential": "…" }],
+  "iceServersExpireAt": "2026-09-29T09:52:36.000Z",
+  "serverTime": "2026-09-28T09:52:36.000Z"
+}
+```
+
+Use `iceServers` for every peer connection to Callio — clients don't ship
+STUN/TURN settings or credentials. TURN credentials may be short-lived and
+per agent (`iceServersExpireAt`); send `session:refresh` to get a new
+`session:ready` before they expire. A peer connection already set up keeps
+working.
+
 ## Identity and rooms
 
 Identity always comes from the token. Payload fields never identify who is
@@ -58,6 +85,7 @@ acting. A socket receives:
 
 | Event | Payload | Notes |
 |---|---|---|
+| `session:refresh` | — | Replies with a fresh `session:ready` (new TURN credentials). |
 | `calls:sync` | — | Resync: replies `calls:list` (agents: their own calls; supervisors: the tenant's) and one `call:agent_queue` per queue. Send on every (re)connect. `call:ongoing` is an alias. |
 | `agent:availability:set` | `{ availability: 'AVAILABLE'\|'OFFLINE', agentId? }` | Go available/offline. `agentId` only for a supervisor setting someone else. `ON_CALL` is set by Callio, never by hand. |
 | `call:agent-availability:sync` | `{ userId? }` | Re-broadcast an agent's current availability (self by default). |
@@ -70,7 +98,7 @@ acting. A socket receives:
 | `call:reconnect` | `{ callId, sdpOffer, reconnectTrigger? }` | Re-establish the media leg (network change, page reload, moving to another device). Another still-live socket holding the call gets `call:connection_superseded`. |
 | `call:transfer` | `{ callId, agentId }` or `{ callId, queueId }` | Transfer to an agent, or into a queue (picked by the queue's strategy). Allowed for the agent on the call and for supervisors. |
 | `connection:ice-candidate` | `{ callId, candidate, connectionType: 'AGENT'\|'MONITOR' }` | Trickle ICE for this socket's leg. Ignored unless the socket is bound to the call. |
-| `call:monitor` | `{ callId, sdpOffer }` | Supervisors only. Offer **two** audio transceivers: the agent and the customer arrive as separate tracks. Replies `call:monitor:started { callId, sdpAnswer }`. |
+| `call:monitor` | `{ callId, sdpOffer }` | Supervisors only. Offer **two** audio transceivers — see *Monitoring*. Replies `call:monitor:started { callId, sdpAnswer }`. |
 | `call:monitor:mode` | `{ callId, mode: 'listen'\|'whisper'\|'barge' }` | While monitoring. |
 | `call:monitor:stop` | `{ callId }` | |
 | `call:agent:private` | `{ callId, active }` | The agent talks privately to the monitoring supervisor (muted to the customer). |
@@ -87,7 +115,7 @@ acting. A socket receives:
 | `call:started` | Reply to `call:start`: the call plus `sdpAnswer`. |
 | `call:handled` | `{ callId, userId, agentName, deviceId, action: 'accepted'\|'rejected' }` — someone answered/declined; other agents should stop ringing. |
 | `call:status` | `{ callId, status, userId, ringingAt?, answeredAt? }` — provider status changes (`RINGING`, `ACCEPTED`, ...). |
-| `call:reconnected` | `{ callId, userId, sdpAnswer }` — reply to `call:reconnect`. |
+| `call:reconnected` | `{ callId, userId, deviceId, sdpAnswer }` — reply to `call:reconnect`, sent only to the socket that sent it. |
 | `call:connection_superseded` | `{ callId, reason }` — this socket no longer holds the call's media (taken over by another device). |
 | `call:transferred` | Transfer notice for the previous agent and supervisors. |
 | `call:terminated` | `{ callId, reason, terminationReason?, terminatedBy? }` |
@@ -132,6 +160,7 @@ acting. A socket receives:
 ```json
 {
   "callId": 42,
+  "callUuid": "00000000-0000-0000-0000-000000000042",
   "tenantId": 1,
   "channel": "WHATSAPP",
   "channelId": 1,
@@ -155,6 +184,9 @@ acting. A socket receives:
 }
 ```
 
+`callUuid` is a stable UUID-shaped id for the call, for native call UIs that
+require one (CallKit, Android Telecom). The same value is in the call's pushes.
+
 ## Media
 
 - **Inbound:** `call:incoming.sdpOffer` is Callio's offer for your leg. Answer it,
@@ -167,6 +199,46 @@ acting. A socket receives:
   call fails with `AGENT_MEDIA_NOT_READY`.
 - While a call is being set up or re-established you may hear a short
   placeholder tone from Callio.
+- **Reconnecting** (network change, ICE failure, page reload, another device):
+  build a new peer connection, send its offer in `call:reconnect`, apply the
+  answer from `call:reconnected`. There is no ICE restart — Callio rebuilds its
+  side of the leg. If reconnecting doesn't bring media back, send
+  `call:terminate { reason: 'system_failed' }`.
+
+### Monitoring
+
+A supervisor's offer has two audio transceivers, in this order:
+
+| # | Direction | Carries |
+|---|---|---|
+| 1 | `sendrecv` | sends the supervisor's microphone; receives the **agent** |
+| 2 | `recvonly` | receives the **customer** |
+
+Identify the tracks by transceiver (`mid`), not by arrival order. The
+microphone is only heard in `whisper` (by the agent) and `barge` (by the
+agent and the customer) — Callio does the mixing, so there is no
+renegotiation when the mode changes. Older clients that send the microphone
+on a third, `sendonly` transceiver are also accepted.
+
+## Push
+
+Callio sends pushes to the tokens the consumer registered for the agent's
+devices (`PUT …/agents/{agentRef}/push-tokens/{deviceId}`), whether or not the
+agent also has a live socket. A push never carries SDP: the app connects,
+sends `calls:sync`, and answers from `calls:list`.
+
+| Provider | Delivery | `type` |
+|---|---|---|
+| FCM (Android) | data-only, high priority, 30 s TTL | `call.incoming`, `call.cancelled` |
+| APNs VoIP (iOS, PushKit) | report to CallKit immediately | `call.incoming`, `call.cancelled` |
+| FCM (iOS) | visible banner next to the VoIP push | `call.incoming.alert` |
+| OneSignal (web) | notification with Answer / Decline | `call.incoming` |
+
+Data fields (FCM and APNs VoIP; FCM values are strings): `call_id`,
+`call_uuid`, `tenant_id`, `channel`, `customer_name`, `customer_address`. The
+APNs VoIP payload also has `id` (= `call_uuid`), `nameCaller`, `handle` and
+`isVideo`, the fields CallKit integrations read. `call.cancelled` means stop
+ringing: someone answered, the offer was withdrawn, or the call ended.
 
 ## Errors
 

@@ -6,6 +6,31 @@ import { callLifecycleLogger } from "../../core/calls/CallLifecycleLogger.js";
 import { EventTypes } from "../../core/events/EventTypes.js";
 import { registerAllSocketListeners } from "../namespaces/index.js";
 import { agentAssignmentCoordinator } from "../../core/routing/AgentAssignmentCoordinator.js";
+import { iceServersFor } from "../../media/webrtc/IceServers.js";
+import { AGENT_PROTOCOL_VERSION } from "../middleware/authMiddleware.js";
+
+// What a client needs before it can take calls: who it is, and the ICE
+// servers (with TURN credentials minted for this agent) for its peer
+// connections. Sent on every connect; session:refresh asks again, e.g. when
+// the TURN credentials are about to expire.
+function sessionReady(socket) {
+    const { iceServers, expiresAt } = iceServersFor(String(socket.user?.id ?? 'agent'));
+    return {
+        protocol: AGENT_PROTOCOL_VERSION,
+        agent: {
+            id: socket.user?.id ?? null,
+            ref: socket.user?.externalRef ?? null,
+            name: socket.user?.name ?? null,
+            role: socket.user?.role ?? null,
+        },
+        tenant: { id: socket.tenant?.id ?? null, ref: socket.tenant?.externalRef ?? null },
+        deviceId: socket.user?.deviceId ?? null,
+        purpose: socket.connectionPurpose || 'session',
+        iceServers,
+        iceServersExpireAt: expiresAt,
+        serverTime: new Date().toISOString(),
+    };
+}
 
 export async function handleConnection(socket) {
     const userName = socket.user?.name || "Unknown";
@@ -21,6 +46,10 @@ export async function handleConnection(socket) {
     );
 
     const tracksPresence = userId !== "Unknown" && tenantId !== "Unknown" && isSessionConnection;
+
+    // First, before anything that can deliver a call to this socket.
+    socket.emit("session:ready", sessionReady(socket));
+    socket.on("session:refresh", () => socket.emit("session:ready", sessionReady(socket)));
 
     if (tracksPresence) {
         let isFirstSocket = false;
@@ -47,6 +76,7 @@ export async function handleConnection(socket) {
     }
 
     registerAllSocketListeners(socket);
+
 
     socket.on("disconnect", async (reason) => {
         console.log(

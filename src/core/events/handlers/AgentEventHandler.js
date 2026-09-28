@@ -441,7 +441,8 @@ export class AgentEventHandler {
                 source: isIceTrigger ? 'ice_failure_recovery' : 'network_reconnect',
             });
 
-            EventBus.emit('call:reconnected', { callId, userId, tenantId, sdpAnswer });
+            // The answer is for the one socket that sent call:reconnect.
+            EventBus.emit('call:reconnected', { callId, userId, tenantId, sdpAnswer, socketId, deviceId: deviceId ?? null });
 
             console.log(`[AgentEventHandler] ✅ Agent ${userId} reconnected to call ${callId}${isIceTrigger ? ' (ICE failure recovered)' : ''}`);
 

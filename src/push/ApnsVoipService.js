@@ -1,16 +1,7 @@
 import apn from "@parse/node-apn";
 import { config } from "../../config/envConfig.js";
 import pushTokenRepository from "../persistence/PushTokenRepository.js";
-
-// CallKit needs the call `id` as a UUID-shaped string; Callio's callId is an
-// integer. Deterministic, so the agent app can derive the same UUID from the
-// callId on its own side without it being passed back and forth. Documented
-// in the push payload contract (PLATFORM_ARCHITECTURE.md §3E) — client SDKs
-// must use the same mapping.
-function callKitUuidFor(callId) {
-    const digits = String(callId).padStart(12, "0");
-    return `00000000-0000-0000-0000-${digits}`;
-}
+import { callUuid } from "../core/calls/CallView.js";
 
 // Sends VoIP push notifications (Apple PushKit) directly to APNs — a
 // separate channel from FcmService's regular FCM/APNs delivery. Firebase's
@@ -84,12 +75,13 @@ class ApnsVoipService {
         // phone-number-shaped value (or empty) — CallKit treats it as one.
         const isPhone = /^\+?\d+$/.test(String(callData.customerAddress ?? ""));
         note.payload = {
-            id: callKitUuidFor(callData.callId),
+            id: callUuid(callData.callId),
             type: callData.type || "call.incoming",
             nameCaller: callData.customerName || callData.customerAddress || "Incoming call",
             handle: isPhone ? callData.customerAddress : "",
             isVideo: false,
             call_id: callData.callId,
+            call_uuid: callUuid(callData.callId),
             tenant_id: callData.tenantId ?? null,
             channel: callData.channel ?? null,
             customer_name: callData.customerName ?? null,

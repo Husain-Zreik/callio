@@ -24,10 +24,11 @@ export function registerCallStateListeners(networkLossTimers) {
         roomManager.broadcastToTenant(tenantId, 'call:handled', { callId, tenantId, userId, agentName, deviceId: deviceId ?? null, action });
     });
 
-    EventBus.on('call:reconnected', (data) => {
-        const { callId, userId } = data;
+    // Only the socket that asked gets the answer: other devices in the call
+    // room must not apply an SDP answer meant for another peer connection.
+    EventBus.on('call:reconnected', ({ callId, userId, sdpAnswer, socketId, deviceId }) => {
         console.log(`[EventBus] Call ${callId} reconnected by user ${userId}`);
-        roomManager.broadcastToCall(callId, 'call:reconnected', data);
+        if (socketId) roomManager.emitToSocket(socketId, 'call:reconnected', { callId, userId, deviceId: deviceId ?? null, sdpAnswer });
     });
 
     EventBus.on('call:terminated', (data) => {

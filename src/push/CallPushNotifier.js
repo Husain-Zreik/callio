@@ -15,6 +15,7 @@ import { fcmService } from './FcmService.js';
 import { apnsVoipService } from './ApnsVoipService.js';
 import OneSignalService from './OneSignalService.js';
 import { NotificationPresets, NotificationIcons } from './notificationPresets.js';
+import { callUuid } from '../core/calls/CallView.js';
 
 const RING_TTL_SECONDS = 30;
 
@@ -22,6 +23,7 @@ function pushData(call, type) {
     return {
         type,
         callId: call.callId ?? call.id,
+        callUuid: callUuid(call.callId ?? call.id),
         tenantId: call.tenantId ?? call.tenant_id ?? null,
         channel: call.channel ?? null,
         customerName: call.customer?.name ?? call.customer_name ?? null,
@@ -33,6 +35,7 @@ function fcmData(data) {
     return {
         type: data.type,
         call_id: data.callId,
+        call_uuid: data.callUuid,
         tenant_id: data.tenantId ?? '',
         channel: data.channel ?? '',
         customer_name: data.customerName ?? '',
@@ -98,7 +101,7 @@ class CallPushNotifier {
         const ids = [...new Set((agentIds || []).filter((id) => id != null))];
         if (!ids.length) return;
 
-        const data = { type: 'call.cancelled', callId };
+        const data = { type: 'call.cancelled', callId, callUuid: callUuid(callId) };
         const [androidFcm, iosVoip] = await Promise.all([
             pushTokenRepository.getTokens(ids, 'FCM', { platform: 'ANDROID', excludeDeviceId }),
             pushTokenRepository.getTokens(ids, 'APNS_VOIP', { excludeDeviceId }),

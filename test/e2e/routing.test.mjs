@@ -111,7 +111,9 @@ try {
     check('customer is bridged to the accepting agent', cust3.dominant() === 880, `tone=${cust3.dominant()}`);
 
     // ── 4. Supervisor monitoring ──
-    sup.peer = newPeer([], { audioLines: 2 });
+    // Two audio lines: the first sends the supervisor's microphone (a 660 Hz
+    // tone) and receives the agent, the second receives the customer.
+    sup.peer = newPeer([660], { audioLines: 2 });
     await sup.peer.pc.setLocalDescription(await sup.peer.pc.createOffer());
     await gathered(sup.peer.pc);
     const monitorStarted = new Promise((resolve) => sup.socket.once('call:monitor:started', resolve));
@@ -126,6 +128,26 @@ try {
     await sleep(3000);
     const tones = sup.peer.tracks.map((t) => t.dominant());
     check('supervisor hears the customer and the agent on separate tracks', tones.includes(440) && tones.includes(880), `tracks=${tones.join(",")}`);
+
+    // What the agent and the customer hear of the supervisor in each mode.
+    const agentEar = await a1.peer.received;
+    const customerEar = await c3.customer.received;
+    const hearsSupervisor = async () => {
+        await sleep(1500);
+        agentEar.reset(); customerEar.reset();
+        await sleep(2500);
+        return { agent: agentEar.has(660), customer: customerEar.has(660) };
+    };
+    const inListen = await hearsSupervisor();
+    check('listen: neither the agent nor the customer hears the supervisor', !inListen.agent && !inListen.customer, JSON.stringify(inListen));
+    sup.socket.emit('call:monitor:mode', { callId: row3.id, mode: 'whisper' });
+    const inWhisper = await hearsSupervisor();
+    check('whisper: the agent hears the supervisor, the customer does not', inWhisper.agent && !inWhisper.customer, JSON.stringify(inWhisper));
+    sup.socket.emit('call:monitor:mode', { callId: row3.id, mode: 'barge' });
+    const inBarge = await hearsSupervisor();
+    check('barge: both the agent and the customer hear the supervisor', inBarge.agent && inBarge.customer, JSON.stringify(inBarge));
+    sup.socket.emit('call:monitor:mode', { callId: row3.id, mode: 'listen' });
+    await sleep(1000);
 
     const agentMonitor = await new Promise((resolve) => {
         a2.socket.emit('call:monitor', { callId: row3.id, sdpOffer: sup.peer.pc.localDescription.sdp });

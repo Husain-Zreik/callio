@@ -198,7 +198,7 @@ supported way to use it.
 
 When an agent's app isn't connected, Callio wakes it with FCM (Android),
 APNs VoIP/PushKit (iOS CallKit) or OneSignal (web). Tokens are registered
-through (A). Today the push credentials are the platform's (env); per-consumer
+through (A); the payload contract is in `docs/agent-protocol.md` (*Push*). Today the push credentials are the platform's (env); per-consumer
 credentials (`consumers.push_credentials`, so pushes come from each
 consumer's own app) are the next step. The payload is one documented shape
 (`{ type: "call.incoming" | "call.cancelled", call_id, tenant_ref,

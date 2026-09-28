@@ -37,6 +37,12 @@ try {
     const a2 = await connectAgent(CALLIO, seed, 'agent-2');
     const id = Object.fromEntries((await q('SELECT id, external_ref FROM agents')).map((r) => [r.external_ref, r.id]));
     check('agents connect with consumer-signed JWTs', true);
+    const ready = a1.events.find((e) => e.event === 'session:ready')?.payload
+        ?? await waitFor(() => a1.events.find((e) => e.event === 'session:ready')?.payload, 5000, 'session:ready');
+    check('session:ready gives the agent its identity and ICE servers',
+        ready.protocol === 1 && ready.agent.ref === 'agent-1' && ready.agent.id === id['agent-1']
+        && ready.deviceId === 'agent-1-device' && Array.isArray(ready.iceServers) && ready.iceServers.length > 0,
+        `iceServers=${ready.iceServers?.length}`);
 
     await api('PUT', '/v1/tenants/demo/queues/main', { name: 'Main queue', strategy: 'ROUND_ROBIN' });
     await api('PUT', '/v1/tenants/demo/queues/main/members', { members: [{ agent_ref: 'agent-1' }, { agent_ref: 'agent-2' }] });
@@ -67,7 +73,23 @@ try {
     check('the answering agent is ON_CALL, the other still AVAILABLE',
         (await availability('agent-1')) === 'ON_CALL' && (await availability('agent-2')) === 'AVAILABLE');
 
-    a1.socket.emit('call:terminate', { callId: inCall.id });
+    // ── The agent moves the call to their other device ──
+    const a1b = await connectAgent(CALLIO, seed, 'agent-1', 'AGENT', 'agent-1-phone');
+    a1b.peer = newPeer(660);
+    await a1b.peer.pc.setLocalDescription(await a1b.peer.pc.createOffer());
+    await gathered(a1b.peer.pc);
+    a1b.socket.emit('call:reconnect', { callId: inCall.id, sdpOffer: a1b.peer.pc.localDescription.sdp });
+    const reconnected = await waitFor(() => a1b.events.find((e) => e.event === 'call:reconnected')?.payload, 10000, 'call:reconnected');
+    await a1b.peer.pc.setRemoteDescription({ type: 'answer', sdp: reconnected.sdpAnswer });
+    for (const c of a1b.pendingCandidates.splice(0)) await a1b.peer.pc.addIceCandidate(c).catch(() => { });
+    const superseded = await waitFor(() => a1.events.find((e) => e.event === 'call:connection_superseded'), 5000, 'superseded').catch(() => null);
+    check('the answer goes only to the device that reconnected; the other is told it lost the call',
+        reconnected.deviceId === 'agent-1-phone' && Boolean(superseded) && !a1.events.some((e) => e.event === 'call:reconnected'));
+    const custHearsPhone = await hear(await c1.customer.received);
+    check('after the switch the customer hears the new device', custHearsPhone.dominant() === 660, `tone=${custHearsPhone.dominant()}`);
+    a1.peer.close(); a1.peer = a1b.peer;
+
+    a1b.socket.emit('call:terminate', { callId: inCall.id });
     await waitFor(async () => (await callRow(inCall.id)).status === 'TERMINATED', 10000, 'inbound ended');
     await sleep(1500);
     const ended = await callRow(inCall.id);
@@ -133,7 +155,7 @@ try {
     const wrongKey = await fetch(`${CALLIO}/v1/calls/${inCall.id}`, { headers: { Authorization: 'Bearer ck_wrong' } });
     check('Management API rejects a wrong key', wrongKey.status === 401);
 
-    a1.socket.close(); a2.socket.close();
+    a1.socket.close(); a2.socket.close(); a1b.socket.close();
 } catch (err) {
     console.error('HARNESS ERROR:', err);
     exitCode = 1;

@@ -252,9 +252,9 @@ export function agentToken(seed, ref, role = 'AGENT') {
         { algorithm: 'HS256', keyid: seed.signing_key.kid, expiresIn: '10m' });
 }
 
-export function connectAgent(callioUrl, seed, ref, role = 'AGENT') {
+export function connectAgent(callioUrl, seed, ref, role = 'AGENT', deviceId = `${ref}-device`) {
     return new Promise((resolve, reject) => {
-        const socket = io(callioUrl, { transports: ['websocket'], auth: { token: agentToken(seed, ref, role), device_id: `${ref}-device`, protocol: 1 }, reconnection: false });
+        const socket = io(callioUrl, { transports: ['websocket'], auth: { token: agentToken(seed, ref, role), device_id: deviceId, protocol: 1 }, reconnection: false });
         const agent = { ref, socket, incoming: [], events: [], errors: [], pendingCandidates: [], peer: null };
         socket.on('connect', () => resolve(agent));
         socket.on('connect_error', reject);
