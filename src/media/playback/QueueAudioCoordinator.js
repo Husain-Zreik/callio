@@ -36,11 +36,11 @@ class QueueAudioCoordinator {
      *
      * @param {string}               callId
      * @param {number}               tenantId
-     * @param {RTCRtpSender}         sender              the placeholder sender on whatsappPc
-     * @param {RTCPeerConnection}    whatsappPc
+     * @param {RTCRtpSender}         sender              the placeholder sender on customerPc
+     * @param {RTCPeerConnection}    customerPc
      * @param {string|null}          [audioOverridePath]  resolved path/URL to use instead of business/platform audio
      */
-    async startQueueAudio(callId, tenantId, sender, whatsappPc, audioOverridePath = null, queueId = null) {
+    async startQueueAudio(callId, tenantId, sender, customerPc, audioOverridePath = null, queueId = null) {
         if (this._active.has(callId)) return; // already running
 
         console.log(`[QueueAudioCoordinator] Starting queue audio for call ${callId}`);
@@ -177,7 +177,7 @@ class QueueAudioCoordinator {
                 audioSource: activeAudioSource,
                 track: activeTrack,
                 sender,
-                whatsappPc,
+                customerPc,
                 stopRequested: false,
                 player: null,
                 terminationHandler: null,

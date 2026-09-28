@@ -20,7 +20,7 @@ import { placeholderTrackFactory } from '../../media/bridge/PlaceholderTrackFact
 
 class IvrCoordinator {
     constructor() {
-        // callId → { engine, audioSource, sender, senderTrack, whatsappPeer, whatsappPc,
+        // callId → { engine, audioSource, sender, senderTrack, customerPeer, customerPc,
         //             sessionId, ivrFlowId, tenantId, startedAtMs, completeHandler, terminationHandler }
         this._sessions = new Map();
 
@@ -62,12 +62,12 @@ class IvrCoordinator {
      *
      * @param {string}            callId
      * @param {number}            ivrFlowId
-     * @param {RTCPeerConnection} whatsappPc     the WhatsApp peer connection
+     * @param {RTCPeerConnection} customerPc     the WhatsApp peer connection
      * @param {MediaStreamTrack}  customerTrack  the caller's audio track (for DTMF)
      * @param {object}            callMeta       { tenantId, channelId, queueId }
-     * @param {Peer|null}         whatsappPeer
+     * @param {Peer|null}         customerPeer
      */
-    async startSession(callId, ivrFlowId, whatsappPc, customerTrack, callMeta = {}, whatsappPeer = null) {
+    async startSession(callId, ivrFlowId, customerPc, customerTrack, callMeta = {}, customerPeer = null) {
         if (this._sessions.has(callId)) {
             console.warn(`[IvrCoordinator] Session already active for call ${callId}`);
             return;
@@ -79,7 +79,7 @@ class IvrCoordinator {
 
         // Reserve the slot synchronously, before any await. checkAndStartBridging can
         // invoke startSession twice in quick succession for the same call (e.g. a
-        // WHATSAPP connectionReady event and a trackReceived event landing close
+        // CUSTOMER connectionReady event and a trackReceived event landing close
         // together) — the has()-check above and the real _sessions.set() further down
         // used to be separated by a long async gap (menu fetch, audio decode, DB
         // insert), during which a second call would ALSO pass the check and both would
@@ -140,8 +140,8 @@ class IvrCoordinator {
             // Replace the placeholder track on the WhatsApp PC so the caller only
             // hears the IVR audio (not the placeholder tone).
             let sender;
-            if (whatsappPeer) {
-                const placeholderSender = whatsappPeer.shiftPlaceholderSender();
+            if (customerPeer) {
+                const placeholderSender = customerPeer.shiftPlaceholderSender();
                 if (placeholderSender) {
                     await placeholderSender.replaceTrack(ivrTrack);
                     sender = placeholderSender;
@@ -149,7 +149,7 @@ class IvrCoordinator {
                 }
             }
             if (!sender) {
-                sender = whatsappPc.addTrack(ivrTrack, ivrStream);
+                sender = customerPc.addTrack(ivrTrack, ivrStream);
             }
 
             // 4. Create the DTMF sink now (paused) so it's ready when the first
@@ -269,7 +269,7 @@ class IvrCoordinator {
                 // serverListeners calls peerRegistry.closePeerConnection(callId), which
                 // removes the call from activeCalls and logs "Peer cleanup done".
                 // Without this, IVR calls that end via caller hang-up never get cleaned up
-                // because there is no Redis subscription and no FRONTEND peer connection
+                // because there is no Redis subscription and no AGENT peer connection
                 // to route the webhook call_terminated event to the cleanup path.
                 EventBus.emit('call:ivr_terminated', { callId, action: 'hung_up', tenantId });
             };
@@ -290,8 +290,8 @@ class IvrCoordinator {
                 audioSource,
                 senderTrack: ivrTrack,
                 sender,
-                whatsappPeer,
-                whatsappPc,
+                customerPeer,
+                customerPc,
                 sessionId,
                 ivrFlowId,
                 tenantId: callMeta.tenantId ?? null,
@@ -348,15 +348,15 @@ class IvrCoordinator {
         // Latch BEFORE any of the awaits below (DB writes, track cleanup, etc.).
         // This — not the calls.state flip further down, which can fail silently
         // or lag — is what actually prevents PeerRegistry.checkAndStartBridging
-        // from re-launching IVR on this call if a WHATSAPP ICE/track event fires
+        // from re-launching IVR on this call if a CUSTOMER ICE/track event fires
         // while the rest of this function is still unwinding.
         this._completedCallIds.add(callId);
 
         const {
             engine,
             sender,
-            whatsappPeer,
-            whatsappPc,
+            customerPeer,
+            customerPc,
             sessionId,
             ivrFlowId,
             tenantId,
@@ -372,9 +372,9 @@ class IvrCoordinator {
 
         // For transfers: return the sender to the placeholder pool so the agent bridge
         // can re-use it via replaceTrack (avoids removeTrack → WebRTC teardown).
-        if (outcome === 'transferred' && whatsappPeer && sender) {
+        if (outcome === 'transferred' && customerPeer && sender) {
             try {
-                whatsappPeer.addPlaceholderSender(sender);
+                customerPeer.addPlaceholderSender(sender);
                 // The IVR track stays on the sender until the agent bridge replaces it.
                 // Stash a stable reference so that replaceTrack (Peer.deliverTrack) or
                 // final teardown (clearPlaceholderSenders) releases its RTCAudioSource.
@@ -385,8 +385,8 @@ class IvrCoordinator {
             }
         } else {
             try {
-                if (whatsappPc && sender && whatsappPc.signalingState !== 'closed') {
-                    whatsappPc.removeTrack(sender);
+                if (customerPc && sender && customerPc.signalingState !== 'closed') {
+                    customerPc.removeTrack(sender);
                 }
             } catch (err) {
                 console.warn(`[IvrCoordinator] removeTrack failed for call ${callId}:`, err.message);
@@ -421,7 +421,7 @@ class IvrCoordinator {
             // happen later, in IvrTransferHandler, after a couple of its own awaits
             // (logIvrTransferred, audio file resolution). That left a window where
             // the DB still showed state='IVR' while isActive(callId) was already
-            // false; if checkAndStartBridging fired in that window (a WHATSAPP
+            // false; if checkAndStartBridging fired in that window (a CUSTOMER
             // track/ICE event landing at just the wrong moment) it matched the
             // IVR-start condition again and re-launched IVR on a call that had
             // already been handed off to the queue.
@@ -517,7 +517,7 @@ class IvrCoordinator {
             const session = this._sessions.get(callId);
             const sessionSnap = {
                 sender: session?.sender ?? null,
-                whatsappPc: session?.whatsappPc ?? null,
+                customerPc: session?.customerPc ?? null,
                 audioSource: session?.audioSource ?? null,
             };
 
@@ -532,7 +532,7 @@ class IvrCoordinator {
             const outcomeMap = { hung_up: 'hung_up', timeout: 'timeout', error: 'error' };
             await this.stopSession(callId, outcomeMap[action] ?? 'hung_up', timing);
             // serverListeners' 'call:ivr_terminated' handler runs the full teardown
-            // (terminateWhatsAppCall + terminateCallIfNotTerminated + closePeerConnection).
+            // (customerChannels.terminate + terminateCallIfNotTerminated + closePeerConnection).
             EventBus.emit('call:ivr_terminated', { callId, action });
         }
     }

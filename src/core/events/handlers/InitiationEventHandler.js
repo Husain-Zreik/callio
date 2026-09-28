@@ -7,7 +7,7 @@
 import CallRepository from '../../../persistence/CallRepository.js';
 import CallConnectionRepository from '../../../persistence/CallConnectionRepository.js';
 import AgentRepository from '../../../persistence/AgentRepository.js';
-import { initiateWhatsAppCall } from '../../../channels/whatsapp/WhatsAppCallApi.js';
+import { customerChannels } from '../../channels/CustomerChannels.js';
 import { redisPubSubService } from '../../../infra/redis/RedisPubSubService.js';
 import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
 import { sdpCoordinator } from '../../../media/webrtc/SDPCoordinator.js';
@@ -20,7 +20,7 @@ import { iceCoordinator } from '../../../media/webrtc/ice/ICECandidateCoordinato
 import { agentAssignmentCoordinator } from '../../routing/AgentAssignmentCoordinator.js';
 import { toCallView } from '../../calls/CallView.js';
 import {
-    ConnectionType, CallDirection, CallStatus, AgentAvailability, Channel, CustomerAddressType,
+    ConnectionType, CallDirection, CallStatus, AgentAvailability,
 } from '../../constants/CallConstants.js';
 
 export class OutboundCallError extends Error {
@@ -37,7 +37,8 @@ export class InitiationEventHandler {
         externalRef = null, consumerMetadata = null }) {
         if (String(channel.tenant_id) !== String(tenantId)) throw new OutboundCallError('invalid_channel', 'Channel does not belong to this tenant');
         if (channel.status !== 'ACTIVE') throw new OutboundCallError('channel_disabled', 'Channel is not active');
-        if (channel.type !== Channel.WHATSAPP) {
+        const adapter = customerChannels.has(channel.type) ? customerChannels.get(channel.type) : null;
+        if (!adapter?.supportsOutbound) {
             throw new OutboundCallError('unsupported_channel', `Outbound calls are not supported on ${channel.type} channels yet`);
         }
         if (String(agent.tenant_id) !== String(tenantId)) throw new OutboundCallError('invalid_agent', 'Agent does not belong to this tenant');
@@ -45,11 +46,14 @@ export class InitiationEventHandler {
             throw new OutboundCallError('agent_busy', 'Agent already has an active call');
         }
 
-        const addressType = customerAddressType
-            ?? (/^\+?\d{6,15}$/.test(String(customerAddress)) ? CustomerAddressType.E164 : CustomerAddressType.WHATSAPP_USER);
-        const address = addressType === CustomerAddressType.E164
-            ? `+${String(customerAddress).replace(/[^\d]/g, '')}`
-            : String(customerAddress);
+        let address, addressType;
+        try {
+            ({ address, addressType } = adapter.normalizeCustomerAddress({
+                address: customerAddress, addressType: customerAddressType ?? null,
+            }));
+        } catch (err) {
+            throw new OutboundCallError('invalid_customer', err.message);
+        }
 
         const callId = await CallRepository.create({
             tenant_id: tenantId,
@@ -146,13 +150,14 @@ export class InitiationEventHandler {
             return;
         }
         const agentConn = agentResult.data;
-        agentConn.setWhatsappTriggering(true);
-        agentConn.setWhatsappTriggered(true);
         const agentId = agentConn.context?.userId ?? null;
 
         try {
-            const customerSdpOffer = await sdpCoordinator.createSDPOffer(callId, ConnectionType.CUSTOMER);
-            const providerCallId = await initiateWhatsAppCall(agentConn.context, customerSdpOffer);
+            const { call, channel } = await customerChannels.forCall(callId);
+            const customerSdpOffer = await sdpCoordinator.createSDPOffer(
+                callId, ConnectionType.CUSTOMER, null, { sdpProfile: channel.sdp }
+            );
+            const providerCallId = await channel.initiate(call, customerSdpOffer);
 
             agentConn.context.setProviderCallId(providerCallId);
             await CallRepository.updateProviderCallId(callId, providerCallId);
@@ -190,9 +195,6 @@ export class InitiationEventHandler {
                     );
                 }
             }
-        } finally {
-            agentConn.setWhatsappTriggering(false);
-            agentConn.setWhatsappConnected(true);
         }
     }
 }

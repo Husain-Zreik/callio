@@ -2,7 +2,7 @@
 import CallRepository from '../../../persistence/CallRepository.js';
 import AgentRepository from '../../../persistence/AgentRepository.js';
 import CallConnectionRepository from '../../../persistence/CallConnectionRepository.js';
-import { acceptWhatsAppCall, terminateWhatsAppCall } from '../../../channels/whatsapp/WhatsAppCallApi.js';
+import { customerChannels } from '../../channels/CustomerChannels.js';
 import EventBus from '../../EventBus.js';
 import { callLifecycleLogger } from '../../calls/CallLifecycleLogger.js';
 import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
@@ -21,7 +21,7 @@ import { IncomingCallPayload } from '../../calls/IncomingCallPayload.js';
 import { toCallView } from '../../calls/CallView.js';
 import { AssignmentType, AgentAvailability } from '../../constants/CallConstants.js';
 
-// Max wait for the agent's inbound audio track to arrive on the FRONTEND peer
+// Max wait for the agent's inbound audio track to arrive on the AGENT peer
 // before we tell Meta "accepted". Empirically the ontrack dispatch lands within
 // ~100-800 ms after processSDPAnswer on a healthy connection; 5 s is generous
 // headroom for slow networks, but bounded so we fail-fast on "mic denied" /
@@ -75,9 +75,9 @@ export class AgentEventHandler {
             // Claim ownership before touching the peer connection or calling Meta.
             // Ring-group calls can dispatch to multiple agents; if two send agent_joined
             // near-simultaneously, whichever loses this atomic claim must bail out here —
-            // otherwise it goes on to run processSDPAnswer against the FRONTEND peer the
+            // otherwise it goes on to run processSDPAnswer against the AGENT peer the
             // winner already holds ("Called in wrong state: stable") and can double-fire
-            // acceptWhatsAppCall. Only applies pre-accept (RINGING); the IN_PROGRESS
+            // the provider accept. Only applies pre-accept (RINGING); the IN_PROGRESS
             // transfer-accept path never owns the call via this check (see comment above).
             if (preGateStatus === CallStatus.RINGING) {
                 const claimed = await CallRepository.assignCallToAgentIfEligible(callId, userId);
@@ -110,10 +110,10 @@ export class AgentEventHandler {
             await sdpCoordinator.processSDPAnswer(callId, sdpAnswer, ConnectionType.AGENT);
             iceCoordinator.markClientReady(callId);
 
-            // ── Gate: wait for the agent's microphone track on the FRONTEND peer ───
-            // Previously acceptWhatsAppCall was fired immediately after processSDPAnswer.
+            // ── Gate: wait for the agent's microphone track on the AGENT peer ───
+            // Previously the provider accept was fired immediately after processSDPAnswer.
             // Meta would then start streaming the customer's audio toward us while our
-            // FRONTEND had no inbound audio track yet — client hears nothing back,
+            // AGENT had no inbound audio track yet — client hears nothing back,
             // Meta's "no media received" watchdog kills the call. Waiting here makes
             // sure the uplink is real before we confirm to Meta.
             try {
@@ -132,23 +132,24 @@ export class AgentEventHandler {
             if (currentStatus === CallStatus.RINGING) {
 
                 if (!isIvrTransferred) {
-                    // Skip if the WHATSAPP peer is already fully connected — this happens when an
+                    // Skip if the CUSTOMER peer is already fully connected — this happens when an
                     // agent transfer re-routes a call to a new agent after the first agent's accept
-                    // already completed. The WhatsApp audio channel is live; we must not re-signal
-                    // it with a new SDP answer or we'd issue a redundant Meta API call.
+                    // already completed. The customer's audio is live; we must not re-signal
+                    // it with a new SDP answer or we'd issue a redundant provider accept.
                     // `requireReady=true` uses the registry's isReady flag, which is set only on
                     // connectionState→'connected' — safe to read without touching the wrtc native pc.
-                    const whatsappAlreadyReady = peerRegistry.getConnectionData(callId, ConnectionType.CUSTOMER, true).valid;
+                    const customerAlreadyReady = peerRegistry.getConnectionData(callId, ConnectionType.CUSTOMER, true).valid;
 
-                    if (!whatsappAlreadyReady) {
-                        // Fresh RINGING call — accept WhatsApp now that the agent is ready
-                        const whatsappConn = await CallConnectionRepository.findByCallAndType(callId, ConnectionType.CUSTOMER);
-                        if (!whatsappConn || !whatsappConn.remote_sdp) throw new Error('WhatsApp offer not found');
+                    if (!customerAlreadyReady) {
+                        // Fresh RINGING call — answer the customer now that the agent is ready
+                        const customerConn = await CallConnectionRepository.findByCallAndType(callId, ConnectionType.CUSTOMER);
+                        if (!customerConn || !customerConn.remote_sdp) throw new Error('Customer offer not found');
 
-                        const whatsappSdpAnswer = await sdpCoordinator.createSDPAnswer(
-                            callId, whatsappConn.remote_sdp, ConnectionType.CUSTOMER
+                        const { call: customerCall, channel } = await customerChannels.forCall(callRecord ?? callId);
+                        const customerSdpAnswer = await sdpCoordinator.createSDPAnswer(
+                            callId, customerConn.remote_sdp, ConnectionType.CUSTOMER, { sdpProfile: channel.sdp }
                         );
-                        await acceptWhatsAppCall(callId, whatsappSdpAnswer);
+                        await channel.accept(customerCall, customerSdpAnswer);
 
                         // Guard: verify call wasn't terminated while the API call was in progress
                         const postAcceptStatus = await CallRepository.getStatus(callId);
@@ -156,10 +157,10 @@ export class AgentEventHandler {
                             throw new Error(`Call already ${postAcceptStatus.toLowerCase()}, cannot accept`);
                         }
                     } else {
-                        console.log(`[AgentEventHandler] WhatsApp peer already connected for call ${callId} — skipping re-accept`);
+                        console.log(`[AgentEventHandler] Customer peer already connected for call ${callId} — skipping re-accept`);
                     }
                 } else {
-                    console.log(`[AgentEventHandler] IVR-transferred call ${callId} — WhatsApp already accepted, skipping re-accept`);
+                    console.log(`[AgentEventHandler] IVR-transferred call ${callId} — customer already answered, skipping re-accept`);
                 }
 
                 const assigned = await CallRepository.assignCallToAgentIfEligible(callId, userId);
@@ -177,10 +178,7 @@ export class AgentEventHandler {
             }
 
             const result = peerRegistry.getConnectionData(callId, ConnectionType.AGENT);
-            if (result.valid) {
-                result.data.setWhatsappConnected(true);
-                result.data.context.update({ userId, tenantId });
-            }
+            if (result.valid) result.data.context.update({ userId, tenantId });
 
             // Who is on the AGENT leg now.
             CallConnectionRepository.updateAgentId(callId, ConnectionType.AGENT, userId)
@@ -296,7 +294,7 @@ export class AgentEventHandler {
 
     /**
      * Handle a RINGING-call reconnect triggered by the socket connect handler in server.js.
-     * Runs on the SUBSCRIBED WORKER (the one that owns the WHATSAPP peer) because it is
+     * Runs on the SUBSCRIBED WORKER (the one that owns the CUSTOMER peer) because it is
      * delivered via Redis pub/sub — not on the socket worker. This keeps both peer
      * connections on the same process so checkAndStartBridging can bridge them.
      *
@@ -306,7 +304,7 @@ export class AgentEventHandler {
      */
     async handleRingingAgentReconnect({ callId, socketId, userId, tenantId }) {
         if (!peerRegistry.getConnectionData(callId, ConnectionType.CUSTOMER).valid) {
-            console.log(`[AgentEventHandler] RINGING_AGENT_RECONNECT: no WHATSAPP peer for call ${callId} on this worker — skipping`);
+            console.log(`[AgentEventHandler] RINGING_AGENT_RECONNECT: no CUSTOMER peer for call ${callId} on this worker — skipping`);
             return;
         }
 
@@ -341,7 +339,7 @@ export class AgentEventHandler {
                 transport: 'websocket',
             });
 
-            console.log(`[AgentEventHandler] RINGING_AGENT_RECONNECT: refreshed FRONTEND for call ${callId}, delivering to socket ${socketId}`);
+            console.log(`[AgentEventHandler] RINGING_AGENT_RECONNECT: refreshed AGENT for call ${callId}, delivering to socket ${socketId}`);
         } catch (err) {
             console.error(`[AgentEventHandler] RINGING_AGENT_RECONNECT failed for call ${callId}:`, err.message);
         }
@@ -394,7 +392,7 @@ export class AgentEventHandler {
                 ? await roomManager.isSocketConnected(previousConnectionInfo.socketId)
                 : false;
 
-            // Close old FRONTEND and guard WHATSAPP still exists
+            // Close old AGENT and guard CUSTOMER still exists
             await peerRegistry.closePeerConnection(callId, ConnectionType.AGENT);
             await CallConnectionRepository.cleanupConnection(callId, ConnectionType.AGENT);
 
@@ -423,7 +421,7 @@ export class AgentEventHandler {
 
             const sdpAnswer = await sdpCoordinator.createSDPAnswer(callId, sdpOffer, ConnectionType.AGENT);
             // Must run AFTER createSDPAnswer, not before: cleanupConnection above
-            // *deletes* the FRONTEND call_connections row, and createSDPAnswer is
+            // *deletes* the AGENT call_connections row, and createSDPAnswer is
             // what recreates it (via Peer.insertConnectionRecord). Writing the
             // deviceId any earlier silently updates zero rows — the row doesn't
             // exist yet — which would have meant every reconnect kept whatever
@@ -455,7 +453,7 @@ export class AgentEventHandler {
 
     /**
      * Resolve once the agent's browser has actually delivered an inbound audio
-     * track on its FRONTEND peer connection. If the track already arrived before
+     * track on its AGENT peer connection. If the track already arrived before
      * we got here (fast renegotiation), return immediately. Otherwise listen for
      * `trackReceived` from PeerEventManager. Reject on timeout so the caller can
      * fail the accept cleanly.
@@ -514,9 +512,9 @@ export class AgentEventHandler {
     }
 
     /**
-     * Media-not-ready cleanup. Called when we can't proceed to acceptWhatsAppCall
-     * because the agent's uplink never materialized. We must:
-     *   1) tell Meta to drop the call (so they don't keep ringing the client)
+     * Media-not-ready cleanup. Called when we can't proceed to accepting the
+     * customer because the agent's uplink never materialized. We must:
+     *   1) tell the provider to drop the call (so the customer isn't left ringing)
      *   2) mark the call FAILED with a clear reason (not silently stuck)
      *   3) release the agent's ON_CALL flag so they can take the next call
      *   4) tell the frontend exactly what happened so the agent gets a toast,
@@ -529,9 +527,9 @@ export class AgentEventHandler {
         console.error(`[AgentEventHandler] Aborting accept for call ${callId} — ${reason}`);
 
         try {
-            await terminateWhatsAppCall(callId);
+            await customerChannels.terminate(callId);
         } catch (err) {
-            console.warn(`[AgentEventHandler] terminateWhatsAppCall failed during media-not-ready abort for ${callId}: ${err.message}`);
+            console.warn(`[AgentEventHandler] Provider terminate failed during media-not-ready abort for ${callId}: ${err.message}`);
         }
 
         try {

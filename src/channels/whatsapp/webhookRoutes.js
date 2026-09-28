@@ -1,4 +1,4 @@
-// src/http/webhooks/whatsappWebhook.js
+// src/channels/whatsapp/webhookRoutes.js
 // WhatsApp Calling ingress (PLATFORM_ARCHITECTURE.md §3D).
 //   GET  /webhooks/whatsapp          Meta's subscription verification
 //   POST /webhooks/whatsapp          Meta posts directly; X-Hub-Signature-256 verified
@@ -7,11 +7,11 @@
 // Both POSTs accept Meta's envelope { entry: [{ changes: [{ value }] }] }; the
 // forward endpoint also accepts a bare { value }.
 import { createHmac, timingSafeEqual } from 'crypto';
-import { callWebhookProcessor } from '../../channels/whatsapp/CallWebhookProcessor.js';
+import { whatsappWebhookTranslator } from './WhatsAppWebhookTranslator.js';
 import { isShuttingDown } from '../../server/shutdown.js';
 import { config } from '../../../config/envConfig.js';
-import { apiKeyAuth } from '../auth/apiKeyAuth.js';
-import { sendError } from '../errors.js';
+import { apiKeyAuth } from '../../http/auth/apiKeyAuth.js';
+import { sendError } from '../../http/errors.js';
 
 // Call-related change values in a payload (calls and call statuses).
 function callValues(body) {
@@ -43,9 +43,9 @@ async function ackAndProcess(reply, values, options) {
     if (isShuttingDown) return reply.code(503).send();
     reply.code(200).send({ received: values.length });
     for (const value of values) {
-        console.log(`[Webhook] phone_number_id=${value?.metadata?.phone_number_id ?? 'UNKNOWN'} calls=${value?.calls?.length ?? 0} statuses=${value?.statuses?.length ?? 0}`);
-        await callWebhookProcessor.process(value, options).catch((err) =>
-            console.error('[Webhook] Processing failed:', err)
+        console.log(`[WhatsApp:webhook] phone_number_id=${value?.metadata?.phone_number_id ?? 'UNKNOWN'} calls=${value?.calls?.length ?? 0} statuses=${value?.statuses?.length ?? 0}`);
+        await whatsappWebhookTranslator.process(value, options).catch((err) =>
+            console.error('[WhatsApp:webhook] Processing failed:', err)
         );
     }
 }
@@ -75,7 +75,7 @@ export default async function whatsappWebhookRoutes(fastify) {
             return sendError(reply, 404, 'not_enabled', 'Direct Meta ingress is not configured');
         }
         if (!validMetaSignature(request.rawBody ?? '', request.headers['x-hub-signature-256'])) {
-            console.warn('[Webhook] Rejected Meta webhook with an invalid signature');
+            console.warn('[WhatsApp:webhook] Rejected Meta webhook with an invalid signature');
             return reply.code(401).send();
         }
         return ackAndProcess(reply, callValues(request.body), {});

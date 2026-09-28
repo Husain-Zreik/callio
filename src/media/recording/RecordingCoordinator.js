@@ -20,7 +20,7 @@ class RecordingCoordinator {
     // ─────────────────────────────────────────────────────────────────
 
     /**
-     * Called after the audio bridge starts (both FRONTEND + WHATSAPP connected).
+     * Called after the audio bridge starts (both AGENT + CUSTOMER connected).
      * Decides whether to start a fresh recording session or replace the agent
      * track on an existing session (reconnect / transfer path).
      *
@@ -44,11 +44,11 @@ class RecordingCoordinator {
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // FRONTEND DISCONNECT / RECONNECT
+    // AGENT DISCONNECT / RECONNECT
     // ─────────────────────────────────────────────────────────────────
 
     /**
-     * Called when the FRONTEND peer connection drops.
+     * Called when the AGENT peer connection drops.
      * Pauses agent capture and returns a PCM callback for wiring the
      * reconnecting-tone placeholder into the active recording session.
      * Returns null if no recording is active.

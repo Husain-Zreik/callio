@@ -22,7 +22,7 @@ const { RTCPeerConnection } = wrtc;
 
 class PeerRegistry {
     constructor() {
-        // callId -> { FRONTEND?, WHATSAPP?, MONITOR?, context: CallContext }
+        // callId -> { AGENT?, CUSTOMER?, MONITOR?, context: CallContext }
         this.peerConnections = new Map();
         // callId -> { frontend?: Timeout, whatsapp?: Timeout }
         this._iceStallTimers = new Map();
@@ -41,7 +41,7 @@ class PeerRegistry {
             console.log(`📥 Track received: callId=${callId}, type=${connectionType}, trackId=${track.id}`);
             audioCoordinator.handleTrackReceived(callId, connectionType, track, stream);
 
-            // If a WHATSAPP audio track arrives after checkAndStartBridging already ran
+            // If a CUSTOMER audio track arrives after checkAndStartBridging already ran
             // (and returned early because customerTrack was null), retry now.
             if (connectionType === ConnectionType.CUSTOMER && track.kind === 'audio') {
                 this.checkAndStartBridging(callId).catch(err =>
@@ -182,15 +182,15 @@ class PeerRegistry {
 
         if (ivrFlowId && callRecord?.state === 'IVR' && !ivrCoordinator.isActive(callId) && !ivrCoordinator.hasCompleted(callId)) {
             // IVR mode: only the WhatsApp connection is needed
-            const whatsappResult = this.getConnectionData(callId, ConnectionType.CUSTOMER, true);
-            if (!whatsappResult.valid) {
-                console.log(`[PeerRegistry] ⏳ IVR waiting for WHATSAPP — call ${callId}`);
+            const customerResult = this.getConnectionData(callId, ConnectionType.CUSTOMER, true);
+            if (!customerResult.valid) {
+                console.log(`[PeerRegistry] ⏳ IVR waiting for CUSTOMER — call ${callId}`);
                 return;
             }
 
-            const whatsappPeer = whatsappResult.data; // Peer object — has shiftPlaceholderSender()
-            const whatsappPc = whatsappPeer.pc;
-            const customerTrack = whatsappPc.getReceivers()
+            const customerPeer = customerResult.data; // Peer object — has shiftPlaceholderSender()
+            const customerPc = customerPeer.pc;
+            const customerTrack = customerPc.getReceivers()
                 .find(r => r.track?.kind === 'audio')?.track ?? null;
 
             if (!customerTrack) {
@@ -206,24 +206,24 @@ class PeerRegistry {
             };
 
             console.log(`[PeerRegistry] 🔊 IVR mode — starting IVR session for call ${callId}, menu ${ivrFlowId}`);
-            await ivrCoordinator.startSession(callId, ivrFlowId, whatsappPc, customerTrack, callMeta, whatsappPeer);
+            await ivrCoordinator.startSession(callId, ivrFlowId, customerPc, customerTrack, callMeta, customerPeer);
             return;
         }
 
-        // Normal mode: both FRONTEND and WHATSAPP must be ready
+        // Normal mode: both AGENT and CUSTOMER must be ready
         const frontendResult = this.getConnectionData(callId, ConnectionType.AGENT, true);
-        const whatsappResult = this.getConnectionData(callId, ConnectionType.CUSTOMER, true);
+        const customerResult = this.getConnectionData(callId, ConnectionType.CUSTOMER, true);
 
-        if (!frontendResult.valid || !whatsappResult.valid) {
-            console.log(`[PeerRegistry] ⏳ Bridge not ready for call ${callId} — FRONTEND=${frontendResult.valid}, WHATSAPP=${whatsappResult.valid}`);
-            this._scheduleIceStallWarning(callId, frontendResult.valid, whatsappResult.valid);
+        if (!frontendResult.valid || !customerResult.valid) {
+            console.log(`[PeerRegistry] ⏳ Bridge not ready for call ${callId} — AGENT=${frontendResult.valid}, CUSTOMER=${customerResult.valid}`);
+            this._scheduleIceStallWarning(callId, frontendResult.valid, customerResult.valid);
             return;
         }
 
         this._clearIceStallTimers(callId);
 
         const resolvedTenantId = frontendResult.data?.context?.tenantId
-            ?? whatsappResult.data?.context?.tenantId
+            ?? customerResult.data?.context?.tenantId
             ?? callRecord?.tenant_id
             ?? null;
 
@@ -236,25 +236,25 @@ class PeerRegistry {
         await audioCoordinator.checkAndStartBridging(
             callId,
             frontendResult.data,
-            whatsappResult.data,
+            customerResult.data,
             resolvedTenantId,
         );
     }
 
     // ── ICE stall detection ───────────────────────────────────────────────────
 
-    _scheduleIceStallWarning(callId, frontendReady, whatsappReady) {
+    _scheduleIceStallWarning(callId, frontendReady, customerReady) {
         const timers = this._iceStallTimers.get(callId) ?? {};
 
-        if (frontendReady && !whatsappReady && !timers.whatsapp) {
-            timers.whatsapp = setTimeout(() => {
-                console.warn(`[PeerRegistry] ⚠️ ICE stall: call ${callId} — FRONTEND ready but WHATSAPP stuck in checking >8s, no media will flow`);
+        if (frontendReady && !customerReady && !timers.customer) {
+            timers.customer = setTimeout(() => {
+                console.warn(`[PeerRegistry] ⚠️ ICE stall: call ${callId} — AGENT ready but CUSTOMER stuck in checking >8s, no media will flow`);
             }, 8000);
         }
 
-        if (whatsappReady && !frontendReady && !timers.frontend) {
+        if (customerReady && !frontendReady && !timers.frontend) {
             timers.frontend = setTimeout(() => {
-                console.warn(`[PeerRegistry] ⚠️ ICE stall: call ${callId} — WHATSAPP ready but FRONTEND stuck at new/checking >8s, no media will flow`);
+                console.warn(`[PeerRegistry] ⚠️ ICE stall: call ${callId} — CUSTOMER ready but AGENT stuck at new/checking >8s, no media will flow`);
             }, 8000);
         }
 
@@ -265,7 +265,7 @@ class PeerRegistry {
         const timers = this._iceStallTimers.get(callId);
         if (!timers) return;
         clearTimeout(timers.frontend);
-        clearTimeout(timers.whatsapp);
+        clearTimeout(timers.customer);
         this._iceStallTimers.delete(callId);
     }
 
@@ -316,9 +316,9 @@ class PeerRegistry {
 
         const hasMainConnections = callConnections[ConnectionType.AGENT] || callConnections[ConnectionType.CUSTOMER];
 
-        // Only do full cleanup when closing all, or when a non-FRONTEND connection is removed
-        // and no main connections remain.  Closing just FRONTEND (transfer / reconnect) must NOT
-        // unsubscribe from Redis or wipe ICE/audio state, because a new FRONTEND will be created
+        // Only do full cleanup when closing all, or when a non-AGENT connection is removed
+        // and no main connections remain.  Closing just AGENT (transfer / reconnect) must NOT
+        // unsubscribe from Redis or wipe ICE/audio state, because a new AGENT will be created
         // immediately afterwards.
         if (closingAll || (!closingFrontend && !hasMainConnections)) {
             this._clearIceStallTimers(callId);

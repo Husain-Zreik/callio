@@ -2,7 +2,7 @@
 import CallRepository from '../../persistence/CallRepository.js';
 import { callOwnershipService } from './CallOwnershipService.js';
 import { redisBaseService } from '../redis/RedisBaseService.js';
-import { CallStatus } from '../../core/constants/CallConstants.js';
+import { CallStatus, Channel } from '../../core/constants/CallConstants.js';
 import { config } from '../../../config/envConfig.js';
 
 /**
@@ -87,11 +87,16 @@ class RedisCleanupService {
 
             // Scan all call ownership keys
             for await (const key of redisBaseService.scanKeys('call:owner:*')) {
+                // Ownership is keyed by <CHANNEL>:<providerCallId> (ChannelIngress).
                 const callId = key.replace('call:owner:', '');
+                const sep = callId.indexOf(':');
+                // Keys written before ownership was namespaced carry no channel.
+                const channel = sep > 0 ? callId.slice(0, sep) : Channel.WHATSAPP;
+                const providerCallId = sep > 0 ? callId.slice(sep + 1) : callId;
 
                 try {
                     // Check if call exists in database
-                    const call = await CallRepository.findByProviderCallId(callId);
+                    const call = await CallRepository.findByProviderCallId(providerCallId, channel);
 
                     if (!call) {
                         // Call doesn't exist - clean up Redis

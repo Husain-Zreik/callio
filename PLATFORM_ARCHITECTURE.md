@@ -288,7 +288,7 @@ adapters depend on the core's ports, never the reverse.
           inbound adapters                 core                    outbound adapters
  ┌────────────────────────────┐   ┌──────────────────────┐   ┌──────────────────────────────┐
  │ http/v1 (Management API)   │   │ application services │   │ channels/whatsapp (Graph API) │
- │ http/webhooks (Meta, fwd)  │──►│  calls · routing ·   │──►│ channels/sip (drachtio)       │
+ │ channel ingress (Meta, SIP)│──►│  calls · routing ·   │──►│ channels/sip (drachtio)       │
  │ realtime (agent gateway)   │   │  ivr · agents ·      │   │ media (WebRTC engine)         │
  │ sip ingress (drachtio)     │   │  recording policy    │   │ realtime notifier (Socket.IO) │
  └────────────────────────────┘   │ domain: Call, Queue, │   │ push (FCM / APNs / OneSignal) │
@@ -302,7 +302,8 @@ adapters depend on the core's ports, never the reverse.
 
 | Port | Purpose | Adapters |
 |---|---|---|
-| `CustomerChannel` | initiate, accept, reject, terminate; normalise provider events | `WhatsAppChannel`, `SipChannel` |
+| `CustomerChannel` (`core/channels/CustomerChannels.js`) | outbound to the provider: accept, reject, terminate, initiate; SDP rewrites; address rules; provisioning validation; ingress routes | `WhatsAppChannel` (`SipChannel` next) |
+| `ChannelIngress` (`core/channels/ChannelIngress.js`) | inbound from the provider, already translated: `inboundCall`, `outboundAnswered`, `statusChanged`, `callEnded` | called by each channel's translator |
 | `MediaEngine` | create/close legs, SDP/ICE, bridge, play audio, capture DTMF, record | WebRTC engine (wrtc + worker threads) |
 | `AgentNotifier` | deliver realtime events to agents / call rooms / supervisors | Socket.IO gateway |
 | `PushNotifier` | wake offline agent devices | FCM, APNs VoIP, OneSignal |
@@ -326,6 +327,26 @@ Rules:
 - The contract (A)–(E) is versioned and documented in `docs/`; internals are
   not part of it.
 
+### Channels are adapters
+
+WhatsApp is one channel, not the shape of the system. A channel adapter under
+`src/channels/<name>/` does exactly three things:
+
+1. **Ingress:** resolves the provider's line to a `channels` row (WhatsApp:
+   `phone_number_id` → `provider_account_id`), translates its payloads and
+   reports them to `ChannelIngress` in Callio's terms. Every decision (dedup,
+   lookup, IVR or queue, who to offer, termination reason, releasing agents)
+   is made there, once, for every channel.
+2. **Outbound actions:** implements the `CustomerChannel` port the core calls
+   through `customerChannels` (by `calls.channel`): accept, reject, terminate,
+   initiate.
+3. **Provider quirks:** its customer-leg SDP rewrites (`sdp` profile), how
+   customer addresses are normalised, which channel fields are required.
+
+It is registered in `src/channels/index.js`. The core, media engine and
+Management API import no adapter. Adding SIP is a new folder plus one
+registration line; nothing in `core/` or `media/` changes.
+
 ### Process model
 
 Unchanged in shape: N PM2 workers, each running every surface, with Redis for
@@ -341,7 +362,7 @@ don't each do the same job.
 
 ```
 src/
-  core/                         no imports from http/, realtime/, channels/, infra/
+  core/                         no imports from http/, realtime/, channels/
     calls/                      CallService, flows (inbound, outbound, accept,
                                 reconnect, transfer, monitor), CallTerminator
     routing/                    QueueRouter, AgentPicker, AutoOfflinePolicy
@@ -350,17 +371,18 @@ src/
     recording/                  RecordingPolicy, retention
     tenancy/                    consumer/tenant resolution, provisioning services
     events/                     domain events + consumer event catalog
-    ports/                      the interfaces in §6
+    channels/                   CustomerChannel port + registry, ChannelIngress
     constants/
   http/                         inbound adapter
     v1/                         Management API routes + schemas
-    webhooks/                   whatsapp (Meta signature), whatsapp-forward
     auth/                       API key, rate limits
   realtime/                     inbound + outbound adapter for agents
     gateway.js, auth.js (consumer JWT), rooms.js, handlers/, notifier.js
-  channels/                     CustomerChannel adapters
-    whatsapp/                   WhatsAppChannel, GraphApiClient, WebhookParser
-    sip/                        SipChannel (drachtio-srf)
+  channels/                     CustomerChannel adapters, registered in index.js
+    whatsapp/                   WhatsAppChannel (port), WhatsAppCallApi (Graph API),
+                                WhatsAppWebhookTranslator, webhookRoutes (Meta
+                                signature + forward), whatsappSdp
+    sip/                        SipChannel (drachtio-srf) — next
   media/                        MediaEngine adapter
     webrtc/                     peers, SDP, ICE
     bridge/  dtmf/  recording/  playback/
@@ -417,11 +439,11 @@ Each phase leaves the service working end to end.
 | 1 | New schema + seed; `src/` restructured into the layout above; constants renamed | done |
 | 2 | Persistence on the new schema, tenant-scoped; midlr repositories deleted | done |
 | 3 | One end-of-call path (`CallTerminator` + `releaseAgentAfterCall`) | partly — termination reordered so agents are freed before media teardown; paths not yet unified |
-| 4 | Routing on queues (`QueueRouter`) | done; `CallWebhookProcessor` reduced from 1,800 to ~800 lines |
-| 5 | Meta webhook ingress with signature verification, payloads scoped per channel | done; the `CustomerChannel` port lands with SIP |
+| 4 | Routing on queues (`QueueRouter`) | done |
+| 5 | Channels as adapters: `CustomerChannel` port, `ChannelIngress`; WhatsApp ingress with signature verification, payloads scoped per channel | done |
 | 6 | Agent gateway: consumer JWT, room authorization, protocol v1 doc, `call:start` outbound | done |
 | 7 | Management API v1 + outbox dispatcher + event catalog | done; per-consumer push credentials pending |
-| 8 | `SipChannel` (SIP Milestone B) behind a `CustomerChannel` port shared with WhatsApp | next |
+| 8 | `SipChannel` (SIP Milestone B) on the `CustomerChannel` port and `ChannelIngress` | next |
 | 9 | Agent SDK; midlr integration against the public contract | planned |
 
 End-to-end coverage for everything marked done: `test/e2e` (`npm run test:e2e`).

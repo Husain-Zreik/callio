@@ -13,7 +13,7 @@ import { encodingWorkerBridge } from '../media/recording/encoding/EncodingWorker
 import { dtmfWorkerBridge } from '../media/dtmf/DTMFWorkerBridge.js';
 import { peerRegistry } from '../media/webrtc/PeerRegistry.js';
 import { workerStatsService } from '../infra/monitoring/WorkerStatsService.js';
-import { terminateWhatsAppCall } from '../channels/whatsapp/WhatsAppCallApi.js';
+import { customerChannels } from '../core/channels/CustomerChannels.js';
 import { callLifecycleLogger } from '../core/calls/CallLifecycleLogger.js';
 import { ivrCoordinator } from '../core/ivr/IvrCoordinator.js';
 import CallRepository from '../persistence/CallRepository.js';
@@ -84,14 +84,14 @@ export async function shutdown(server, io) {
             // Fetch call records to categorise active calls before terminating them.
             const callRecords = await CallRepository.findByIds(activeCalls).catch(() => []);
             const inProgressCalls = callRecords.filter(c => c.status === 'IN_PROGRESS');
-            // IVR calls: RINGING with an ivr_flow_id — they hold a live WHATSAPP audio
+            // IVR calls: RINGING with an ivr_flow_id — they hold a live CUSTOMER audio
             // connection and must be explicitly terminated with Meta, same as IN_PROGRESS.
             const ivrCalls = callRecords.filter(
                 c => c.ivr_flow_id != null && c.status !== 'TERMINATED' && c.status !== 'FAILED'
             );
 
             // DB updates run FIRST — these are instant (~10ms) and must complete before
-            // SIGKILL. terminateWhatsAppCall is a 400-600ms HTTP call that runs after,
+            // SIGKILL. customerChannels.terminate is a 400-600ms HTTP call that runs after,
             // as best-effort. If PM2 kill_timeout hits during the API call the DB is
             // already correct and the customer won't see a stuck IN_PROGRESS record.
             await CallRepository.batchTerminateCalls(
@@ -127,7 +127,7 @@ export async function shutdown(server, io) {
             }
 
             // Stop IVR sessions cleanly — closes engine timers, DTMF capture, and the
-            // IVR DB session record. The WHATSAPP peer is already closed above via
+            // IVR DB session record. The CUSTOMER peer is already closed above via
             // closePeerConnection; stopSession handles the remaining IVR resources safely.
             if (ivrCalls.length > 0) {
                 await Promise.allSettled(ivrCalls.map(c =>
@@ -149,12 +149,12 @@ export async function shutdown(server, io) {
                     )
                 ));
 
-                // Tell Meta to end each connected call so the customer is not left hanging.
+                // Tell the provider to end each connected call so the customer is not left hanging.
                 // Best-effort: if SIGKILL arrives mid-flight the DB is already updated above.
                 console.log(`[Shutdown] Gracefully terminating ${callsNeedingTermination.length} active call(s)...`);
                 await Promise.allSettled(callsNeedingTermination.map(c =>
-                    terminateWhatsAppCall(c.id).catch(err =>
-                        console.warn(`[Shutdown] terminateWhatsAppCall failed for call ${c.id}:`, err.message)
+                    customerChannels.terminate(c.id).catch(err =>
+                        console.warn(`[Shutdown] Provider terminate failed for call ${c.id}:`, err.message)
                     )
                 ));
             }

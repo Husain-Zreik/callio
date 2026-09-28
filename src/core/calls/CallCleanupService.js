@@ -261,7 +261,7 @@ class CallCleanupService {
                     console.error(`[Cleanup] IVR lifecycle log failed for call ${call.id}:`, err.message)
                 );
 
-                // AutoOffline streak — mirrors the logic in CallWebhookProcessor but fires
+                // AutoOffline streak — mirrors the logic in ChannelIngress but fires
                 // here because the cleanup service terminates the call first, so
                 // finalizedByThisWebhook=false in the webhook path and the streak block there
                 // never runs. We skip the routing-strategy guard used for regular QUEUE calls
@@ -327,8 +327,8 @@ class CallCleanupService {
      * Reconcile this worker's in-memory peer connections against the DB.
      *
      * A call can be finalized in the DB without this worker's closePeerConnection
-     * ever running — most notably IVR-only inbound calls, which have a WHATSAPP peer
-     * but no FRONTEND/agent and therefore never subscribe to the Redis CALL_TERMINATED
+     * ever running — most notably IVR-only inbound calls, which have a CUSTOMER peer
+     * but no AGENT/agent and therefore never subscribe to the Redis CALL_TERMINATED
      * event. When such a call ends (caller hangup → WhatsApp webhook, or an IVR hangup
      * node), the DB is marked terminal but the owning worker keeps the wrtc peer
      * (peerConnections + connectionStates + ~native memory) forever. The RINGING/

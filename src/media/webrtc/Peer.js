@@ -1,5 +1,5 @@
 // src/media/webrtc/Peer.js
-// Per-connection WebRTC peer lifecycle, SDP state, and WhatsApp flags.
+// Per-connection WebRTC peer lifecycle and SDP state.
 // Replaces ConnectionData.js — depends on a shared CallContext and per-connection AudioTrackState.
 import CallConnectionRepository from '../../persistence/CallConnectionRepository.js';
 import CallRepository from '../../persistence/CallRepository.js';
@@ -24,9 +24,6 @@ export class Peer {
         this.sdpType = null;
         this.localSdp = null;
         this.remoteSdp = null;
-        this.whatsappTriggering = false;
-        this.whatsappTriggered = false;
-        this.whatsappConnected = false;
 
         console.log(`${connectionType} connection created for call ${callContext.callId}`);
     }
@@ -36,14 +33,11 @@ export class Peer {
     get callId() { return this.context.callId; }
     get isMonitor() { return this.connectionType === ConnectionType.MONITOR; }
     get isFrontend() { return this.connectionType === ConnectionType.AGENT; }
-    get isWhatsapp() { return this.connectionType === ConnectionType.CUSTOMER; }
+    get isCustomer() { return this.connectionType === ConnectionType.CUSTOMER; }
 
     // ── Boolean state setters ──────────────────────────────────────────────────
 
     setReady(v) { this.isReady = Boolean(v); }
-    setWhatsappTriggering(v) { this.whatsappTriggering = Boolean(v); }
-    setWhatsappTriggered(v) { this.whatsappTriggered = Boolean(v); }
-    setWhatsappConnected(v) { this.whatsappConnected = Boolean(v); }
 
     // ── Audio proxy methods (backward-compat shims → conn.audio.*) ─────────────
 

@@ -23,7 +23,7 @@ export function registerCallMediaListeners() {
     });
 
     // Fired by AudioBridge._refreshAgentTrackInMonitor after the monitor's agent-audio
-    // sender is seamlessly refreshed with the new FRONTEND track.
+    // sender is seamlessly refreshed with the new AGENT track.
     EventBus.on('call:monitor:agent:reconnected', ({ callId, supervisorMode, agentPrivate }) => {
         console.log(`[EventBus] Monitor audio restored after agent reconnect for call ${callId} (mode=${supervisorMode}, private=${agentPrivate})`);
         roomManager.broadcastToCall(callId, 'call:monitor:agent:reconnected', { callId });

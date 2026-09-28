@@ -85,7 +85,7 @@ export class PeerEventManager extends EventEmitter {
         const iceState = peerConnection.iceConnectionState;
         // Log every transition — the full timeline is essential for 138021 "no media"
         // analysis: we need to know exactly when (and whether) ICE reached 'connected'
-        // for the WHATSAPP leg before the call was terminated.
+        // for the CUSTOMER leg before the call was terminated.
         console.log(`[PeerEventManager] ICE state: ${callId} ${connectionType} → ${iceState}`);
         const key = `${callId}-${connectionType}`;
         // Only update an existing entry — never recreate after cleanup (see above).

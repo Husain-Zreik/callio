@@ -1,7 +1,7 @@
 // src/media/bridge/CustomerSilenceWatchdog.js
 //
 // Detects customer network drop by watching for a sustained run of all-zero
-// PCM frames on the WHATSAPP incoming track.
+// PCM frames on the CUSTOMER incoming track.
 //
 // WHY we detect drop via PCM (confirmed by probe call 488):
 //   • Customer network dropped → Meta's relay has nothing to forward; our
@@ -29,7 +29,7 @@ const DROP_FRAMES = 300;   // 3s × 100fps — avoids false positives from codec
 
 export class CustomerSilenceWatchdog {
     /**
-     * @param {MediaStreamTrack} track  — WHATSAPP receiver track
+     * @param {MediaStreamTrack} track  — CUSTOMER receiver track
      * @param {string|number}    callId
      * @param {Function}         onStateChange — (callId, 'active'|'drop') => void
      */

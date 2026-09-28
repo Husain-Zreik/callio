@@ -6,7 +6,7 @@
 import EventBus from '../EventBus.js';
 import CallRepository from '../../persistence/CallRepository.js';
 import { peerRegistry } from '../../media/webrtc/PeerRegistry.js';
-import { terminateWhatsAppCall } from '../../channels/whatsapp/WhatsAppCallApi.js';
+import { customerChannels } from '../channels/CustomerChannels.js';
 import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinator.js';
 import { TerminationReason, CallDirection } from '../constants/CallConstants.js';
 
@@ -34,7 +34,7 @@ class IvrTerminationHandler {
         console.log(`[IvrTermination] call=${callId}, action=${action}, terminationReason=${terminationReason}`);
 
         try {
-            await terminateWhatsAppCall(callId).catch(() => { });
+            await customerChannels.terminate(callId).catch(() => { });
             const terminatedByThisPath = await CallRepository.terminateCallIfNotTerminated(callId, terminationReason, 'SYSTEM');
             await peerRegistry.closePeerConnection(callId);
             if (!terminatedByThisPath) return;

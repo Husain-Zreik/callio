@@ -18,7 +18,7 @@ Read these before changing anything a consumer depends on:
 ### Design rules (from PLATFORM_ARCHITECTURE.md §6)
 
 - **No consumer names or consumer concepts in code.** Per-consumer differences are data (consumer/tenant/channel/queue rows), never an `if`. A consumer's own ids live only in `external_ref` / `consumer_metadata`, which Callio stores and never interprets.
-- **No provider types in the core.** Meta payload shapes stay in `src/channels/whatsapp/`; the core sees a call with a `channel` and a `provider_call_id`.
+- **No provider types in the core.** Meta payload shapes stay in `src/channels/whatsapp/`; the core sees a call with a `channel` and a `provider_call_id`, calls providers only through `customerChannels`, and receives provider events only through `ChannelIngress`. Media takes provider SDP rules as the adapter's `sdpProfile`.
 - **Identity comes from auth, never from payloads.** API routes resolve the consumer from the API key; sockets resolve tenant + agent from the verified JWT. Every call action on a socket goes through `core/calls/CallAccess.js` before a socket joins a call room.
 - **Tenant scoping in every query** that reads consumer-owned data.
 
@@ -57,9 +57,10 @@ There is no unit-test suite and no lint/format config. **Verify behaviour change
   - `agents/PresenceService` — which agents have live sockets (per-worker bookkeeping).
   - `tenancy/ConsumerProvisioning` — operator-side consumer/key creation.
   - `constants/CallConstants.js` — frozen enums; never use raw string literals for statuses, leg types (`AGENT`/`CUSTOMER`/`MONITOR`), channels, strategies.
-- `channels/whatsapp/` — `CallWebhookProcessor` (Meta webhook logic, scoped to the payload's channel) and `WhatsAppCallApi` (Graph API with the channel's credentials).
+  - `channels/` — the customer-channel boundary: `CustomerChannels` (the port every adapter implements, and the registry the core calls by `calls.channel`) and `ChannelIngress` (where adapters report provider events: inbound offer, outbound answer, status, end — all call decisions live here, once for every channel).
+- `channels/` — channel adapters, registered in `channels/index.js`. `whatsapp/`: `WhatsAppChannel` (the port), `WhatsAppCallApi` (Graph API with the channel's credentials), `WhatsAppWebhookTranslator` (Meta payloads → `ChannelIngress`), `webhookRoutes` (Meta signature + forward endpoint), `whatsappSdp` (customer-leg SDP rules). A new channel is a new folder plus one registration line; nothing in `core/` or `media/` changes.
 - `media/` — WebRTC engine: `webrtc/` (peers, SDP, ICE), `bridge/` (AudioBridge, monitor mixing, customer network/silence watchdogs), `dtmf/` (in-band detection in a worker thread), `recording/` (stereo OGG/Opus in worker threads), `playback/` (IVR/queue audio).
-- `http/` — Fastify routes: `v1/` Management API (API key via `auth/apiKeyAuth.js`, errors via `errors.js`), `webhooks/` Meta ingress, health.
+- `http/` — Fastify routes: `v1/` Management API (API key via `auth/apiKeyAuth.js`, errors via `errors.js`), health; each registered channel adds its own ingress routes.
 - `realtime/` — the agent gateway: Socket.IO server (websocket only), `middleware/authMiddleware` (consumer JWT), `namespaces/call/socketHandlers.js` (client → server), `namespaces/call/handlers/*` (EventBus → socket relays, thin), `managers/RoomManager`.
 - `push/` — `CallPushNotifier` decides who gets which push; `FcmService`, `ApnsVoipService`, `OneSignalService` send.
 - `outbox/` — `OutboxDispatcher` (leader-leased, signed, retried delivery of `webhook_deliveries`) and `signing.js`.

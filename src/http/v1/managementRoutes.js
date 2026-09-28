@@ -11,6 +11,8 @@ import PushTokenRepository from '../../persistence/PushTokenRepository.js';
 import { agentAssignmentCoordinator } from '../../core/routing/AgentAssignmentCoordinator.js';
 import { callCleanupService } from '../../core/calls/CallCleanupService.js';
 import { storageClient } from '../../infra/storage/StorageClient.js';
+import { customerChannels } from '../../core/channels/CustomerChannels.js';
+import { Channel } from '../../core/constants/CallConstants.js';
 import { badRequest, notFound } from '../errors.js';
 import { requireString, optionalInt, oneOf, optionalObject, ref } from './validate.js';
 
@@ -192,10 +194,12 @@ export default async function managementRoutes(fastify) {
     fastify.put('/tenants/:tenantRef/channels/:channelRef', async (request) => {
         const tenant = await resolveTenant(request);
         const body = request.body ?? {};
-        const type = oneOf(body, 'type', ['WHATSAPP', 'SIP']);
+        const type = oneOf(body, 'type', Object.values(Channel));
         const inboundQueue = await resolveQueueRef(tenant, body.inbound_queue_ref, 'inbound_queue_ref');
         const credentials = body.credentials === undefined ? undefined : optionalObject(body, 'credentials');
-        if (type === 'WHATSAPP' && !body.provider_account_id) throw badRequest('provider_account_id (Meta phone_number_id) is required for WHATSAPP channels');
+        // Each channel adapter validates its own provider fields.
+        const configError = customerChannels.has(type) ? customerChannels.get(type).validateChannelConfig?.(body) : null;
+        if (configError) throw badRequest(configError);
 
         let channel;
         try {

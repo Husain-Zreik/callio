@@ -1,5 +1,4 @@
 // src/core/events/handlers/RejectionEventHandler.js
-import { rejectWhatsAppCall, terminateWhatsAppCall } from '../../../channels/whatsapp/WhatsAppCallApi.js';
 import CallRepository from '../../../persistence/CallRepository.js';
 import AgentRepository from '../../../persistence/AgentRepository.js';
 import EventBus from '../../EventBus.js';
@@ -11,6 +10,7 @@ import { emitCallError } from '../CallErrorEmitter.js';
 import { CallErrorCodes } from '../CallErrorCodes.js';
 import { callPushNotifier } from '../../../push/CallPushNotifier.js';
 import { queueRouter } from '../../routing/QueueRouter.js';
+import { customerChannels } from '../../channels/CustomerChannels.js';
 
 export class RejectionEventHandler {
 
@@ -59,11 +59,11 @@ export class RejectionEventHandler {
                 await callLifecycleLogger.logRejected(callId, tenantId, userId, { reason: 'agent_rejected' });
 
                 if (callRecord?.ivr_flow_id) {
-                    // IVR-transferred call: WhatsApp session is already accepted (IN_PROGRESS at Meta).
+                    // IVR-transferred call: the IVR already answered the customer.
                     // Use terminate (end call) instead of reject to properly close the active session.
-                    await terminateWhatsAppCall(callId);
+                    await customerChannels.terminate(callRecord);
                 } else {
-                    await rejectWhatsAppCall(callId);
+                    await customerChannels.reject(callRecord ?? callId);
                 }
 
                 const assigned = await CallRepository.assignCallToAgentIfEligible(callId, userId);

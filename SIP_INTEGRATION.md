@@ -97,17 +97,14 @@ application code. See `deploy/sip-gateway/`:
   through the trunk, rtpengine media-session confirmation, and the DB schema
   check — see below)
 
-## Blockers found during scoping (must resolve before/during Milestone B)
+## Blockers found during scoping
 
-1. **Possible DB enum constraint.** `call_connections.connection_type` is
-   written as an opaque string everywhere in this repo (see
-   `src/repositories/CallConnectionRepository.js`), but the actual MySQL
-   column definition lives in the Laravel monorepo — no migrations exist in
-   this repo to inspect. If it's a strict `ENUM('FRONTEND','WHATSAPP',
-   'MONITOR')`, a new `SIP` value can't be persisted until that's migrated on
-   the other side. Check via `SHOW CREATE TABLE call_connections;` against
-   the real DB (RUNBOOK.md checkpoint 5). The same question applies to
-   `TerminatedBy` if that enum is also DB-backed anywhere (see below).
+1. **Resolved.** The DB enum question is gone: Callio has its own schema.
+   `call_connections.connection_type` is the leg's *role* (`AGENT` /
+   `CUSTOMER` / `MONITOR`) and the transport is `calls.channel` /
+   `channels.type` (`WHATSAPP` / `SIP`), so a SIP customer leg is a
+   `CUSTOMER` leg — no new leg type. `TerminatedBy.PROVIDER` covers carrier
+   failures as well as Meta's.
 2. **Resolved.** drachtio-server + rtpengine's behavior against the real
    trunk is now confirmed — see Milestone A results above. Local testing
    caught and fixed two real bugs before the real-trunk test (the `<admin-tcp
@@ -119,168 +116,81 @@ application code. See `deploy/sip-gateway/`:
    ran for ~12s, but audio quality/correctness wasn't specifically checked),
    and outbound calling (rejected by the provider, see above — not pursued).
 
-## Milestone B scope (not started) — application-code blast radius
+## Milestone B scope (not started) — the SIP channel adapter
 
-Full inventory done via codebase research; condensed here. The key finding:
-most of the audio/connection plumbing is **generic "customer leg" logic that
-just happens to be spelled WHATSAPP**, not genuinely WhatsApp-specific — the
-real Meta-specific surface is much narrower than it first appears.
+The channel boundary SIP plugs into already exists and WhatsApp runs on it
+(PLATFORM_ARCHITECTURE.md §6, "Channels are adapters"):
+
+- `src/core/channels/CustomerChannels.js` — the `CustomerChannel` port
+  (accept, reject, terminate, initiate, `sdp` profile, address rules,
+  provisioning validation, optional routes) and the registry the core calls
+  by `calls.channel`.
+- `src/core/channels/ChannelIngress.js` — where an adapter reports provider
+  events in Callio's terms: `inboundCall`, `outboundAnswered`,
+  `statusChanged`, `callEnded`. Dedup, the consumer lookup, IVR vs. queue,
+  offering agents, termination reasons and timing, agent release and
+  auto-offline all live there once, for every channel.
+- `src/channels/whatsapp/` — the reference adapter: `WhatsAppChannel` (the
+  port), `WhatsAppCallApi`, `WhatsAppWebhookTranslator`, `webhookRoutes`,
+  `whatsappSdp`.
+
+The media engine, IVR, recording, DTMF, routing, the agent gateway and the
+Management API need **no changes** for SIP; neither do the enums or schema
+(`channels.type` and `calls.channel` already accept `SIP`,
+`CustomerAddressType.SIP_URI` exists).
 
 ### Key design insight: a SIP leg is still a real Node-side WebRTC peer connection
 
 There are two ways drachtio+rtpengine could bridge a SIP call: (1) rtpengine
 relays raw RTP directly between the trunk and the agent's browser, with media
-never touching Node's process at all, or (2) rtpengine transcodes the
-trunk's plain RTP into a genuine WebRTC session that **Node itself
-terminates** via `@roamhq/wrtc` — exactly like it already does for FRONTEND
-and WHATSAPP. Option 2 is the one to build: it means `AudioBridge`,
-`AudioCoordinator`, recording, DTMF, and IVR need **zero changes**, because
-from their point of view a SIP call is just another `RTCPeerConnection`.
+never touching Node's process at all, or (2) rtpengine converts the trunk's
+plain RTP into a genuine WebRTC session that **Node itself terminates** via
+`@roamhq/wrtc` — exactly like the WhatsApp customer leg. Option 2 is the one
+to build: `AudioBridge`, recording, DTMF and IVR see a SIP call as just
+another `CUSTOMER` `RTCPeerConnection`.
 
-Concretely, the inbound flow becomes: drachtio-srf receives the trunk's
-INVITE → `peerRegistry.getOrCreateConnection(callId, ConnectionType.SIP)` (the
-exact same method WHATSAPP uses) creates a real Node-side wrtc peer → the SDP
-offer for it is created via `sdpCoordinator.createSDPOffer` (same method,
-same code) → that offer, plus the trunk's inbound SDP, both go into
-`rtpengine`'s `offer` ng-command, which hands back an SDP describing
-rtpengine's own media address → `sdpCoordinator.processSDPAnswer` feeds that
-into Node's wrtc peer (again, the exact same call WHATSAPP's inbound flow
-already makes) → drachtio-srf's `srf.createUAS` answers the trunk with
-whatever SDP is needed on that side. `SDPCoordinator`/`PeerRegistry`/`Peer`
-are reused verbatim; only the "remote signaling channel" (drachtio-srf +
-rtpengine, in place of Meta's Graph API) is new.
+Inbound flow: drachtio-srf receives the trunk's INVITE → the adapter resolves
+the dialled DID to a `channels` row (`channels.address`) → rtpengine `offer`
+turns the trunk's SDP into a WebRTC offer → `channelIngress.inboundCall(channel,
+{ providerCallId: <SIP Call-ID>, customer: { address, addressType: E164 | SIP_URI },
+sdpOffer, ... })`. From there the core does what it does for WhatsApp; when it
+answers (`SipChannel.accept(call, sdpAnswer)`), the adapter runs rtpengine
+`answer` and replies 200 OK via `srf.createUAS`. BYE/CANCEL from the trunk →
+`channelIngress.callEnded`; `SipChannel.terminate` sends BYE.
 
-One concrete piece of existing code this reveals: `PeerEventManager.js`'s
-`handleIceCandidate` currently skips forwarding outbound ICE candidates when
-`connectionType === ConnectionType.WHATSAPP`, because Meta's Graph API has no
-trickle-ICE channel — the whole SDP is exchanged in one round-trip. rtpengine
-works the same way (candidates embedded in the SDP, not trickled), so
-`ConnectionType.SIP` needs the same skip. Small, additive, and good evidence
-this design fits an existing precedent rather than inventing a new one.
+`PeerEventManager.handleIceCandidate` already skips trickling outbound ICE for
+the `CUSTOMER` leg (the whole SDP is exchanged in one round trip), which is
+what rtpengine needs too.
 
-### Generic logic hardcoded to `ConnectionType.WHATSAPP` (needs a small resolver/helper, not a rewrite)
-
-~20+ call sites across:
-- `src/services/call/signaling/webrtc/PeerEventManager.js` — `handleIceCandidate`'s
-  `connectionType !== ConnectionType.WHATSAPP` skip (see design insight above —
-  found only once the "SIP leg = real wrtc peer" model was worked out, not
-  part of the original inventory)
-- `src/services/call/signaling/webrtc/PeerRegistry.js` — `checkAndStartBridging`,
-  the `trackReceived` retry condition, `_scheduleIceStallWarning`,
-  `closePeerConnection`'s "customer leg still up" checks
-- `src/services/call/audio/AudioCoordinator.js` — `checkAndStartBridging`'s
-  `whatsappData` param, `handleTrackReceived`'s FRONTEND/WHATSAPP toggle,
-  `handleFrontendDisconnected`'s reconnect-beep relay target
-- `src/services/call/audio/AudioBridge.js` — the largest concentration:
-  `whatsappConnection`/`whatsappTracks`/`_whatsappMixingRelay` fields,
-  `setConnections`, `relayTrack`'s fromType/toType branching (this is also
-  where `CustomerSilenceWatchdog`/`CustomerNetworkMonitor` get wired up —
-  both already generically named), whisper/barge mute logic,
-  `_relayWhatsAppTrackToFrontend`, `_relayExistingTracksToMonitor`
-- `src/services/call/audio/AudioBridgeCoordinator.js` — `checkAndStartBridging`
-  param naming, `getTracksForRecording`/`getCustomerTrackForDTMF`
-
-None of this touches Meta Graph API semantics — it's wrtc-level track routing
-between "the frontend connection" and "the customer connection." Recommended
-approach: introduce `ConnectionType.SIP` plus a small helper (e.g.
-`CUSTOMER_LEG_TYPES` set / `resolveCustomerConnectionType(callConnections)`)
-rather than a full field-rename across `AudioBridge.js` — lower regression
-risk on the currently-working WhatsApp path. Full rename can be a later
-cleanup once SIP is proven.
-
-### Genuinely WhatsApp/Meta-specific (needs a parallel SIP implementation, not generalization)
-
-- `src/services/call/signaling/webrtc/WhatsAppCallApi.js` — the Graph API
-  HTTP client (`initiateWhatsAppCall`/`acceptWhatsAppCall`/
-  `rejectWhatsAppCall`/`terminateWhatsAppCall`). A SIP leg's equivalent plays
-  the same *role* (the "remote signaling channel" a call's customer leg is
-  negotiated through) but isn't shaped like an HTTP client — it's
-  `DrachtioClient` (accepting via `srf.createUAS`, rejecting via
-  `res.send(486)`, hanging up via `dialog.destroy()`) plus `RtpEngineClient`
-  (getting rtpengine to bridge the trunk's RTP into the real Node-side wrtc
-  peer connection `PeerRegistry`/`SDPCoordinator` already create — see the
-  design insight above). Needs its own modules, not a generalization of this
-  file.
-- `src/services/call/webhook/CallWebhookProcessor.js` — `process()`'s
-  top-level payload parsing is Meta webhook-envelope-specific
-  (`metadata.phone_number_id`, `calls[]`, `statuses[]`). Everything
-  *downstream* of parsing (`CallRepository.create`, `CallConnectionRepository.create`
-  with a parameterized `connection_type`, `sdpCoordinator.createSDPOffer` for
-  FRONTEND, the `call:incoming` ring fan-out) is already generic and reusable.
-  Recommended approach: extract a shared "create+route inbound call"
-  function parameterized by connection type + a normalized payload shape,
-  called from two thin adapters — today's Meta-webhook adapter, and a new
-  drachtio-srf `invite` handler (see `test/call-test.js` for the reference
-  shape: Call-ID/From-tag extraction, rtpengine offer, `srf.createUAS`).
-- `src/services/call/events/handlers/WhatsAppEventHandler.js` — reacts
-  specifically to `WHATSAPP_ANSWER_RECEIVED`, published after Meta's
-  outbound-answer webhook. A SIP leg's equivalent would need its own event
-  type, driven by drachtio-srf's own dialog/response events rather than a
-  Redis-relayed webhook, not a rename of this handler (since WhatsApp
-  outbound must keep working).
-- Numeric Meta error-code classification in `CallWebhookProcessor` (errors
-  138019/138020/138021 → `TerminatedBy.WHATSAPP`) — SIP failure
-  classification would use SIP response codes instead; not reusable, only a
-  pattern to mirror.
-
-### Already fully generic, zero changes needed
-
-`ConnectionEventHandler.js`, `TransferEventHandler.js`, `MonitorEventHandler.js`
-— none reference `WHATSAPP` at all; ICE-candidate routing, transfer, and
-monitor/whisper/barge logic already operate on whatever `connectionType` is
-passed in.
-
-### Enum changes likely needed
-
-- `ConnectionType` (`src/services/call/constants/CallConstants.js`): add `SIP`.
-  Additive/safe at the JS level — the risk is entirely the DB column (see
-  Blockers above).
-- `TerminatedBy`: currently has a literal `WHATSAPP` member meaning
-  "provider-side failure." Decide whether to add `TerminatedBy.SIP` (correct,
-  but every `TerminatedBy.WHATSAPP` call site needs to become conditional on
-  which customer-leg type failed) or reuse `WHATSAPP` for SIP failures too
-  (semantically wrong, lower effort). Same DB-enum risk applies if this
-  column is also strictly typed.
-- `AssignmentType`, `RoutingStrategy`, `InitiatorType`, `CallStatus`,
-  `CallDirection`, `TerminationReason` — all already transport-agnostic, no
-  changes needed.
-- `CallContext.js`'s `wacid`/`setWacid()` are WhatsApp-specific but not worth
-  renaming to something generic — lower risk to just leave them unused/null
-  for SIP calls than to rename a field touched by `Peer.js`,
-  `InitiationEventHandler.js`, and `CallRepository.updateWacid`.
-
-### New surface needed
+### New surface
 
 ```
-src/services/call/signaling/
-├── SignalingAdapter.js            (existing, unchanged)
-├── SignalingAdapterRegistry.js    (existing — resolve() gets a real branch for ConnectionType.SIP)
-├── webrtc/                        (existing — PeerRegistry/SDPCoordinator/Peer/etc. reused verbatim)
-└── sip/
-    ├── SipSignalingAdapter.js     (fills in the existing stub, still extends SignalingAdapter)
-    ├── SipCallCoordinator.js      (NEW — facade: inbound INVITE → peerRegistry.getOrCreateConnection(callId, ConnectionType.SIP)
-    │                                → sdpCoordinator.createSDPOffer → rtpengine.offer() → sdpCoordinator.processSDPAnswer
-    │                                → srf.createUAS to answer the trunk)
-    ├── DrachtioClient.js          (NEW — owns the srf connection singleton, wires srf.invite/dialog events)
-    └── RtpEngineClient.js         (NEW — promoted from deploy/sip-gateway/test/rtpengine-ng-client.js, not a rewrite —
-                                     needs real test coverage before being trusted in the app)
+src/channels/sip/
+├── SipChannel.js            the CustomerChannel port: accept → rtpengine answer + 200 OK,
+│                            reject → 486/603, terminate → BYE, initiate → INVITE via the trunk,
+│                            sdp profile (if rtpengine's WebRTC SDP needs any rewrite),
+│                            normalizeCustomerAddress (E.164 / SIP URI), validateChannelConfig
+├── SipIngress.js            srf.invite / dialog events → ChannelIngress (DID → channel,
+│                            Call-ID → providerCallId, SIP response codes → failed/errors)
+├── DrachtioClient.js        owns the srf connection singleton
+└── RtpEngineClient.js       promoted from deploy/sip-gateway/test/rtpengine-ng-client.js;
+                             needs real test coverage before being trusted in the app
 ```
 
-Design patterns used, matching ARCHITECTURE.md's existing documented
-conventions rather than introducing new ones: `SipCallCoordinator` is a
-**Coordinator** (single entry point for a multi-step flow, same role as
-`SDPCoordinator`/`AgentAssignmentCoordinator`); `DrachtioClient`/
-`RtpEngineClient`/`SipCallCoordinator`/`SipSignalingAdapter` are all
-**Singleton exports** (instantiated once, lowercase instance name); the whole
-`sip/` folder is the **Adapter** side of the `SignalingAdapter` **port**
-established in the earlier hexagonal-boundary work.
+plus `customerChannels.register(sipChannel)` in `src/channels/index.js` and a
+drachtio connection started from `server/bootstrap.js`. **No HTTP route is
+needed** — drachtio-srf delivers SIP messages to Node's own process.
 
-**No new HTTP route/controller needed** — unlike the WhatsApp-webhook or
-FreeSWITCH/ESL-event models, drachtio-srf delivers SIP messages directly to
-Node's own process via `DrachtioClient`'s `srf.invite(...)` handler. The
-"entry point" for an inbound SIP call is that handler itself, not a route
-Node exposes.
-
-Event-handler dispatch in `AgentEventHandler`/`InitiationEventHandler`/
-`TerminationEventHandler`/`RejectionEventHandler` to call `sip/`'s modules
-instead of `WhatsAppCallApi` when a call's customer leg is SIP.
+Open points for the implementation:
+- **Media ownership.** A SIP dialog lives on the worker whose drachtio
+  connection received the INVITE; `ChannelIngress` claims call ownership on
+  the worker that handles `inboundCall`, which must be the same one. One
+  drachtio connection per worker (drachtio-server load-balances INVITEs
+  across connected apps) satisfies this; BYE for a dialog arrives on its own
+  worker.
+- **Failure attribution.** Map SIP final responses to `failed` / `errors`
+  (e.g. 5xx/6xx from the trunk → PROVIDER, 486/603 → customer rejection via
+  `statusChanged(REJECTED)`), the way the WhatsApp translator maps Meta's
+  relay error codes.
+- **e2e.** Add a SIP scenario to `test/e2e` (a SIP UA against the local
+  gateway in `deploy/sip-gateway/docker-compose.local.yml`).

@@ -102,7 +102,7 @@ class RecordingManager {
     }
 
     /**
-     * Pause agent track capture when FRONTEND disconnects.
+     * Pause agent track capture when AGENT disconnects.
      * Session and customer track remain active.
      */
     pauseAgentCapture(callId) {

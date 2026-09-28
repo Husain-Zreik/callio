@@ -116,12 +116,12 @@ async function _handlePendingCallRedelivery(socket, userId, tenantId) {
                 `${pendingCall.id} was already accepted — lifecycle logged, no re-delivery needed`
             );
         } else if (isFirstSocket) {
-            // Route the FRONTEND reset through Redis to the SUBSCRIBED WORKER —
-            // the same worker that owns the WHATSAPP peer. Creating the FRONTEND
+            // Route the AGENT reset through Redis to the SUBSCRIBED WORKER —
+            // the same worker that owns the CUSTOMER peer. Creating the AGENT
             // peer here (on the socket worker) could land on a different process
-            // where peerRegistry has no WHATSAPP peer, making checkAndStartBridging
+            // where peerRegistry has no CUSTOMER peer, making checkAndStartBridging
             // impossible. The subscribed worker handles RINGING_AGENT_RECONNECT by
-            // closing the old FRONTEND, creating a fresh one (same process as WHATSAPP),
+            // closing the old AGENT, creating a fresh one (same process as CUSTOMER),
             // and emitting call:incoming back to this exact socket via emitToSocket.
             await redisPubSubService.publishCallEvent(
                 pendingCall.id,

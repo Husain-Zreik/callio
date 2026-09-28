@@ -1,6 +1,6 @@
 // src/media/bridge/AudioBridge.js
 //
-// Single responsibility: relay audio tracks between a FRONTEND and a WHATSAPP
+// Single responsibility: relay audio tracks between a AGENT and a CUSTOMER
 // peer connection for one active call, and optionally to a MONITOR connection.
 //
 // Track delivery to peers is delegated to Peer.deliverTrack / deliverMonitorTrack —
@@ -17,12 +17,12 @@ import EventBus from '../../core/EventBus.js';
 export class AudioBridge {
     constructor(callId) {
         this.callId = callId;
-        this.whatsappConnection = null;
+        this.customerConnection = null;
         this.frontendConnection = null;
         this.monitorConnection = null;
 
         this.frontendTracks = [];
-        this.whatsappTracks = [];
+        this.customerTracks = [];
 
         this.isActive = false;
         this.stats = {
@@ -34,9 +34,9 @@ export class AudioBridge {
         this.supervisorMode = 'listen';         // 'listen' | 'whisper' | 'barge'
         this._supervisorCapture = null;         // SupervisorCapture — set when supervisor mic arrives
         this._frontendMixingRelay = null;       // MixingRelay: customer→agent path (whisper + barge)
-        this._whatsappMixingRelay = null;       // MixingRelay: agent→customer path (barge only)
-        this._agentTrack = null;                // agent's received track (from FRONTEND receiver)
-        this._customerTrack = null;             // customer's received track (from WHATSAPP receiver)
+        this._customerMixingRelay = null;       // MixingRelay: agent→customer path (barge only)
+        this._agentTrack = null;                // agent's received track (from AGENT receiver)
+        this._customerTrack = null;             // customer's received track (from the CUSTOMER receiver)
 
         // Agent whisper-back: mute agent → customer while the supervisor (who hears
         // the agent via the monitor connection) keeps hearing them.
@@ -53,24 +53,24 @@ export class AudioBridge {
     // CONNECTIONS
     // ─────────────────────────────────────────────────────────────────
 
-    setConnections(whatsappConn, frontendConn) {
+    setConnections(customerConn, frontendConn) {
         if (!frontendConn || frontendConn.pc.connectionState === 'closed') {
             console.error(`[AudioBridge] Cannot set closed frontend connection for call ${this.callId}`);
             return false;
         }
 
-        if (!whatsappConn || whatsappConn.pc.connectionState === 'closed') {
-            console.error(`[AudioBridge] Cannot set closed WhatsApp connection for call ${this.callId}`);
+        if (!customerConn || customerConn.pc.connectionState === 'closed') {
+            console.error(`[AudioBridge] Cannot set closed customer connection for call ${this.callId}`);
             return false;
         }
 
-        this.whatsappConnection = whatsappConn;
+        this.customerConnection = customerConn;
         this.frontendConnection = frontendConn;
 
-        console.log(`[AudioBridge] Connections set for call ${this.callId} — frontend: ${frontendConn.pc.connectionState}, whatsapp: ${whatsappConn.pc.connectionState}`);
+        console.log(`[AudioBridge] Connections set for call ${this.callId} — frontend: ${frontendConn.pc.connectionState}, customer: ${customerConn.pc.connectionState}`);
 
         // Re-relay any live WhatsApp track to the (possibly new) frontend connection.
-        this._relayWhatsAppTrackToFrontend();
+        this._relayCustomerTrackToFrontend();
 
         // Flush any tracks that arrived before both connections were ready.
         this._processBufferedTracks();
@@ -135,7 +135,7 @@ export class AudioBridge {
     relayTrack(track, stream, fromType, toType) {
         const targetConnection = toType === ConnectionType.AGENT
             ? this.frontendConnection
-            : this.whatsappConnection;
+            : this.customerConnection;
 
         if (!targetConnection) {
             console.warn(`[AudioBridge] Target connection missing for ${fromType} → ${toType}`);
@@ -146,17 +146,17 @@ export class AudioBridge {
         if (fromType === ConnectionType.AGENT) {
             this._agentTrack = track;
 
-            // When a new FRONTEND track arrives (agent reconnected), refresh the monitor's
+            // When a new AGENT track arrives (agent reconnected), refresh the monitor's
             // agent audio sender so the manager's audio is restored without closing the modal.
             if (this.monitorConnection) {
                 this._refreshAgentTrackInMonitor(track);
             }
 
             // In barge mode the WhatsApp relay's RTCAudioSink was bound to the previous
-            // (now-ended) FRONTEND track.  Rebuild it so the customer still hears the mix.
-            if (this._whatsappMixingRelay && toType === ConnectionType.CUSTOMER) {
-                this._rebuildWhatsappRelay(track);
-                return; // relay output is already on the WhatsApp sender — skip deliverTrack
+            // (now-ended) AGENT track.  Rebuild it so the customer still hears the mix.
+            if (this._customerMixingRelay && toType === ConnectionType.CUSTOMER) {
+                this._rebuildCustomerRelay(track);
+                return; // relay output is already on the customer sender — skip deliverTrack
             }
         }
 
@@ -172,9 +172,9 @@ export class AudioBridge {
                     console.error(`[AudioBridge] CustomerSilenceWatchdog failed for call ${this.callId}: ${err.message}`);
                 }
             }
-            if (!this._networkMonitor && this.whatsappConnection?.pc) {
+            if (!this._networkMonitor && this.customerConnection?.pc) {
                 this._networkMonitor = new CustomerNetworkMonitor(
-                    this.whatsappConnection.pc,
+                    this.customerConnection.pc,
                     this.callId,
                     (callId, quality) => EventBus.emit('call:network:quality:customer', { callId, ...quality })
                 );
@@ -204,7 +204,7 @@ export class AudioBridge {
         this.isActive = true;
         this.stats.bridgeStartTime = new Date();
 
-        const wPC = this.whatsappConnection?.pc;
+        const wPC = this.customerConnection?.pc;
         const fPC = this.frontendConnection?.pc;
 
         // Log both peer connection states at bridge activation — if either leg is not
@@ -212,7 +212,7 @@ export class AudioBridge {
         console.log(
             `[AudioBridge] Active for call ${this.callId}: ` +
             `frontend=${fPC?.connectionState}(ice=${fPC?.iceConnectionState}), ` +
-            `whatsapp=${wPC?.connectionState}(ice=${wPC?.iceConnectionState})`
+            `customer=${wPC?.connectionState}(ice=${wPC?.iceConnectionState})`
         );
 
         // Inspect WhatsApp receivers at bridge start. A 'live' track here means the
@@ -249,7 +249,7 @@ export class AudioBridge {
         this.isActive = false;
         this.monitorConnection = null;
         this.frontendTracks = [];
-        this.whatsappTracks = [];
+        this.customerTracks = [];
 
         if (this._silenceWatchdog) {
             this._silenceWatchdog.destroy();
@@ -287,7 +287,7 @@ export class AudioBridge {
         }
         // Link capture to any mixing relays that were already activated.
         if (this._frontendMixingRelay) this._frontendMixingRelay.setSupervisorCapture(this._supervisorCapture);
-        if (this._whatsappMixingRelay) this._whatsappMixingRelay.setSupervisorCapture(this._supervisorCapture);
+        if (this._customerMixingRelay) this._customerMixingRelay.setSupervisorCapture(this._supervisorCapture);
         console.log(`[AudioBridge] Supervisor audio capture started for call ${this.callId}`);
     }
 
@@ -321,10 +321,10 @@ export class AudioBridge {
         }
 
         // WhatsApp relay (agent→customer path): needed for barge only.
-        if (mode === 'barge' && !this._whatsappMixingRelay) {
-            this._activateWhatsappRelay();
-        } else if (mode !== 'barge' && this._whatsappMixingRelay) {
-            this._deactivateWhatsappRelay();
+        if (mode === 'barge' && !this._customerMixingRelay) {
+            this._activateCustomerRelay();
+        } else if (mode !== 'barge' && this._customerMixingRelay) {
+            this._deactivateCustomerRelay();
         }
     }
 
@@ -344,9 +344,9 @@ export class AudioBridge {
             return;
         }
 
-        const sender = this.whatsappConnection?.audio.getActivePlaceholderSender();
+        const sender = this.customerConnection?.audio.getActivePlaceholderSender();
         if (!sender) {
-            console.warn(`[AudioBridge] No WhatsApp sender for agent-private on call ${this.callId}`);
+            console.warn(`[AudioBridge] No customer sender for agent-private on call ${this.callId}`);
             return;
         }
 
@@ -373,7 +373,7 @@ export class AudioBridge {
     // call when not private (no-op-ish). stopTrack:false — see PlaceholderTrackFactory.
     _resetAgentPrivate() {
         this._agentPrivate = false;
-        const sender = this.whatsappConnection?.audio.getActivePlaceholderSender();
+        const sender = this.customerConnection?.audio.getActivePlaceholderSender();
         if (sender && this._agentTrack) {
             try { sender.replaceTrack(this._agentTrack); } catch (err) {
                 console.error(`[AudioBridge] agent-private restore failed for call ${this.callId}: ${err.message}`);
@@ -423,42 +423,42 @@ export class AudioBridge {
         console.log(`[AudioBridge] Frontend mixing relay deactivated for call ${this.callId}`);
     }
 
-    _activateWhatsappRelay() {
-        if (!this._agentTrack || !this.whatsappConnection) {
-            console.warn(`[AudioBridge] Cannot activate WhatsApp relay — no agent track yet for call ${this.callId}`);
+    _activateCustomerRelay() {
+        if (!this._agentTrack || !this.customerConnection) {
+            console.warn(`[AudioBridge] Cannot activate customer relay — no agent track yet for call ${this.callId}`);
             return;
         }
         try {
-            this._whatsappMixingRelay = new MixingRelay(this._agentTrack, 'agent→customer');
+            this._customerMixingRelay = new MixingRelay(this._agentTrack, 'agent→customer');
         } catch (err) {
-            console.error(`[AudioBridge] MixingRelay (whatsapp) creation failed for call ${this.callId}: ${err.message}`);
+            console.error(`[AudioBridge] MixingRelay (customer) creation failed for call ${this.callId}: ${err.message}`);
             return;
         }
         if (this._supervisorCapture) {
-            this._whatsappMixingRelay.setSupervisorCapture(this._supervisorCapture);
+            this._customerMixingRelay.setSupervisorCapture(this._supervisorCapture);
         }
-        const sender = this.whatsappConnection.audio.getActivePlaceholderSender();
+        const sender = this.customerConnection.audio.getActivePlaceholderSender();
         if (sender) {
-            try { sender.replaceTrack(this._whatsappMixingRelay.outputTrack); } catch (err) {
-                console.error(`[AudioBridge] replaceTrack (whatsapp relay on) failed for call ${this.callId}: ${err.message}`);
+            try { sender.replaceTrack(this._customerMixingRelay.outputTrack); } catch (err) {
+                console.error(`[AudioBridge] replaceTrack (customer relay on) failed for call ${this.callId}: ${err.message}`);
             }
         }
-        console.log(`[AudioBridge] WhatsApp mixing relay activated for call ${this.callId}`);
+        console.log(`[AudioBridge] Customer mixing relay activated for call ${this.callId}`);
     }
 
-    _deactivateWhatsappRelay() {
-        const relay = this._whatsappMixingRelay;
-        this._whatsappMixingRelay = null;
+    _deactivateCustomerRelay() {
+        const relay = this._customerMixingRelay;
+        this._customerMixingRelay = null;
         if (relay) {
-            const sender = this.whatsappConnection?.audio.getActivePlaceholderSender();
+            const sender = this.customerConnection?.audio.getActivePlaceholderSender();
             if (sender && this._agentTrack) {
                 try { sender.replaceTrack(this._agentTrack); } catch (err) {
-                    console.error(`[AudioBridge] replaceTrack (whatsapp relay off) failed for call ${this.callId}: ${err.message}`);
+                    console.error(`[AudioBridge] replaceTrack (customer relay off) failed for call ${this.callId}: ${err.message}`);
                 }
             }
             relay.destroy();
         }
-        console.log(`[AudioBridge] WhatsApp mixing relay deactivated for call ${this.callId}`);
+        console.log(`[AudioBridge] Customer mixing relay deactivated for call ${this.callId}`);
     }
 
     _teardownSupervisor() {
@@ -470,7 +470,7 @@ export class AudioBridge {
         if (this._agentPrivate || this._agentPrivateSilenceTrack) this._resetAgentPrivate();
 
         if (this._frontendMixingRelay) this._deactivateFrontendRelay();
-        if (this._whatsappMixingRelay) this._deactivateWhatsappRelay();
+        if (this._customerMixingRelay) this._deactivateCustomerRelay();
 
         if (this._supervisorCapture) {
             this._supervisorCapture.destroy();
@@ -489,12 +489,12 @@ export class AudioBridge {
     // PRIVATE
     // ─────────────────────────────────────────────────────────────────
 
-    _relayWhatsAppTrackToFrontend() {
-        if (!this.whatsappConnection?.pc || !this.frontendConnection?.pc) return;
+    _relayCustomerTrackToFrontend() {
+        if (!this.customerConnection?.pc || !this.frontendConnection?.pc) return;
 
         let receivers = [];
-        try { receivers = this.whatsappConnection.pc.getReceivers(); } catch (err) {
-            console.warn(`[AudioBridge] getReceivers in _relayWhatsAppTrackToFrontend failed for call ${this.callId}: ${err.message}`);
+        try { receivers = this.customerConnection.pc.getReceivers(); } catch (err) {
+            console.warn(`[AudioBridge] getReceivers in _relayCustomerTrackToFrontend failed for call ${this.callId}: ${err.message}`);
         }
 
         for (const receiver of receivers) {
@@ -503,45 +503,45 @@ export class AudioBridge {
                 this._customerTrack = track; // always keep reference current
 
                 if (this._frontendMixingRelay) {
-                    // Whisper/barge mode: rebuild the relay targeting the new FRONTEND sender.
+                    // Whisper/barge mode: rebuild the relay targeting the new AGENT sender.
                     this._rebuildFrontendRelay(track);
                 } else {
-                    console.log(`[AudioBridge] Re-relaying WhatsApp track to new frontend for call ${this.callId}: ${track.id}`);
+                    console.log(`[AudioBridge] Re-relaying customer track to new frontend for call ${this.callId}: ${track.id}`);
                     this.relayTrack(track, null, ConnectionType.CUSTOMER, ConnectionType.AGENT);
                 }
                 return;
             }
         }
 
-        console.warn(`[AudioBridge] No live WhatsApp track to relay to new frontend for call ${this.callId}`);
+        console.warn(`[AudioBridge] No live customer track to relay to new frontend for call ${this.callId}`);
     }
 
     _processBufferedTracks() {
         const frontendBuffer = this.frontendConnection?.audio?.trackBuffer ?? [];
-        const whatsappBuffer = this.whatsappConnection?.audio?.trackBuffer ?? [];
+        const customerBuffer = this.customerConnection?.audio?.trackBuffer ?? [];
 
         if (frontendBuffer.length > 0) {
             console.log(`[AudioBridge] Flushing ${frontendBuffer.length} buffered frontend tracks for call ${this.callId}`);
             frontendBuffer.forEach(({ track, stream }) => {
                 this.relayTrack(track, stream, ConnectionType.AGENT, ConnectionType.CUSTOMER);
             });
-            this.whatsappTracks.forEach(({ track, stream }) => {
+            this.customerTracks.forEach(({ track, stream }) => {
                 this.relayTrack(track, stream, ConnectionType.CUSTOMER, ConnectionType.AGENT);
             });
             this.frontendTracks = [...frontendBuffer];
             this.frontendConnection.audio.clearTrackBuffer();
         }
 
-        if (whatsappBuffer.length > 0) {
-            console.log(`[AudioBridge] Flushing ${whatsappBuffer.length} buffered WhatsApp tracks for call ${this.callId}`);
-            whatsappBuffer.forEach(({ track, stream }) => {
+        if (customerBuffer.length > 0) {
+            console.log(`[AudioBridge] Flushing ${customerBuffer.length} buffered customer tracks for call ${this.callId}`);
+            customerBuffer.forEach(({ track, stream }) => {
                 this.relayTrack(track, stream, ConnectionType.CUSTOMER, ConnectionType.AGENT);
             });
             this.frontendTracks.forEach(({ track, stream }) => {
                 this.relayTrack(track, stream, ConnectionType.AGENT, ConnectionType.CUSTOMER);
             });
-            this.whatsappTracks = [...whatsappBuffer];
-            this.whatsappConnection.audio.clearTrackBuffer();
+            this.customerTracks = [...customerBuffer];
+            this.customerConnection.audio.clearTrackBuffer();
         }
     }
 
@@ -563,12 +563,12 @@ export class AudioBridge {
             });
         }
 
-        if (this.whatsappConnection?.pc) {
-            let wReceivers = [];
-            try { wReceivers = this.whatsappConnection.pc.getReceivers(); } catch (err) {
-                console.warn(`[AudioBridge] whatsapp getReceivers in _relayExistingTracksToMonitor failed: ${err.message}`);
+        if (this.customerConnection?.pc) {
+            let customerReceivers = [];
+            try { customerReceivers = this.customerConnection.pc.getReceivers(); } catch (err) {
+                console.warn(`[AudioBridge] customer getReceivers in _relayExistingTracksToMonitor failed: ${err.message}`);
             }
-            wReceivers.forEach(receiver => {
+            customerReceivers.forEach(receiver => {
                 if (receiver.track?.kind === 'audio' && receiver.track.readyState === 'live') {
                     this._relayTrackToMonitor(receiver.track, 'customer');
                 }
@@ -597,11 +597,11 @@ export class AudioBridge {
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // RECONNECT HELPERS  (called when the FRONTEND peer is replaced)
+    // RECONNECT HELPERS  (called when the AGENT peer is replaced)
     // ─────────────────────────────────────────────────────────────────
 
     // Replace the monitor's agent-audio sender with a new track.
-    // Called from relayTrack() whenever a FRONTEND track arrives while a
+    // Called from relayTrack() whenever a AGENT track arrives while a
     // MONITOR connection is active, so audio resumes without closing the modal.
     _refreshAgentTrackInMonitor(agentTrack) {
         if (!this.monitorConnection?.pc || !agentTrack) return;
@@ -613,7 +613,7 @@ export class AudioBridge {
         }
 
         // Agent is always the first audio sender on the monitor connection
-        // (_relayExistingTracksToMonitor relays FRONTEND first, then WHATSAPP).
+        // (_relayExistingTracksToMonitor relays AGENT first, then CUSTOMER).
         const agentSender = senders.find(s => s.track !== null);
         if (!agentSender) {
             console.warn(`[AudioBridge] No active monitor sender to refresh agent track — call ${this.callId}`);
@@ -635,13 +635,13 @@ export class AudioBridge {
         }
     }
 
-    // Re-apply the agent-private mute (silence to customer) after a FRONTEND reconnect.
+    // Re-apply the agent-private mute (silence to customer) after a AGENT reconnect.
     // After deliverTrack() puts the new live agent track on the WhatsApp sender the
     // customer would briefly hear the agent again — this restores the mute immediately.
     // Async because createTrack() must allocate a native RTCAudioSource.
     async _reapplyAgentPrivate() {
         if (!this._agentPrivate) return; // might have been cleared between call and exec
-        const sender = this.whatsappConnection?.audio.getActivePlaceholderSender();
+        const sender = this.customerConnection?.audio.getActivePlaceholderSender();
         if (!sender) return;
         try {
             const silenceTrack = await placeholderTrackFactory.createTrack('silence');
@@ -651,7 +651,7 @@ export class AudioBridge {
                 placeholderTrackFactory.releaseGeneratedTrack(this._agentPrivateSilenceTrack, { stopTrack: false });
             }
             this._agentPrivateSilenceTrack = silenceTrack;
-            const currentSender = this.whatsappConnection?.audio.getActivePlaceholderSender();
+            const currentSender = this.customerConnection?.audio.getActivePlaceholderSender();
             if (currentSender) currentSender.replaceTrack(silenceTrack);
             console.log(`[AudioBridge] Agent-private mute re-applied after reconnect for call ${this.callId}`);
         } catch (err) {
@@ -659,7 +659,7 @@ export class AudioBridge {
         }
     }
 
-    // Rebuild the frontend mixing relay (customer→agent path) for a new FRONTEND
+    // Rebuild the frontend mixing relay (customer→agent path) for a new AGENT
     // connection.  Used when supervisorMode is whisper or barge and the agent reconnects.
     _rebuildFrontendRelay(customerTrack) {
         const oldRelay = this._frontendMixingRelay;
@@ -671,7 +671,7 @@ export class AudioBridge {
                 this.frontendConnection.deliverTrack(newRelay.outputTrack, null);
             }
             this._frontendMixingRelay = newRelay;
-            console.log(`[AudioBridge] Frontend mixing relay rebuilt after FRONTEND reconnect for call ${this.callId}`);
+            console.log(`[AudioBridge] Frontend mixing relay rebuilt after AGENT reconnect for call ${this.callId}`);
         } catch (err) {
             console.error(`[AudioBridge] Frontend relay rebuild failed for call ${this.callId}: ${err.message}`);
             if (this.frontendConnection) this.frontendConnection.deliverTrack(customerTrack, null);
@@ -680,23 +680,23 @@ export class AudioBridge {
         }
     }
 
-    // Rebuild the WhatsApp mixing relay (agent→customer path) for a new agent track.
-    // Used when supervisorMode is barge and the agent reconnects with a new FRONTEND.
-    _rebuildWhatsappRelay(agentTrack) {
-        const oldRelay = this._whatsappMixingRelay;
-        this._whatsappMixingRelay = null;
+    // Rebuild the Customer mixing relay (agent→customer path) for a new agent track.
+    // Used when supervisorMode is barge and the agent reconnects with a new AGENT.
+    _rebuildCustomerRelay(agentTrack) {
+        const oldRelay = this._customerMixingRelay;
+        this._customerMixingRelay = null;
         try {
             const newRelay = new MixingRelay(agentTrack, 'agent→customer');
             if (this._supervisorCapture) newRelay.setSupervisorCapture(this._supervisorCapture);
-            const sender = this.whatsappConnection?.audio.getActivePlaceholderSender();
+            const sender = this.customerConnection?.audio.getActivePlaceholderSender();
             if (sender) {
                 sender.replaceTrack(newRelay.outputTrack);
             }
-            this._whatsappMixingRelay = newRelay;
-            console.log(`[AudioBridge] WhatsApp mixing relay rebuilt after FRONTEND reconnect for call ${this.callId}`);
+            this._customerMixingRelay = newRelay;
+            console.log(`[AudioBridge] Customer mixing relay rebuilt after AGENT reconnect for call ${this.callId}`);
         } catch (err) {
-            console.error(`[AudioBridge] WhatsApp relay rebuild failed for call ${this.callId}: ${err.message}`);
-            if (this.whatsappConnection) this.whatsappConnection.deliverTrack(agentTrack, null);
+            console.error(`[AudioBridge] Customer relay rebuild failed for call ${this.callId}: ${err.message}`);
+            if (this.customerConnection) this.customerConnection.deliverTrack(agentTrack, null);
         } finally {
             if (oldRelay) oldRelay.destroy();
         }

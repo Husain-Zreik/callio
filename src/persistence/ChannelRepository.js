@@ -40,12 +40,13 @@ class ChannelRepository {
         return rows;
     }
 
-    // Inbound WhatsApp webhooks identify the line by Meta's phone_number_id.
-    async findActiveWhatsAppByPhoneNumberId(phoneNumberId) {
+    // Channel ingress identifies a line by the provider's account id for it
+    // (WhatsApp: Meta's phone_number_id).
+    async findActiveByProviderAccount(type, providerAccountId) {
         const [rows] = await connection.execute(
             `SELECT ${CHANNEL_COLUMNS} FROM channels
-             WHERE type = 'WHATSAPP' AND provider_account_id = ? AND status = 'ACTIVE' LIMIT 1`,
-            [String(phoneNumberId)]
+             WHERE type = ? AND provider_account_id = ? AND status = 'ACTIVE' LIMIT 1`,
+            [type, String(providerAccountId)]
         );
         return rows[0] ?? null;
     }

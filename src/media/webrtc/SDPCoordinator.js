@@ -13,10 +13,11 @@ class SDPCoordinator {
 
     /**
      * @param {Function|null} callEventHandler - Redis event callback (CallManager.handleCallEvent).
-     *   Pass when this is a FRONTEND offer that needs Redis subscription (inbound webhook, transfer).
-     *   Omit for WHATSAPP offers.
+     *   Pass when this is an AGENT offer that needs Redis subscription (inbound call, transfer).
+     *   Omit for CUSTOMER offers.
+     * @param {object} [options.sdpProfile] - the channel adapter's SDP rewrites; CUSTOMER leg only.
      */
-    async createSDPOffer(callId, connectionType, callEventHandler = null) {
+    async createSDPOffer(callId, connectionType, callEventHandler = null, { sdpProfile = null } = {}) {
         console.log(`Creating ${connectionType} SDP offer for call ${callId}`);
 
         if (connectionType === ConnectionType.AGENT) {
@@ -36,7 +37,7 @@ class SDPCoordinator {
             await iceCoordinator.flushPreConnectionCandidates(pc, callId, connectionType);
             await audioCoordinator.addPlaceholderTrack(pc, connectionData);
 
-            const sdp = await sdpProcessor.createOffer(pc, connectionType);
+            const sdp = await sdpProcessor.createOffer(pc, connectionType, sdpProfile);
             await CallConnectionRepository.updateSDP(callId, connectionType, sdp, null, 'OFFER');
             connectionData.setSdp({ type: 'OFFER', local: sdp });
 
@@ -49,7 +50,7 @@ class SDPCoordinator {
         }
     }
 
-    async createSDPAnswer(callId, sdpOffer, connectionType) {
+    async createSDPAnswer(callId, sdpOffer, connectionType, { sdpProfile = null } = {}) {
         console.log(`Creating ${connectionType} SDP answer for call ${callId}`);
 
         if (connectionType === ConnectionType.MONITOR) {
@@ -80,7 +81,7 @@ class SDPCoordinator {
                 await audioCoordinator.addPlaceholderTrack(pc, connectionData, 'silence');
             }
 
-            const sdp = await sdpProcessor.createAnswer(pc, sdpOffer, connectionType);
+            const sdp = await sdpProcessor.createAnswer(pc, sdpOffer, connectionType, sdpProfile);
             await CallConnectionRepository.updateSDP(callId, connectionType, sdp, sdpOffer, 'ANSWER');
             connectionData.setSdp({ type: 'ANSWER', local: sdp, remote: sdpOffer });
 
@@ -95,7 +96,7 @@ class SDPCoordinator {
         }
     }
 
-    async processSDPAnswer(callId, sdpAnswer, connectionType) {
+    async processSDPAnswer(callId, sdpAnswer, connectionType, { sdpProfile = null } = {}) {
         const result = peerRegistry.getConnectionData(callId, connectionType);
         if (!result.valid) throw new Error(`${connectionType} connection invalid: ${result.reason}`);
 
@@ -115,7 +116,7 @@ class SDPCoordinator {
                 await peerRegistry.extractAndStoreCandidates(sdpAnswer, callId, connectionType);
             }
 
-            const processedSdp = await sdpProcessor.processAnswer(pc, sdpAnswer, connectionType);
+            const processedSdp = await sdpProcessor.processAnswer(pc, sdpAnswer, connectionType, sdpProfile);
             await CallConnectionRepository.updateSDP(callId, connectionType, null, processedSdp);
             connectionData.setSdp({ remote: processedSdp });
 

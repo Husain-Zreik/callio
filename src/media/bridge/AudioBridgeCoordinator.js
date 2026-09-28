@@ -16,17 +16,17 @@ export class AudioBridgeCoordinator {
     // BRIDGE LIFECYCLE
     // ─────────────────────────────────────────────────────────────────
 
-    async checkAndStartBridging(callId, frontendConnection, whatsappConnection) {
+    async checkAndStartBridging(callId, frontendConnection, customerConnection) {
         const frontendReady = frontendConnection?.pc?.connectionState === 'connected';
-        const whatsappReady = whatsappConnection?.pc?.connectionState === 'connected';
+        const customerReady = customerConnection?.pc?.connectionState === 'connected';
 
         if (!frontendReady) {
             console.log(`[AudioBridgeCoordinator] Frontend not ready for call ${callId}: ${frontendConnection?.pc?.connectionState ?? 'missing'}`);
             return false;
         }
 
-        if (!whatsappReady) {
-            console.log(`[AudioBridgeCoordinator] WhatsApp not ready for call ${callId}: ${whatsappConnection?.pc?.connectionState ?? 'missing'}`);
+        if (!customerReady) {
+            console.log(`[AudioBridgeCoordinator] Customer leg not ready for call ${callId}: ${customerConnection?.pc?.connectionState ?? 'missing'}`);
             return false;
         }
 
@@ -38,7 +38,7 @@ export class AudioBridgeCoordinator {
             this.activeBridges.set(callId, bridge);
         }
 
-        const bridgeSet = bridge.setConnections(whatsappConnection, frontendConnection);
+        const bridgeSet = bridge.setConnections(customerConnection, frontendConnection);
         if (bridgeSet) {
             await bridge.startBridging();
             return true;
@@ -120,7 +120,7 @@ export class AudioBridgeCoordinator {
         }
 
         const agentTrack = this._getTrackFromConnection(bridge.frontendConnection, 'agent');
-        const customerTrack = this._getTrackFromConnection(bridge.whatsappConnection, 'customer');
+        const customerTrack = this._getTrackFromConnection(bridge.customerConnection, 'customer');
 
         if (!agentTrack || !customerTrack) {
             console.error(`[AudioBridgeCoordinator] Missing tracks for call ${callId}`, {
@@ -155,7 +155,7 @@ export class AudioBridgeCoordinator {
             return null;
         }
 
-        const customerTrack = this._getTrackFromConnection(bridge.whatsappConnection, 'customer');
+        const customerTrack = this._getTrackFromConnection(bridge.customerConnection, 'customer');
         if (!customerTrack) {
             console.warn(`[AudioBridgeCoordinator] No live customer track for call ${callId}`);
         }

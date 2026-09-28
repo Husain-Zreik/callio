@@ -7,7 +7,7 @@
 // appropriate sub-manager and returns.
 //
 // Sub-components:
-//   AudioBridgeCoordinator — relay tracks between FRONTEND / WHATSAPP / MONITOR
+//   AudioBridgeCoordinator — relay tracks between AGENT / CUSTOMER / MONITOR
 //   PlaceholderTrackFactory — create and clean up placeholder tone tracks
 //   RecordingCoordinator — recording policy decisions + agent track management
 import wrtc from '@roamhq/wrtc';
@@ -55,11 +55,11 @@ export class AudioCoordinator {
     // ─────────────────────────────────────────────────────────────────
 
     /**
-     * Called when both FRONTEND and WHATSAPP connections reach 'connected'.
+     * Called when both AGENT and CUSTOMER connections reach 'connected'.
      * Starts the audio bridge and triggers recording if enabled.
      */
-    async checkAndStartBridging(callId, frontendData, whatsappData, fallbackTenantId = null) {
-        const bridgeStarted = await this.bridgeManager.checkAndStartBridging(callId, frontendData, whatsappData);
+    async checkAndStartBridging(callId, frontendData, customerData, fallbackTenantId = null) {
+        const bridgeStarted = await this.bridgeManager.checkAndStartBridging(callId, frontendData, customerData);
 
         if (!bridgeStarted) {
             // Bridge did not start (one connection not yet ready). Do NOT stop queue
@@ -74,7 +74,7 @@ export class AudioCoordinator {
         console.log(`[AudioCoordinator] Bridge started for call ${callId} — checking recording`);
 
         const tenantId = frontendData?.context?.tenantId
-            ?? whatsappData?.context?.tenantId
+            ?? customerData?.context?.tenantId
             ?? fallbackTenantId
             ?? null;
 
@@ -118,7 +118,7 @@ export class AudioCoordinator {
     }
 
     /**
-     * Called when the FRONTEND peer connection closes mid-call.
+     * Called when the AGENT peer connection closes mid-call.
      * Attaches a reconnecting-tone placeholder to keep the customer hearing
      * audio, and wires it into the recording session if active.
      */
@@ -205,7 +205,7 @@ export class AudioCoordinator {
     }
 
     cleanup(callId) {
-        // Final teardown: hard-release the DTMF sink (the call — and its WHATSAPP
+        // Final teardown: hard-release the DTMF sink (the call — and its CUSTOMER
         // track — is ending, so stopping the sink is safe here).
         dtmfCoordinator.destroyDetection(callId);
         this.bridgeManager.cleanup(callId);

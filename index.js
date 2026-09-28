@@ -15,6 +15,7 @@ import { workerStatsService } from "./src/infra/monitoring/WorkerStatsService.js
 import { initRedis, initOptionalServices, startCoreServices } from "./src/server/bootstrap.js";
 import { shutdown } from "./src/server/shutdown.js";
 import registerRoutes from "./src/http/routes/index.js";
+import { registerChannels } from "./src/channels/index.js";
 import Fastify from "fastify";
 import fastifyCors from "@fastify/cors";
 
@@ -31,6 +32,7 @@ async function startServer() {
         await initRedis();
         await initOptionalServices();
 
+        registerChannels();
         await fastify.register(registerRoutes);
 
         await fastify.ready();

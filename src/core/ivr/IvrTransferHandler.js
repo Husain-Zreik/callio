@@ -31,11 +31,11 @@ class IvrTransferHandler {
      * @param {string}   callId
      * @param {object}   callMeta       { tenantId, channelId, queueId }
      * @param {object}   transferData   node data from the ivr_transfer node
-     * @param {object}   sessionSnap    { sender, whatsappPc, audioSource }
+     * @param {object}   sessionSnap    { sender, customerPc, audioSource }
      * @param {Function} stopSession    (outcome: string) => Promise<void>  bound to the active session
      */
     async handle(callId, callMeta, transferData, sessionSnap, stopSession) {
-        const { sender, whatsappPc, audioSource } = sessionSnap;
+        const { sender, customerPc, audioSource } = sessionSnap;
         const tenantId = callMeta.tenantId ?? null;
         // Transfer targets are an agent or a queue ('group' is accepted as a queue
         // for flows authored before queues existed). A queue node with no target
@@ -89,10 +89,10 @@ class IvrTransferHandler {
         //     queued call using its pre-IVR ringing timestamp
         //   • the routing scope, so it scopes eligible agents correctly instead of
         //     falling back to whatever stale/default metadata predates this transfer
-        //   • the FRONTEND SDP offer, pre-created on THIS worker (the one that owns
-        //     the WHATSAPP peer) — assignOldestUnassignedCall reuses local_sdp if
+        //   • the AGENT SDP offer, pre-created on THIS worker (the one that owns
+        //     the CUSTOMER peer) — assignOldestUnassignedCall reuses local_sdp if
         //     present, but if it doesn't find one it creates its own on whichever
-        //     worker it happens to run on, which has no WHATSAPP peer, so
+        //     worker it happens to run on, which has no CUSTOMER peer, so
         //     checkAndStartBridging would never find a match to bridge against.
         // So these three run FIRST, immediately, ahead of the audio/logging work below
         // that has no bearing on queue-scan eligibility.
@@ -109,7 +109,7 @@ class IvrTransferHandler {
             ConnectionType.AGENT,
             callEventHandler.handleCallEvent,
         ).catch((err) =>
-            console.error(`[IvrTransferHandler] FRONTEND SDP pre-creation failed for call ${callId}:`, err.message)
+            console.error(`[IvrTransferHandler] AGENT SDP pre-creation failed for call ${callId}:`, err.message)
         );
 
         // For busy+wait: play the node's busyAudio as the queue hold music override
@@ -127,9 +127,9 @@ class IvrTransferHandler {
             }).catch(() => { });
         }
 
-        if (sender && whatsappPc && tenantId) {
+        if (sender && customerPc && tenantId) {
             queueAudioCoordinator.startQueueAudio(
-                callId, tenantId, sender, whatsappPc, busyAudioOverridePath,
+                callId, tenantId, sender, customerPc, busyAudioOverridePath,
                 targetType === 'queue' ? targetId : (callMeta.queueId ?? null),
             ).catch((err) =>
                 console.warn(`[IvrTransferHandler] QueueAudioCoordinator start failed for call ${callId}:`, err.message)

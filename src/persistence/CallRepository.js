@@ -64,7 +64,8 @@ class CallRepository {
         return rows[0] || null;
     }
 
-    async findByProviderCallId(providerCallId, channel = 'WHATSAPP') {
+    // Provider call ids are unique per channel type.
+    async findByProviderCallId(providerCallId, channel) {
         const [rows] = await connection.execute(
             'SELECT * FROM calls WHERE channel = ? AND provider_call_id = ?',
             [channel, providerCallId]

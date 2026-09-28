@@ -1,5 +1,5 @@
 // src/core/events/handlers/TerminationEventHandler.js
-import { terminateWhatsAppCall } from '../../../channels/whatsapp/WhatsAppCallApi.js';
+import { customerChannels } from '../../channels/CustomerChannels.js';
 import CallRepository from '../../../persistence/CallRepository.js';
 import { agentAssignmentCoordinator } from '../../routing/AgentAssignmentCoordinator.js';
 import { callLifecycleLogger } from '../../calls/CallLifecycleLogger.js';
@@ -104,7 +104,7 @@ export class TerminationEventHandler {
 
             // Tell the provider (normal path: triggers the authoritative webhook
             // that patches durations; failures: stops media billing), then close media.
-            try { await terminateWhatsAppCall(callId); } catch (err) {
+            try { await customerChannels.terminate(call); } catch (err) {
                 console.warn(`[TerminationEventHandler] terminateCall API error for ${callId}: ${err.message}`);
             }
             await peerRegistry.closePeerConnection(callId);

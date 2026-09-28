@@ -120,14 +120,14 @@ class DTMFCaptureService {
             // Detach the data handler only — do NOT call sink.stop().
             // wrtc's RTCAudioSink.stop() calls track.stop() at the C++ layer,
             // which ends the MediaStreamTrack (readyState → 'ended'). For IVR
-            // transfers the customer track is the WHATSAPP receiver track: ending
-            // it silences the caller and breaks _relayWhatsAppTrackToFrontend()
+            // transfers the customer track is the CUSTOMER receiver track: ending
+            // it silences the caller and breaks _relayCustomerTrackToFrontend()
             // when the agent later accepts from the queue.
             entry.sink.ondata = null;
             // Free the worker session — detector state is no longer needed once
             // the IVR session ends (transferred, hung_up, etc.).
             dtmfWorkerBridge.stopSession(callId);
-            // Retain the native sink (do NOT stop it here) so the shared WHATSAPP
+            // Retain the native sink (do NOT stop it here) so the shared CUSTOMER
             // track survives IVR transfer. It is hard-released in destroy() at teardown.
             this._idleSinks.set(callId, entry.sink);
             this.activeSinks.delete(callId);

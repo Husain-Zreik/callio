@@ -1,10 +1,9 @@
 // src/channels/whatsapp/WhatsAppCallApi.js
-// Pure WhatsApp Graph API adapter — no DB state updates.
+// WhatsApp Graph API client for the WhatsApp channel adapter — no DB state updates.
 // Credentials come from the call's channel (channels.provider_account_id is
 // Meta's phone_number_id, channels.credentials holds the access token); all
 // call-state DB writes belong in callers.
 import https from 'https';
-import CallRepository from '../../persistence/CallRepository.js';
 import ChannelRepository from '../../persistence/ChannelRepository.js';
 import { config } from '../../../config/envConfig.js';
 import axios from 'axios';
@@ -66,20 +65,18 @@ async function channelAuth(channelId) {
     return { phoneNumberId: channel.provider_account_id, token: credentials.access_token };
 }
 
-async function callAuth(callId) {
-    const call = await CallRepository.findById(callId);
-    if (!call) throw new Error('Call not found');
-    return { call, ...(await channelAuth(call.channel_id)) };
+function authHeaders(token) {
+    return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 }
 
 // ── Outbound call ─────────────────────────────────────────────────────────────
 
-// callData: { channelId, customer: { address, addressType } }
-export const initiateWhatsAppCall = async (callData, sdpOffer) => {
+// Dials the customer of an outbound calls row; returns Meta's call id.
+export const initiateCall = async (call, sdpOffer) => {
     try {
-        const { phoneNumberId, token: businessToken } = await channelAuth(callData.channelId);
+        const { phoneNumberId, token } = await channelAuth(call.channel_id);
 
-        const { address, addressType } = callData.customer ?? {};
+        const address = call.customer_address;
         if (!address) throw new Error('Customer has no address');
         const payload = {
             messaging_product: 'whatsapp',
@@ -88,22 +85,15 @@ export const initiateWhatsAppCall = async (callData, sdpOffer) => {
         };
         // Phone numbers go as digits; customers without one are addressed by
         // their business-scoped user id.
-        if (addressType === 'WHATSAPP_USER') payload.recipient = address;
-        else payload.to = String(address).replace(/[^d]/g, '');
+        if (call.customer_address_type === 'WHATSAPP_USER') payload.recipient = address;
+        else payload.to = String(address).replace(/[^\d]/g, '');
 
         console.log(`[WhatsApp] Initiating call to=${payload.to ?? 'none'} recipient=${payload.recipient ?? 'none'}`);
 
-        const response = await metaAxios.post(
-            `${graphUrl()}/${phoneNumberId}/calls`,
-            payload,
-            { headers: { Authorization: `Bearer ${businessToken}`, 'Content-Type': 'application/json' } }
-        );
-
-        console.log('[WhatsApp] ✅ API Response:', JSON.stringify(response.data, null, 2));
+        const response = await metaAxios.post(`${graphUrl()}/${phoneNumberId}/calls`, payload, { headers: authHeaders(token) });
 
         const providerCallId = response.data.calls?.[0]?.id;
-        if (!providerCallId) throw new Error('Missing providerCallId in WhatsApp response');
-
+        if (!providerCallId) throw new Error('Missing call id in WhatsApp response');
         return providerCallId;
     } catch (error) {
         throw formatApiError(error, 'Initiate call');
@@ -112,9 +102,8 @@ export const initiateWhatsAppCall = async (callData, sdpOffer) => {
 
 // ── Accept inbound call ───────────────────────────────────────────────────────
 
-export const acceptWhatsAppCall = async (callId, sdpAnswer) => {
-    const { call, phoneNumberId, token: businessToken } = await callAuth(callId);
-
+export const acceptCall = async (call, sdpAnswer) => {
+    const { phoneNumberId, token } = await channelAuth(call.channel_id);
     const response = await _metaPost(
         `${graphUrl()}/${phoneNumberId}/calls`,
         {
@@ -123,23 +112,23 @@ export const acceptWhatsAppCall = async (callId, sdpAnswer) => {
             action: 'accept',
             session: { sdp_type: 'answer', sdp: sdpAnswer },
         },
-        { headers: { Authorization: `Bearer ${businessToken}`, 'Content-Type': 'application/json' }, timeout: 12000 },
-        `Accept call ${callId}`,
+        { headers: authHeaders(token), timeout: 12000 },
+        `Accept call ${call.id}`,
     );
     return response.data;
 };
 
 // ── Reject call ───────────────────────────────────────────────────────────────
 
-export const rejectWhatsAppCall = async (callId) => {
+// Meta has no separate reject action for calls: declining is terminate.
+export const rejectCall = async (call) => {
     try {
-        const { call, phoneNumberId, token: businessToken } = await callAuth(callId);
+        const { phoneNumberId, token } = await channelAuth(call.channel_id);
         if (!call.provider_call_id) throw new Error('Call has no provider call id');
-
         await metaAxios.post(
             `${graphUrl()}/${phoneNumberId}/calls`,
             { messaging_product: 'whatsapp', call_id: call.provider_call_id, action: 'terminate' },
-            { headers: { Authorization: `Bearer ${businessToken}`, 'Content-Type': 'application/json' } }
+            { headers: authHeaders(token) }
         );
     } catch (error) {
         throw formatApiError(error, 'Reject call');
@@ -148,20 +137,15 @@ export const rejectWhatsAppCall = async (callId) => {
 
 // ── Terminate call ────────────────────────────────────────────────────────────
 
-export const terminateWhatsAppCall = async (callId) => {
-    console.log('[WhatsApp] Terminating call:', callId);
-    const { call, phoneNumberId, token: businessToken } = await callAuth(callId);
+export const terminateCall = async (call) => {
+    console.log('[WhatsApp] Terminating call:', call.id);
+    const { phoneNumberId, token } = await channelAuth(call.channel_id);
     if (!call.provider_call_id) throw new Error('Call has no provider call id');
-
     await _metaPost(
         `${graphUrl()}/${phoneNumberId}/calls`,
-        {
-            messaging_product: 'whatsapp',
-            call_id: call.provider_call_id,
-            action: 'terminate',
-        },
-        { headers: { Authorization: `Bearer ${businessToken}`, 'Content-Type': 'application/json' }, timeout: 12000 },
-        `Terminate call ${callId}`,
+        { messaging_product: 'whatsapp', call_id: call.provider_call_id, action: 'terminate' },
+        { headers: authHeaders(token), timeout: 12000 },
+        `Terminate call ${call.id}`,
     );
-    console.log('[WhatsApp] ✅ WhatsApp call terminated');
+    console.log(`[WhatsApp] Call ${call.id} terminated`);
 };
