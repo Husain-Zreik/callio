@@ -54,7 +54,13 @@ docker compose -f deploy/observability/docker-compose.yml up -d
 `prometheus/prometheus.yml` scrapes `127.0.0.1:3003` and `127.0.0.1:3004`
 (BASE_PORT=3003, two workers); change the targets if those differ.
 
-Open Grafana from your machine through an SSH tunnel:
+Open Grafana in the browser at `https://<domain>/grafana/` through the
+site's nginx (behind Grafana's login): add
+`include /var/www/html/callio/deploy/observability/nginx/grafana.conf;` to the
+site's HTTPS `server { }` block, put
+`GRAFANA_ROOT_URL=https://<domain>/grafana/` and `GRAFANA_SUB_PATH=true` in
+`deploy/observability/.env`, recreate Grafana and reload nginx. Or, without
+exposing it, through an SSH tunnel:
 
 ```bash
 ssh -L 3300:127.0.0.1:3300 root@callio.pcg-ms.com
