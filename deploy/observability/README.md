@@ -1,80 +1,133 @@
-# Observability: Loki, Prometheus, Grafana
+# Observability: one shared stack per server
 
-Callio writes JSON log files and serves Prometheus metrics; this folder runs
-the tools that collect and show them:
+Every project on a server ships its logs and metrics into **one** stack,
+installed in `/opt/observability`, and shows up in **one** Grafana — each
+project in its own dashboard folder, its logs told apart by the `service`
+label.
 
-| Service | Does | Listens on (server) |
+| Service | Does | Listens on |
 |---|---|---|
-| **Grafana Alloy** | tails `storage/logs/app/worker-*/*.log` and ships each record to Loki | 127.0.0.1:12345 (status UI) |
-| **Loki** | stores and indexes the logs (14 days) | 127.0.0.1:3100 |
-| **Prometheus** | scrapes each worker's `/metrics` every 15 s (15 days), evaluates the metric alerts | 127.0.0.1:9090 |
-| **Alertmanager** | receives the alerts (from Prometheus and Loki) and sends notifications | 127.0.0.1:9093 |
-| **Grafana** | dashboards, log search, alert list; the *Callio — overview* dashboard is provisioned | 127.0.0.1:3300 |
+| **Grafana Alloy** | ships each project's log files to Loki | 127.0.0.1:12345 |
+| **Loki** | stores and indexes logs (14 days), evaluates log alerts | 127.0.0.1:3100 |
+| **Prometheus** | scrapes projects' `/metrics` (15 days), evaluates metric alerts | 127.0.0.1:9090 |
+| **Alertmanager** | receives the alerts, sends notifications | 127.0.0.1:9093 |
+| **Grafana** | dashboards, log exploration, alerts — behind nginx at `/grafana/` | 127.0.0.1:3300 |
 
-`docker-compose.yml` is for the Callio server (host networking, everything on
-127.0.0.1, host firewall untouched). `docker-compose.local.yml` is the same
-stack for Docker Desktop against a local Callio.
+Everything listens on 127.0.0.1 (host networking): nothing is reachable from
+outside except Grafana through nginx, behind its login.
 
-## What Callio provides
+## Layout
 
-**Logs** — one JSON record per line, e.g.
+```
+deploy/observability/            (in the Callio repo)
+  install.sh                     installs/updates the stack, plugs a project in
+  stack/                         the shared stack — no project knowledge
+  callio/                        Callio's pieces (the shape every project uses)
+    callio.alloy                 which log files to ship
+    prometheus-scrape.yml        which /metrics to scrape (.local.yml for Docker Desktop)
+    prometheus-alerts.yml        metric alerts
+    loki-rules.yml               log alerts
+    dashboards/*.json            Grafana folder "Callio" (build-dashboard.mjs builds it)
 
-```json
-{"level":"info","time":"2026-09-29T10:07:57.777Z","service":"callio","env":"development","host":"srv1","worker":2,"component":"core.calls.CallTerminator","callId":42,"msg":"Call ended — COMPLETED/AGENT (agent_or_api)"}
+/opt/observability/              (on the server, created by install.sh)
+  docker-compose.yml  .env       .env: Grafana password and URL (kept on updates)
+  install.sh  .stack/            a copy, for other projects to use
+  alloy/base.alloy               + alloy/<project>.alloy
+  prometheus/scrape.d/<project>.yml  rules.d/<project>.yml  secrets/<project>_metrics_token
+  loki/rules/fake/<project>.yml
+  alertmanager/alertmanager.yml  notification receivers (kept on updates — edit here)
+  grafana/dashboards/<Project>/
+  nginx/grafana.conf             included by the site's nginx
 ```
 
-Alloy turns `service`, `env`, `host`, `level`, `component` into Loki labels
-(few values each) and `worker`, `callId`, `providerCallId`, `tenantId`,
-`agentId`, `requestId` into structured metadata (searchable, not indexed —
-ids must never be labels). The `.error.log` files repeat the error records
-and are not shipped.
-
-**Metrics** — `GET /metrics` on each worker, bearer token `METRICS_TOKEN`
-(unset = endpoint off). Series and labels: `src/infra/monitoring/metrics.js`.
-
-## On the Callio server
+## Install on the server (with Callio)
 
 ```bash
 cd /var/www/html/callio
-
-# 1. A token for /metrics, shared by Callio and Prometheus
-TOKEN=$(openssl rand -hex 24)
-grep -q '^METRICS_TOKEN=' .env && sed -i "s/^METRICS_TOKEN=.*/METRICS_TOKEN=$TOKEN/" .env || echo "METRICS_TOKEN=$TOKEN" >> .env
-printf %s "$TOKEN" > deploy/observability/prometheus/metrics_token
+git pull
+sudo bash deploy/observability/install.sh
 pm2 restart dev_worker_1 dev_worker_2 --update-env
-
-# 2. Grafana's admin password
-read -rsp "Grafana admin password: " GP; echo
-echo "GRAFANA_ADMIN_PASSWORD=$GP" > deploy/observability/.env
-
-# 3. Start the stack
-docker compose -f deploy/observability/docker-compose.yml up -d
 ```
 
-`prometheus/prometheus.yml` scrapes `127.0.0.1:3003` and `127.0.0.1:3004`
-(BASE_PORT=3003, two workers); change the targets if those differ.
+The first run asks for the Grafana admin password. It also removes the
+earlier `callio-observability` containers, refuses to start if another
+program holds the stack's ports (see *Old observability services*), and sets
+`METRICS_TOKEN` in Callio's `.env` if it isn't set yet (hence the restart).
 
-Open Grafana in the browser at `https://<domain>/grafana/` through the
-site's nginx (behind Grafana's login): add
-`include /var/www/html/callio/deploy/observability/nginx/grafana.conf;` to the
-site's HTTPS `server { }` block, put
-`GRAFANA_ROOT_URL=https://<domain>/grafana/` and `GRAFANA_SUB_PATH=true` in
-`deploy/observability/.env`, recreate Grafana and reload nginx. Or, without
-exposing it, through an SSH tunnel:
+Publish Grafana through the site's nginx — inside the HTTPS `server { }`
+block of the site that should serve it, before `location / {`:
+
+```nginx
+include /opt/observability/nginx/grafana.conf;
+```
+
+then `nginx -t && systemctl reload nginx` and open
+`https://callio.pcg-ms.com/grafana/` (user `admin`). Another address:
+`install.sh --grafana-url https://other.example.com/grafana/` on the first run,
+or edit `GRAFANA_ROOT_URL` in `/opt/observability/.env` and
+`cd /opt/observability && docker compose up -d`.
+
+Re-run `install.sh` after pulling changes to Callio's pieces or the stack.
+
+## Add another project
+
+Give the project a folder with the same shape as `callio/` (only the pieces it
+has), for example `/var/www/html/midlr/observability/`:
+
+```
+midlr.alloy                    required for logs
+prometheus-scrape.yml          if it serves /metrics
+prometheus-alerts.yml          loki-rules.yml          dashboards/*.json
+```
+
+then:
 
 ```bash
-ssh -L 3300:127.0.0.1:3300 root@callio.pcg-ms.com
+sudo /opt/observability/install.sh --project /var/www/html/midlr/observability --name midlr
 ```
 
-then http://localhost:3300 (user `admin`).
+A minimal `midlr.alloy` for a Laravel app (plain-text lines, labelled so
+Grafana can tell it from the rest):
 
-Check it's working:
+```alloy
+local.file_match "midlr" {
+    path_targets = [{
+        __path__ = "/var/www/html/midlr/storage/logs/*.log",
+        service  = "midlr",
+        env      = "development",
+    }]
+}
+
+loki.source.file "midlr" {
+    targets    = local.file_match.midlr.targets
+    forward_to = [loki.write.default.receiver]   // base.alloy
+}
+```
+
+Paths are the host's paths: Alloy sees `/var/www/html` read-only
+(`PROJECTS_ROOT` in `.env`). Conventions for every project — labels (few
+values): `service`, `env`, `host`, `level`, `component`; ids (request, user,
+call …) as fields or structured metadata, never labels.
+
+## Old observability services
+
+The dev server had Loki, Promtail and Grafana installed as system services,
+holding the same ports. Stop and disable them (their data stays in place; this
+is reversible with `systemctl enable --now`):
 
 ```bash
-curl -s -H "authorization: Bearer $(cat deploy/observability/prometheus/metrics_token)" 127.0.0.1:3003/metrics | head
-curl -s 127.0.0.1:9090/api/v1/targets | grep -o '"health":"[a-z]*"'
-curl -s -G 127.0.0.1:3100/loki/api/v1/query --data-urlencode 'query=sum by (level) (count_over_time({service="callio"}[1h]))'
+sudo systemctl disable --now loki promtail grafana-server
 ```
+
+## Using Grafana
+
+- **Dashboards → <Project>** — e.g. *Callio — overview*: calls, HTTP, webhooks,
+  event loop, memory/CPU per worker, errors by component, a filterable log panel.
+- **Explore → Logs** (Grafana 11's name for *Logs Drilldown*) — pick a service,
+  then split by level / component, filter by any field (`callId` …);
+  **Patterns** groups repeated messages. No queries to write.
+- **Explore → Metrics** — every metric as a chart; break down by label.
+- **Alerting → Alert list** — source *Alertmanager*: what is firing.
 
 ## Alerts
 
@@ -94,56 +147,39 @@ curl -s -G 127.0.0.1:3100/loki/api/v1/query --data-urlencode 'query=sum by (leve
 | CallioErrorLogsHigh | logs | warning | a component logs > 20 errors in 10 min |
 | CallioLogRecordsDropped / CallioLogCapReached | metrics / logs | warning | logging protected the service (stalled disk, daily cap) |
 
-Rules: `prometheus/alerts.yml` and `loki/rules/fake/callio.yml` — thresholds
-are starting points; tune them to real traffic. Alerts show in Grafana
-(Alerting → Alert list, Alertmanager) without any setup. To be **notified**,
-fill a receiver (email, Slack, Telegram, webhook) in
-`alertmanager/alertmanager.yml`, set `route.receiver` to it, and
-`docker compose -f deploy/observability/docker-compose.yml restart alertmanager`.
+Thresholds are starting points — tune them in `callio/prometheus-alerts.yml` /
+`callio/loki-rules.yml` and re-run `install.sh`. To be **notified**, fill a
+receiver (email, Slack, Telegram, webhook) in
+`/opt/observability/alertmanager/alertmanager.yml`, point `route.receiver` at
+it, and `cd /opt/observability && docker compose restart alertmanager`.
 
-## Worker snapshots
+## Callio's data
 
-Every 5 minutes, on shutdown and on a crash each worker logs one
-`Worker snapshot` record (component `infra.monitoring.WorkerStatsService`):
-CPU, memory, event-loop delay, active calls and recordings, and the leak
-counters (native audio objects, per-call state retained, timers, threads).
-The same numbers are `/health` and, over time, the leak gauges in Prometheus.
+**Logs** — one JSON record per line
+(`storage/logs/app/worker-N/YYYY-MM-DD.log`; the `.error.log` copies are not
+shipped). Labels: `service`, `env`, `host`, `level`, `component`; structured
+metadata: `worker`, `callId`, `providerCallId`, `tenantId`, `agentId`,
+`requestId`. Every 5 minutes, on shutdown and on a crash each worker logs a
+`Worker snapshot` record (CPU, memory, event loop, active calls, leak counters).
 
-```bash
-npm run -s logs -- --component infra.monitoring --since 1h
-```
-
-## Querying
-
-Logs (Grafana → Explore → Loki):
+**Metrics** — `GET /metrics` on each worker, bearer `METRICS_TOKEN`
+(`src/infra/monitoring/metrics.js`: calls ended by reason, talk/ring time,
+HTTP by route, webhook deliveries, SIP refusals, leak gauges, Node process).
 
 ```
-{service="callio", env="development"}                          everything
 {service="callio", level=~"warn|error"}                         problems
-{service="callio", component=~"channels.sip.*"}                 one part of the system
 {service="callio"} | callId="42"                                one call
-{service="callio"} | json | status >= 500                       any JSON field
 sum by (component) (count_over_time({service="callio", level="error"}[5m]))
+sum by (reason) (rate(callio_calls_ended_total[5m])) * 60        calls ended per minute
 ```
 
-Metrics (Grafana → Explore → Prometheus):
-
-```
-sum by (reason) (rate(callio_calls_ended_total[5m])) * 60        calls ended per minute, by outcome
-histogram_quantile(0.95, sum by (le) (rate(callio_call_duration_seconds_bucket[1h])))
-sum(callio_media_calls_active)                                   calls with media now
-sum(increase(callio_webhook_deliveries_total{result="failed"}[1h]))
-max(callio_nodejs_eventloop_lag_p99_seconds)                     worker responsiveness
-```
-
-## Local (Docker Desktop)
+## On a development machine (Docker Desktop)
 
 ```bash
-node -e "console.log(require('crypto').randomBytes(24).toString('hex'))" > deploy/observability/prometheus/metrics_token
-# put the same value in .env as METRICS_TOKEN, then start Callio (npm run dev)
-docker compose -f deploy/observability/docker-compose.local.yml up -d
+bash deploy/observability/install.sh --local      # into .observability/ (gitignored)
 ```
 
-Grafana: http://localhost:3300 (admin / admin). A local Callio connected to
-the local SIP gateway takes INVITEs away from the e2e suite — stop it before
+Grafana: http://localhost:3300 (admin / admin); it scrapes a local Callio on
+3001 and the e2e runner's on 3901. A local Callio connected to the local SIP
+gateway takes INVITEs away from the e2e suite — stop it before
 `npm run test:e2e -- sip`.

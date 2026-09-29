@@ -2,7 +2,7 @@
 # sends notifications. Alerts always show in Grafana (Alerting → Alert list,
 # data source "Alertmanager") and at 127.0.0.1:9093; to also be notified,
 # fill one receiver below and point `route.receiver` at it, then:
-#   docker compose -f deploy/observability/docker-compose.yml restart alertmanager
+#   cd /opt/observability && docker compose restart alertmanager
 route:
   receiver: grafana-only
   group_by: [alertname, env]
