@@ -122,7 +122,9 @@ if ! $LOCAL; then
         pid="$(printf '%s' "$line" | sed -n 's/.*users:(("[^"]*",pid=\([0-9]*\).*/\1/p')"
         if [ "$OURS" != 0 ] && in_container "$pid"; then setenv "$VAR" "$PORT"; continue; fi   # our running stack
         if printf '%s' "$prog" | grep -qE "$OLD_SERVICES" && ! in_container "$pid"; then
-            BLOCKED="$BLOCKED\n  :$PORT is held by the old '$prog' service (pid $pid) — stop it: sudo systemctl disable --now $(ps -o unit= -p "$pid" 2>/dev/null || echo "$prog")"
+            unit="$(ps -o unit= -p "$pid" 2>/dev/null | tr -d ' ')"
+            { [ -z "$unit" ] || [ "$unit" = - ]; } && unit="$prog"
+            BLOCKED="$BLOCKED\n  :$PORT is held by the old '$prog' service (pid $pid) — stop it: sudo systemctl disable --now $unit"
             continue
         fi
         NEXT=$((PORT + 1)); while [ -n "$(port_owner "$NEXT")" ]; do NEXT=$((NEXT + 1)); done
