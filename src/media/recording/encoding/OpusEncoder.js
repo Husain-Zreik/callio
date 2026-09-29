@@ -15,7 +15,7 @@ let OpusEncoder = null;
 try {
     const pkg = await import('@discordjs/opus');
     OpusEncoder = pkg.default?.OpusEncoder ?? pkg.OpusEncoder;
-    log.info('Native Opus bindings loaded');
+    log.debug('Native Opus bindings loaded');
 } catch (err) {
     log.warn({ err }, 'Native Opus bindings not available — encoding disabled');
 }

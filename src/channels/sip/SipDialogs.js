@@ -30,7 +30,7 @@ class SipDialogs {
             let command;
             try { command = JSON.parse(message); } catch { return; }
             Promise.resolve(onCommand(command)).catch((err) =>
-                log.error({ err }, `Routed ${command?.action} for ${command?.providerCallId} failed`)
+                log.error({ providerCallId: command?.providerCallId, action: command?.action, err }, 'Routed SIP action failed')
             );
         });
         await this._subscriber.subscribe(workerChannel(this.workerId));

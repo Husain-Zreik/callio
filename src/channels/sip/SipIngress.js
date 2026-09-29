@@ -43,7 +43,7 @@ export async function handleInvite(req, res) {
     try {
         sdpOffer = await sipGateway.rtpengine.carrierOfferToWebrtc({ callId: providerCallId, sdp: req.body });
     } catch (err) {
-        log.error({ err }, `rtpengine refused the offer for ${providerCallId}`);
+        log.error({ providerCallId, err }, 'rtpengine refused the offer');
         return res.send(488);
     }
 
@@ -54,7 +54,7 @@ export async function handleInvite(req, res) {
     req.on('cancel', () => {
         leg.res = null;
         finishLeg(leg, { providerStatus: 'CANCELLED' })
-            .catch((err) => log.error({ err }, `Ending cancelled call ${providerCallId} failed`));
+            .catch((err) => log.error({ providerCallId, err }, 'Ending the cancelled call failed'));
     });
 
     res.send(180);

@@ -29,7 +29,7 @@ export class TerminationEventHandler {
             const label = isSystemFailed ? 'ICE reconnect exhausted'
                 : isCustomerNetworkLoss ? 'Customer network loss'
                     : 'Hang-up';
-            log.info({ callId }, `${label}${userId ? ` from user ${userId}` : ''}`);
+            log.info({ callId, ...(userId ? { agentId: userId } : {}) }, label);
 
             if (isSystemFailed || isCustomerNetworkLoss) {
                 // System-detected failure — FAILED, not TERMINATED, so history

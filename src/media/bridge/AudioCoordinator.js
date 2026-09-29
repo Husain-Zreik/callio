@@ -49,7 +49,7 @@ export class AudioCoordinator {
         // sender.track is later swapped to the real track via replaceTrack(), which
         // would otherwise lose our only handle to stop the RTCAudioSource on teardown.
         sender._placeholderTrack = track;
-        log.debug(`Placeholder added for ${peer.connectionType} (type=${type}), track=${track.id}`);
+        log.debug({ leg: peer.connectionType, type, trackId: track.id }, 'Placeholder track added');
         peer.addPlaceholderSender(sender);
     }
 
@@ -74,7 +74,7 @@ export class AudioCoordinator {
         // Signal QueueAudioCoordinator to stop the queue waiting audio (if running)
         EventBus.emit('call:queue_audio_stop', { callId });
 
-        log.info({ callId }, 'Bridge started — checking recording');
+        log.debug({ callId }, 'Bridge started — checking recording');
 
         const tenantId = frontendData?.context?.tenantId
             ?? customerData?.context?.tenantId
@@ -105,7 +105,7 @@ export class AudioCoordinator {
     handleTrackReceived(callId, connectionType, track, stream) {
         const bridge = this.bridgeManager.getBridge(callId);
         if (!bridge) {
-            log.debug({ callId }, `No bridge, track buffered: ${track.id}`);
+            log.debug({ callId, trackId: track.id }, 'No bridge yet — track buffered');
             return;
         }
 
@@ -116,7 +116,7 @@ export class AudioCoordinator {
             log.debug(`Relaying track: ${connectionType} → ${toType}`);
             bridge.handleIncomingTrack(track, stream, connectionType);
         } else {
-            log.debug(`Bridge not active, track buffered: ${track.id}`);
+            log.debug({ trackId: track.id }, 'Bridge not active — track buffered');
         }
     }
 

@@ -50,13 +50,13 @@ export class CustomerNetworkMonitor {
     start() {
         if (this._timer) return;
         this._timer = setInterval(() => this._poll(), POLL_MS);
-        log.info({ callId: this._callId }, 'Started');
+        log.debug({ callId: this._callId }, 'Started');
     }
 
     stop() {
         clearInterval(this._timer);
         this._timer = null;
-        log.info({ callId: this._callId }, 'Stopped');
+        log.debug({ callId: this._callId }, 'Stopped');
     }
 
     async _poll() {

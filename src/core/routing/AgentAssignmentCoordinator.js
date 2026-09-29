@@ -101,7 +101,7 @@ class AgentAssignmentCoordinator {
         if (String(actorAgentId) !== String(targetAgentId)) {
             const actor = await AgentRepository.findById(actorAgentId);
             if (actor?.role !== AgentRole.SUPERVISOR || String(actor.tenant_id) !== String(tenantId)) {
-                log.warn(`Agent ${actorAgentId} may not set availability for agent ${targetAgentId}`);
+                log.warn({ agentId: actorAgentId, targetAgentId }, 'Agent may not set availability for another agent');
                 return null;
             }
         }
@@ -143,7 +143,7 @@ class AgentAssignmentCoordinator {
             let availability = target.availability;
             if (availability === AgentAvailability.ON_CALL && String(actorAgentId) === String(targetAgentId)) {
                 if (await AgentRepository.setAgentOfflineIfNoActiveCalls(targetAgentId)) {
-                    log.info(`Safety net: released stuck ON_CALL agent ${targetAgentId} to OFFLINE`);
+                    log.info({ agentId: targetAgentId }, 'Safety net: released a stuck ON_CALL agent to OFFLINE');
                     availability = AgentAvailability.OFFLINE;
                 }
             }
@@ -160,7 +160,7 @@ class AgentAssignmentCoordinator {
                 if (!assigned) await this.emitQueueUpdate(tenantId);
             }
         } catch (error) {
-            log.error({ tenantId, err: error }, `Availability sync failed, agent ${targetAgentId}`);
+            log.error({ tenantId, agentId: targetAgentId, err: error }, 'Availability sync failed');
         }
     }
 
@@ -247,7 +247,7 @@ class AgentAssignmentCoordinator {
             const call = await CallRepository.findById(callId);
             if (call) await this.#deliverAssignedCall(call, agent, AssignmentType.QUEUED);
             await this.emitQueueUpdate(tenantId, callRecord.queue_id);
-            log.info({ callId }, `Transferred call assigned to agent ${agent.id}`);
+            log.info({ callId, toAgentId: agent.id }, 'Transferred call assigned to an agent');
             return true;
         }
 
@@ -317,7 +317,7 @@ class AgentAssignmentCoordinator {
         EventBus.emit('call:overflowed', {
             callId: call.id, tenantId: call.tenant_id, fromQueueId: call.queue_id, toQueueId: toQueue.id,
         });
-        log.info({ callId: call.id }, `Call overflowed from queue ${call.queue_id} to ${toQueue.id}`);
+        log.info({ callId: call.id, queueId: call.queue_id, toQueueId: toQueue.id }, 'Call overflowed to another queue');
 
         await this.emitQueueUpdate(call.tenant_id, call.queue_id);
         await this.routeWaitingCall({ ...call, queue_id: toQueue.id, agent_id: null });

@@ -154,7 +154,7 @@ export class MixingRelay {
     _maybeLog() {
         const d = this._diag;
         if (d.frames % LOG_EVERY !== 0) return;
-        log.debug(`src=${this._sourceTrackId} frames=${d.frames} mix=${d.mixFrames} srcPeak=${d.srcPeak} supPeak=${d.supPeak} outPeak=${d.outPeak} srcRate=${d.srcRate} supLen=${d.supLen}`);
+        log.debug({ relay: this._label, trackId: this._sourceTrackId, ...d }, 'Mixing relay stats');
         d.srcPeak = 0; d.supPeak = 0; d.outPeak = 0;
     }
 }

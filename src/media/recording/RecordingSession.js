@@ -103,7 +103,7 @@ export class RecordingSession {
             this.isRecording = true;
             this.startedAt = new Date();
 
-            log.info({ callId: this.callId }, `Started recording (DB ID: ${this.recordingId})`);
+            log.info({ callId: this.callId, recordingId: this.recordingId }, 'Recording started');
             return true;
 
         } catch (error) {

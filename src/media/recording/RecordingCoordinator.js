@@ -93,7 +93,7 @@ class RecordingCoordinator {
     async _startFreshRecording(callId, tenantId, getTracks, isBridgeActive) {
         const recordingEnabled = await this._isRecordingEnabled(tenantId, callId);
         if (!recordingEnabled) {
-            log.info({ callId }, 'Recording disabled');
+            log.debug({ callId }, 'Recording disabled');
             await this._recordFailedAttempt(callId, tenantId, 'Recording disabled in business number settings');
             return;
         }
@@ -149,7 +149,7 @@ class RecordingCoordinator {
     async _replaceAgentTrack(callId, getAgentTrack) {
         const agentTrack = getAgentTrack();
         if (agentTrack) {
-            log.debug({ callId }, `Replacing agent track: ${agentTrack.id}`);
+            log.debug({ callId, trackId: agentTrack.id }, 'Replacing the agent track');
             recordingManager.replaceAgentTrack(callId, agentTrack);
         } else {
             log.warn({ callId }, 'No agent track available to replace');

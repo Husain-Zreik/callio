@@ -74,7 +74,7 @@ class ChannelIngress {
     // A call row may only be touched by events for its own line.
     _belongsTo(call, channel) {
         if (String(call.channel_id) === String(channel.id)) return true;
-        log.warn({ callId: call.id }, `Call is on channel ${call.channel_id}, not ${channel.id} — event ignored`);
+        log.warn({ callId: call.id, channelId: channel.id, callChannelId: call.channel_id }, 'Event for a call on another channel — ignored');
         return false;
     }
 
@@ -111,7 +111,7 @@ class ChannelIngress {
     async inboundCall(channel, event) {
         const existing = await this._findCall(channel, event.providerCallId);
         if (existing) {
-            log.warn(`Call ${event.providerCallId} already exists, skipping`);
+            log.warn({ providerCallId: event.providerCallId }, 'Call already exists — skipping');
             return;
         }
         await this._withOwnership(channel, event.providerCallId, () => this._handleIncomingCall(channel, event));
@@ -152,10 +152,10 @@ class ChannelIngress {
             // CANCELLED for the audit trail and stop — no ring, no media.
             const activeCall = await CallRepository.findActiveInboundByCustomer(tenantId, customer.address);
             if (activeCall) {
-                log.warn({ tenantId }, `Dedup: customer ${customer.address} already has active call ${activeCall.id} (providerCallId=${activeCall.provider_call_id}) — recording ${providerCallId} as CANCELLED`);
+                log.warn({ tenantId, providerCallId, customer: customer.address, activeCallId: activeCall.id }, 'Customer already has an active call — recording this one as CANCELLED');
                 const dupCallId = await CallRepository.create({ ...baseRow, metadata })
                     .catch((err) => {
-                        log.error({ err }, `Failed to record duplicate call ${providerCallId}`);
+                        log.error({ providerCallId, err }, 'Recording the duplicate call failed');
                         return null;
                     });
                 if (dupCallId) {
@@ -168,7 +168,7 @@ class ChannelIngress {
                         callDuration: 0,
                         ringingDuration: 0,
                     }).catch((err) =>
-                        log.error({ err }, `Failed to finalize duplicate call ${dupCallId}`)
+                        log.error({ callId: dupCallId, err }, 'Finalizing the duplicate call failed')
                     );
                     callLifecycleLogger.logTerminated(dupCallId, tenantId, null, {
                         reason: TerminationReason.CANCELLED,
@@ -248,7 +248,7 @@ class ChannelIngress {
                     source: 'provider_end_before_offer',
                     log: { out_of_order_terminate: true, race: 'offer_create_after_terminate_tombstone' },
                 });
-                log.info({ callId }, `Race detected for ${providerCallId}: finalized call as CANCELLED.`);
+                log.info({ callId, providerCallId }, 'Ended by the provider during setup — finalized as CANCELLED');
                 return;
             }
 
@@ -273,7 +273,7 @@ class ChannelIngress {
 
             // ── IVR: answer the customer without waiting for an agent ──
             if (ivrFlowId) {
-                log.info({ callId }, `IVR call — auto-accepting for flow ${ivrFlowId}`);
+                log.info({ callId, ivrFlowId }, 'IVR call — auto-accepting');
                 const ivrAnsweredAt = new Date();
                 const flowHeader = await IvrRepository.findFlowHeader(ivrFlowId, tenantId).catch(() => null);
                 try {
@@ -342,7 +342,7 @@ class ChannelIngress {
 
             await agentAssignmentCoordinator.emitQueueUpdate(tenantId, queue?.id ?? null);
         } catch (error) {
-            log.error({ err: error }, `Failed to handle call ${providerCallId}`);
+            log.error({ providerCallId, err: error }, 'Handling the inbound call failed');
         }
     }
 
@@ -421,7 +421,7 @@ class ChannelIngress {
             log: { out_of_order_terminate: true },
         });
 
-        log.info({ callId }, `Out-of-order end consumed for ${baseRow.provider_call_id}; created missed call (no agent assigned, no ring).`);
+        log.info({ callId, providerCallId: baseRow.provider_call_id }, 'End arrived before the offer — recorded as a missed call');
     }
 
     // ── Outbound call answered ────────────────────────────────────────────────
@@ -429,14 +429,14 @@ class ChannelIngress {
     async outboundAnswered(channel, { providerCallId, sdpAnswer }) {
         const existingCall = await this._findCall(channel, providerCallId);
         if (!existingCall) {
-            log.warn(`No outgoing call found for providerCallId=${providerCallId}`);
+            log.warn({ providerCallId }, 'No outgoing call found');
             return;
         }
         if (!this._belongsTo(existingCall, channel)) return;
         // The provider's answer may arrive after its RINGING status (delivery
         // order isn't guaranteed), so RINGING still takes the answer.
         if (existingCall.status !== CallStatus.INITIATED && existingCall.status !== CallStatus.RINGING) {
-            log.warn(`Outgoing call ${existingCall.id} is ${existingCall.status}, not awaiting an answer — skipping`);
+            log.warn({ callId: existingCall.id, status: existingCall.status }, 'Outgoing call is not awaiting an answer — skipping');
             return;
         }
         // The worker holding the agent's media applies the answer.
@@ -452,12 +452,12 @@ class ChannelIngress {
     // ── Provider status updates ───────────────────────────────────────────────
 
     async statusChanged(channel, { providerCallId, status, at }) {
-        log.info(`providerCallId=${providerCallId}, status=${status}`);
+        log.info({ providerCallId, status }, 'Provider status');
 
         try {
             const call = await this._findCall(channel, providerCallId);
             if (!call) {
-                log.warn(`Call not found for providerCallId=${providerCallId}`);
+                log.warn({ providerCallId, status }, 'Status for an unknown call');
                 return;
             }
             if (!this._belongsTo(call, channel)) return;
@@ -599,7 +599,7 @@ class ChannelIngress {
 
             log.info({ callId }, `Updated call to ${status}`);
         } catch (error) {
-            log.error({ err: error }, `Error processing ${status} for providerCallId=${providerCallId}`);
+            log.error({ providerCallId, status, err: error }, 'Processing the provider status failed');
         }
     }
 
@@ -641,7 +641,7 @@ class ChannelIngress {
                         recordedAt: Date.now(),
                     });
                     await redisBaseService.setnx(tombstoneKey(channel, providerCallId), tombstonePayload, TERMINATE_TOMBSTONE_TTL_SECONDS);
-                    log.warn(`Out-of-order: no row for ${providerCallId} after retry; recorded tombstone (TTL ${TERMINATE_TOMBSTONE_TTL_SECONDS}s) for the late offer`);
+                    log.warn({ providerCallId, ttlSeconds: TERMINATE_TOMBSTONE_TTL_SECONDS }, 'End for an unknown call — tombstone recorded for a late offer');
                     return;
                 }
             }
@@ -797,7 +797,7 @@ class ChannelIngress {
                 }
             }
         } catch (error) {
-            log.error({ err: error }, `Error for call ${providerCallId}`);
+            log.error({ providerCallId, err: error }, 'Handling the provider end failed');
         }
     }
 }

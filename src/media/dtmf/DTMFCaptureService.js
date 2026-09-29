@@ -66,7 +66,7 @@ class DTMFCaptureService {
             // pausedSincePriorResume starts true: no digit state exists yet, so the
             // first resumeCapture() may as well take the (harmless) full-reset path.
             this.activeSinks.set(callId, { sink, pausedSincePriorResume: true });
-            log.debug({ callId }, `Started, track=${customerTrack.id}`);
+            log.debug({ callId, trackId: customerTrack.id }, 'Started');
             return true;
 
         } catch (error) {

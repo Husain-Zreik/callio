@@ -25,7 +25,7 @@ class RedisCleanupService {
     async init() {
         await redisBaseService.init();
         await callOwnershipService.init();
-        log.debug(`Worker ${this.workerId} initialized`);
+        log.debug('Initialized');
     }
 
     // Acquire distributed lock for cleanup
@@ -69,7 +69,7 @@ class RedisCleanupService {
         }, 5 * 60 * 1000);
 
         this.isRunning = true;
-        log.info(`Started on worker ${this.workerId} (runs every 5 minutes)`);
+        log.info('Started (runs every 5 minutes)');
 
         // Run immediately on start
         this.cleanupOrphanedCalls();
@@ -126,7 +126,7 @@ class RedisCleanupService {
             }
 
             if (cleaned > 0) {
-                log.debug(`Worker ${this.workerId} cleanup complete - Cleaned: ${cleaned}, Kept: ${kept}`);
+                log.debug({ cleaned, kept }, 'Cleanup complete');
             }
 
         } catch (error) {
@@ -145,7 +145,7 @@ class RedisCleanupService {
         try {
             await redisBaseService.del(callOwnershipService.getKey(callId));
 
-            log.info({ callId }, 'Cleaned up all data');
+            log.debug({ callId }, 'Cleaned up all data');
             return true;
         } catch (error) {
             log.error({ callId, err: error }, 'Error cleaning up call');

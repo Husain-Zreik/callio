@@ -46,11 +46,11 @@ class WhatsAppWebhookTranslator {
         // calls on another channel, so a payload can't touch other lines' calls.
         const channel = await ChannelRepository.findActiveByProviderAccount(Channel.WHATSAPP, metadata?.phone_number_id);
         if (!channel) {
-            log.warn(`No active WhatsApp channel for phone_number_id=${metadata?.phone_number_id} — payload ignored`);
+            log.warn({ phoneNumberId: metadata?.phone_number_id }, 'No active WhatsApp channel for this number — payload ignored');
             return { accepted: false, reason: 'unknown_channel' };
         }
         if (consumerId != null && String(await TenantRepository.getConsumerId(channel.tenant_id)) !== String(consumerId)) {
-            log.warn(`Channel ${channel.id} does not belong to consumer ${consumerId} — payload rejected`);
+            log.warn({ channelId: channel.id, consumerId }, 'Channel does not belong to the consumer — payload rejected');
             return { accepted: false, reason: 'channel_not_owned' };
         }
 
@@ -105,7 +105,7 @@ class WhatsAppWebhookTranslator {
         const { direction, session } = call;
         const sdpType = session?.sdp_type?.toLowerCase();
         if (!session?.sdp || !['offer', 'answer'].includes(sdpType)) {
-            log.error(`Invalid session payload for call ${providerCallId}`);
+            log.error({ providerCallId }, 'Invalid session payload');
             return;
         }
 

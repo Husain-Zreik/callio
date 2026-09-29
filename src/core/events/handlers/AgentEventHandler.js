@@ -37,7 +37,7 @@ export class AgentEventHandler {
     async handleAgentJoined(data) {
         const { callId, userId, tenantId, sdpAnswer, socketId, deviceId } = data;
 
-        log.info({ agentId: userId, callId, socketId }, 'Agent joined call');
+        log.debug({ agentId: userId, callId, socketId }, 'Agent joined call');
 
         // Guard: only the worker owning the in-memory peer connection should handle this.
         const ownsConnection = peerRegistry.getConnectionData(callId, ConnectionType.AGENT).valid;
@@ -340,7 +340,7 @@ export class AgentEventHandler {
                 transport: 'websocket',
             });
 
-            log.info({ callId }, `RINGING_AGENT_RECONNECT: refreshed AGENT, delivering to socket ${socketId}`);
+            log.info({ callId, socketId }, 'Ringing agent reconnected — offer re-delivered');
         } catch (err) {
             log.error({ callId, err }, 'RINGING_AGENT_RECONNECT failed');
         }
@@ -411,13 +411,13 @@ export class AgentEventHandler {
             // customer and for anyone else watching, e.g. a manager dashboard;
             // only this one connection's binding changed).
             if (previousSocketStillLive) {
-                log.info({ callId }, `Call taken over from still-live socket ${previousConnectionInfo.socketId} — notifying it`);
+                log.info({ callId, previousSocketId: previousConnectionInfo.socketId }, 'Call taken over from a still-live socket — notifying it');
                 roomManager.emitToSocket(previousConnectionInfo.socketId, 'call:connection_superseded', {
                     callId,
                     reason: 'switched_device',
                 });
             } else {
-                log.info({ callId }, `Call reconnect — no supersede notification needed (previousSocketId=${previousConnectionInfo?.socketId ?? 'none'}, sameSocket=${!isDifferentSocket})`);
+                log.debug({ callId, previousSocketId: previousConnectionInfo?.socketId ?? null, sameSocket: !isDifferentSocket }, 'Reconnect — no supersede notification needed');
             }
 
             const sdpAnswer = await sdpCoordinator.createSDPAnswer(callId, sdpOffer, ConnectionType.AGENT);

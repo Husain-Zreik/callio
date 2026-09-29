@@ -172,7 +172,7 @@ class DTMFWorkerBridge {
                 worker.on('error', (err) => { if (!this._terminating) this._onWorkerDown(`Worker error: ${err.message}`); });
                 worker.on('exit', (code) => { if (code !== 0 && !this._terminating) this._onWorkerDown(`Worker exited with code ${code}`); });
 
-                log.info(`Worker ready (threadId=${worker.threadId})`);
+                log.info({ threadId: worker.threadId }, 'Worker ready');
                 resolve();
             });
         });

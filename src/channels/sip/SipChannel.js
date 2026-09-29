@@ -36,7 +36,7 @@ async function acceptLeg(leg, sdpAnswer) {
     leg.dialog = await srf.createUAS(req, res, { localSdp: carrierSdp });
     leg.answeredAt = new Date();
     leg.dialog.on('destroy', () => finishLeg(leg, { providerStatus: 'COMPLETED' })
-        .catch((err) => log.error({ err }, `Ending call ${leg.providerCallId} after BYE failed`)));
+        .catch((err) => log.error({ providerCallId: leg.providerCallId, err }, 'Ending the call after BYE failed')));
 }
 
 // Ends a leg from our side, whatever state it is in.
@@ -62,7 +62,7 @@ async function runOnOwner(call, action, local) {
     const leg = sipDialogs.get(call.provider_call_id);
     if (leg) return local(leg);
     if (!call.provider_call_id || !await sipDialogs.sendToOwner(call.provider_call_id, action)) {
-        log.warn(`No worker holds SIP call ${call.provider_call_id} — ${action} skipped`);
+        log.warn({ callId: call.id, providerCallId: call.provider_call_id, action }, 'No worker holds the SIP leg — action skipped');
     }
 }
 
@@ -70,7 +70,7 @@ async function runOnOwner(call, action, local) {
 async function onCommand({ action, providerCallId }) {
     const leg = sipDialogs.get(providerCallId);
     if (!leg) return;
-    log.info(`Routed ${action} for ${providerCallId}`);
+    log.debug({ providerCallId, action }, 'Routed action to the owning worker');
     await endLeg(leg);
 }
 
@@ -105,14 +105,14 @@ async function initiate(call, sdpOffer) {
             cbProvisional: (provisional) => {
                 if (!leg || ![180, 183].includes(provisional.status)) return;
                 channelIngress.statusChanged(channel, { providerCallId: leg.providerCallId, status: 'RINGING', at: new Date() })
-                    .catch((err) => log.error({ err }, `RINGING for ${leg.providerCallId} failed`));
+                    .catch((err) => log.error({ providerCallId: leg.providerCallId, err }, 'Reporting RINGING failed'));
             },
         }).then(async (dialog) => {
             leg.uacRequest = null;
             leg.dialog = dialog;
             leg.answeredAt = new Date();
             dialog.on('destroy', () => finishLeg(leg, { providerStatus: 'COMPLETED' })
-                .catch((err) => log.error({ err }, `Ending call ${leg.providerCallId} after BYE failed`)));
+                .catch((err) => log.error({ providerCallId: leg.providerCallId, err }, 'Ending the call after BYE failed')));
             const sdpAnswer = await rtpengine.carrierAnswerToWebrtc({ callId: rtpKey, sdp: dialog.remote.sdp });
             await channelIngress.outboundAnswered(channel, { providerCallId: leg.providerCallId, sdpAnswer });
             await channelIngress.statusChanged(channel, { providerCallId: leg.providerCallId, status: 'ACCEPTED', at: leg.answeredAt });
@@ -121,7 +121,8 @@ async function initiate(call, sdpOffer) {
             leg.uacRequest = null;
             if (leg.cancelled || leg.finished) return;   // we ended it ourselves
             const status = Number(err.status) || null;
-            log.info({ err }, `${leg.providerCallId} not answered`);
+            // A SIP final response is an outcome, not a fault: log the status; keep the stack for real errors.
+            log.info({ providerCallId: leg.providerCallId, ...(status ? { sipStatus: status } : { err }) }, 'Outbound SIP call not answered');
             if (status && REJECTED_STATUSES.has(status)) {
                 await sipGateway.rtpengine?.delete(rtpKey);
                 await sipDialogs.remove(leg.providerCallId);
@@ -181,7 +182,7 @@ export const sipChannel = Object.freeze({
         }
         await sipDialogs.start(onCommand);
         sipGateway.start((req, res) => handleInvite(req, res).catch((err) => {
-            log.error({ err }, `INVITE ${req.get('Call-ID')} failed`);
+            log.error({ providerCallId: req.get('Call-ID'), err }, 'Handling INVITE failed');
             try { res.send(500); } catch { /* already answered */ }
         }));
     },

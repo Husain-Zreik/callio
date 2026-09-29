@@ -69,7 +69,7 @@ class WorkerStatsService {
         this._timer = setInterval(() => this._write('periodic'), INTERVAL_MS);
         if (this._timer.unref) this._timer.unref();
 
-        log.info(`Writing to ${LOG_DIR}/worker-${this._workerId}-*.log (every ${INTERVAL_MS / 1000}s, kept ${RETENTION_DAYS} days)`);
+        log.info({ dir: LOG_DIR, intervalSeconds: INTERVAL_MS / 1000, retentionDays: RETENTION_DAYS }, 'Writing worker stats');
     }
 
     stop() {

@@ -166,7 +166,7 @@ export class InitiationEventHandler {
             agentConn.context.setProviderCallId(providerCallId);
             await CallRepository.updateProviderCallId(callId, providerCallId);
 
-            log.info({ callId }, `Customer dialed (providerCallId=${providerCallId})`);
+            log.info({ callId, providerCallId }, 'Customer dialed');
         } catch (error) {
             log.error({ callId, err: error }, 'Dialing the customer failed');
             const tenantId = agentConn.context.tenantId;

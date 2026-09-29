@@ -53,7 +53,7 @@ class RedisPubSubService {
             });
 
             this.isInitialized = true;
-            log.debug(`Worker ${this.workerId} initialized`);
+            log.debug('Initialized');
         } catch (error) {
             log.error({ err: error }, 'Initialization failed');
             throw error;
@@ -99,7 +99,7 @@ class RedisPubSubService {
         const handler = this.subscriptions.get(callId);
         if (!handler) return; // No handler registered on this worker
 
-        log.debug({ callId }, `Worker ${this.workerId} processing ${eventType}`);
+        log.debug({ callId, eventType }, 'Processing call event');
 
         // handler is async — await the promise and catch rejections so they are
         // always logged and never become silent unhandled promise rejections.
@@ -128,7 +128,7 @@ class RedisPubSubService {
             });
 
             const subscriberCount = await this.publisherClient.publish(channel, message);
-            log.debug({ callId }, `Worker ${this.workerId} published ${eventType} (${subscriberCount} subscriber(s))`);
+            log.debug({ callId, eventType, subscribers: subscriberCount }, 'Published call event');
 
             return subscriberCount;
         } catch (error) {
@@ -145,7 +145,7 @@ class RedisPubSubService {
         }
 
         if (this.subscriptions.has(callId)) {
-            log.debug({ callId }, `Worker ${this.workerId} already subscribed`);
+            log.debug({ callId }, 'Already subscribed');
             return true;
         }
 
@@ -154,7 +154,7 @@ class RedisPubSubService {
             await this.subscriberClient.subscribe(channel);
             this.subscriptions.set(callId, handler);
 
-            log.debug({ callId }, `Worker ${this.workerId} subscribed`);
+            log.debug({ callId }, 'Subscribed to call events');
             return true;
 
         } catch (error) {
@@ -174,7 +174,7 @@ class RedisPubSubService {
             await this.subscriberClient.unsubscribe(channel);
             this.subscriptions.delete(callId);
 
-            log.debug({ callId }, `Worker ${this.workerId} unsubscribed from call`);
+            log.debug({ callId }, 'Unsubscribed from call events');
             return true;
 
         } catch (error) {
@@ -193,7 +193,7 @@ class RedisPubSubService {
             await this.unsubscribeFromCall(callId);
         }
 
-        log.info(`Worker ${this.workerId} unsubscribed from all calls`);
+        log.info('Unsubscribed from all calls');
     }
 
     // Get active subscriptions
@@ -250,7 +250,7 @@ class RedisPubSubService {
             this.subscriptions.clear();
             this.isInitialized = false;
 
-            log.info(`Worker ${this.workerId} closed`);
+            log.info('Closed');
         } catch (error) {
             log.error({ err: error }, 'Error during close');
         }

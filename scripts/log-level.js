@@ -14,9 +14,8 @@
 // Levels: trace debug info warn error fatal silent.
 import Redis from 'ioredis';
 import { config } from '../config/envConfig.js';
-import { LOG_LEVELS_CHANNEL, LOG_LEVELS_KEY } from '../src/infra/logging/logLevelKeys.js';
+import { LOG_LEVELS_CHANNEL, LOG_LEVELS_KEY, SETTABLE_LEVELS as LEVELS } from '../src/infra/logging/policy.js';
 
-const LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'];
 
 function parseDuration(v) {
     if (v === '0') return 0;

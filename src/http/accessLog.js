@@ -4,8 +4,9 @@
 //   2xx/3xx info · 4xx warn · 5xx error · /health and unmatched routes debug
 // Query strings are left out (webhook verification puts a token there).
 import { logger, runWithLogContext } from '../infra/logging/logger.js';
+import { COMPONENTS } from '../infra/logging/policy.js';
 
-const log = logger('http.access');
+const log = logger(COMPONENTS.access);
 const QUIET = new Set(['/health']);
 
 export function registerAccessLog(fastify) {

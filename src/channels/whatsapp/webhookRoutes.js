@@ -46,7 +46,7 @@ async function ackAndProcess(reply, values, options) {
     if (isShuttingDown) return reply.code(503).send();
     reply.code(200).send({ received: values.length });
     for (const value of values) {
-        log.info(`phone_number_id=${value?.metadata?.phone_number_id ?? 'UNKNOWN'} calls=${value?.calls?.length ?? 0} statuses=${value?.statuses?.length ?? 0}`);
+        log.debug({ phoneNumberId: value?.metadata?.phone_number_id ?? null, calls: value?.calls?.length ?? 0, statuses: value?.statuses?.length ?? 0 }, 'Webhook payload');
         await whatsappWebhookTranslator.process(value, options).catch((err) =>
             log.error({ err }, 'Processing failed')
         );

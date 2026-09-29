@@ -130,7 +130,7 @@ class CallAgentAssignmentService {
         if (!orderedCandidates.length) return null;
         const lockKey = this.#lockKey(queueId);
         const token = await this.acquireLock(lockKey);
-        if (!token) log.warn(`Could not acquire assignment lock for queue ${queueId} — claiming without it`);
+        if (!token) log.warn({ queueId }, 'Could not acquire the assignment lock — claiming without it');
         try {
             for (const candidate of orderedCandidates) {
                 if (await claimFn(candidate.id)) {
@@ -173,7 +173,7 @@ class CallAgentAssignmentService {
 
         // Isolated: a failed count must not break the snapshot the queue UI relies on.
         const waitingCount = await CallRepository.countUnassignedCalls(queueId).catch((err) => {
-            log.error({ err }, `countUnassignedCalls failed for queue ${queueId}`);
+            log.error({ queueId, err }, 'Counting unassigned calls failed');
             return 0;
         });
 

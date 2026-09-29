@@ -36,7 +36,7 @@ async function logDelivery(callId, tenantId, agentId, extra) {
 export function registerCallDeliveryListeners() {
     EventBus.on('call:incoming', async (payload) => {
         const { callId, tenantId, agentId, offeredAgentIds, assignmentType } = payload;
-        log.info({ callId }, `Incoming call (${assignmentType}) → agent=${agentId ?? '-'} offered=${(offeredAgentIds ?? []).join(',') || '-'}`);
+        log.info({ callId, assignmentType, ...(agentId ? { agentId } : {}), offeredAgentIds: offeredAgentIds ?? [] }, 'Incoming call offered');
 
         // The supervisor view never carries the agent-leg SDP offer.
         const supervisorView = { ...payload, sdpOffer: undefined };
@@ -58,7 +58,7 @@ export function registerCallDeliveryListeners() {
                 log.error({ callId, err: guardErr }, 'Double-assignment guard failed — failing open');
             }
             if (priorCallId !== null) {
-                log.warn({ callId, agentId }, `Double-assignment race: suppressing call — call ${priorCallId} is already ringing`);
+                log.warn({ callId, agentId, ringingCallId: priorCallId }, 'Agent already has a ringing call — suppressing this offer');
                 await logDelivery(callId, tenantId, agentId, {
                     delivered: false,
                     suppression_reason: 'prior_ringing_call',

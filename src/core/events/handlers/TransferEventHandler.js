@@ -121,7 +121,7 @@ export class TransferEventHandler {
             });
             await agentAssignmentCoordinator.emitQueueUpdate(tenantId);
 
-            log.info({ callId }, `Call transferred to agent ${resolved.newAgentId}`);
+            log.info({ callId, toAgentId: resolved.newAgentId }, 'Call transferred to an agent');
         } catch (error) {
             log.error({ callId, err: error }, 'Failed to transfer call');
             throw error;

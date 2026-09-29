@@ -110,7 +110,7 @@ class EncodingWorkerBridge {
         }
         this._sessions.set(callId, { onChunk, onError, workerIdx });
         this._workers[workerIdx].worker.postMessage({ type: 'start', callId });
-        log.info({ callId }, `Session started on worker[${workerIdx}] (active=${this._sessions.size})`);
+        log.info({ callId, encoder: workerIdx, active: this._sessions.size }, 'Recording session started');
         return true;
     }
 
@@ -279,7 +279,7 @@ class EncodingWorkerBridge {
                 worker.on('error', (err) => { if (!this._terminating) this._onWorkerDown(idx, `Worker error: ${err.message}`); });
                 worker.on('exit', (code) => { if (code !== 0 && !this._terminating) this._onWorkerDown(idx, `Worker exited with code ${code}`); });
 
-                log.info(`Worker[${idx}] ready (threadId=${worker.threadId}, opusAvailable=${msg.opusAvailable})`);
+                log.info({ encoder: idx, threadId: worker.threadId, opusAvailable: msg.opusAvailable }, 'Encoder thread ready');
                 resolve();
             });
         });
@@ -342,7 +342,7 @@ class EncodingWorkerBridge {
 
             case 'ready': {
                 // Should never arrive after init — indicates a worker-side bug.
-                log.warn(`Unexpected second "ready" from worker[${workerIdx}] — ignoring`);
+                log.warn({ encoder: workerIdx }, 'Unexpected second "ready" from an encoder thread — ignoring');
                 break;
             }
 

@@ -107,7 +107,7 @@ class QueueAudioCoordinator {
                 if (!audioInfo) {
                     // No configured audio — interim placeholder tone is already playing.
                     // Fall through to register the session so cleanup handlers fire correctly.
-                    log.info({ tenantId }, `No hold audio configured for queue ${queueId ?? 'none'} — using built-in tone`);
+                    log.info({ tenantId, queueId }, 'No hold audio configured — using the built-in tone');
                 } else {
                     try {
                         filePath = await resolveStoragePath(audioInfo);

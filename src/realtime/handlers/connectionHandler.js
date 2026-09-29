@@ -44,7 +44,7 @@ export async function handleConnection(socket) {
     // note on connectionPurpose.
     const isSessionConnection = (socket.connectionPurpose || 'session') === 'session';
 
-    log.info({ agentId: userId, tenantId }, `Agent connected (${userName}, socket=${socket.id}, purpose=${socket.connectionPurpose || 'session'})`);
+    log.info({ agentId: userId, tenantId, agentName: userName, socketId: socket.id, purpose: socket.connectionPurpose || 'session' }, 'Agent connected');
 
     const tracksPresence = userId !== "Unknown" && tenantId !== "Unknown" && isSessionConnection;
 
@@ -85,7 +85,7 @@ export async function handleConnection(socket) {
     }
 
     socket.on("disconnect", async (reason) => {
-        log.info({ agentId: userId }, `Agent disconnected (${userName}, socket=${socket.id}, reason=${reason}, purpose=${socket.connectionPurpose || 'session'})`);
+        log.info({ agentId: userId, agentName: userName, socketId: socket.id, reason, purpose: socket.connectionPurpose || 'session' }, 'Agent disconnected');
         if (tracksPresence) {
             await presenceService.trackDisconnection(userId, socket.id);
 
@@ -101,7 +101,7 @@ export async function handleConnection(socket) {
     });
 
     socket.on("error", (error) => {
-        log.error({ agentId: userId, err: error }, `Socket error (${userName}, socket=${socket.id})`);
+        log.error({ agentId: userId, socketId: socket.id, err: error }, 'Socket error');
     });
 }
 
@@ -145,7 +145,7 @@ async function _handlePendingCallRedelivery(socket, userId, tenantId) {
         }
 
         if (alreadyAccepted) {
-            log.debug({ agentId: userId }, `Agent connected (socket=${socket.id}) but call ${pendingCall.id} was already accepted — lifecycle logged, no re-delivery needed`);
+            log.debug({ agentId: userId, socketId: socket.id, pendingCallId: pendingCall.id }, 'Pending call already accepted — no re-delivery needed');
         } else if (isFirstSocket) {
             // Route the AGENT reset through Redis to the SUBSCRIBED WORKER —
             // the same worker that owns the CUSTOMER peer. Creating the AGENT
@@ -160,9 +160,9 @@ async function _handlePendingCallRedelivery(socket, userId, tenantId) {
                 { callId: pendingCall.id, socketId: socket.id, userId, tenantId },
             );
 
-            log.info({ agentId: userId }, `Re-delivered pending call ${pendingCall.id} on late connect (socket=${socket.id})`);
+            log.info({ agentId: userId, socketId: socket.id, pendingCallId: pendingCall.id }, 'Re-delivered a pending call on late connect');
         } else {
-            log.debug({ agentId: userId }, `Agent reconnected (socket=${socket.id}) but already had ${previousSockets - 1} live socket(s) — lifecycle logged, re-delivery skipped`);
+            log.debug({ agentId: userId, socketId: socket.id, otherSockets: previousSockets - 1 }, 'Agent already had live sockets — re-delivery skipped');
         }
     } catch (err) {
         log.error({ agentId: userId, err }, 'Pending call re-delivery check failed');

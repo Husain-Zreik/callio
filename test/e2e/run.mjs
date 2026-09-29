@@ -98,8 +98,15 @@ function suiteFiles() {
     return only.length ? all.filter((f) => only.some((o) => f.includes(o))) : all;
 }
 
-// Code in src/ logs through src/infra/logging/logger.js, never console.* (CLAUDE.md, Logging).
-function checkNoConsole() {
+// The logging rules (CLAUDE.md, Logging), checked on every run: code in src/
+// logs through src/infra/logging/logger.js, never console.*, and messages
+// carry no "[Prefix]" or emoji (the component names the source).
+const LOG_RULES = [
+    [/\bconsole\s*(\.|\[)/, 'console.* — use the logger'],
+    [/\blog\.(trace|debug|info|warn|error|fatal)\((\{[^}]*\},\s*)?['`]\[/, 'message starts with [Prefix] — the component names the source'],
+    [/\blog\.(trace|debug|info|warn|error|fatal)\(.*\p{Extended_Pictographic}/u, 'emoji in a log message'],
+];
+function checkLogging() {
     const offenders = [];
     const walk = (dir) => {
         for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -107,17 +114,31 @@ function checkNoConsole() {
             if (entry.isDirectory()) { if (full !== join(root, 'src', 'infra', 'logging')) walk(full); continue; }
             if (!/\.m?js$/.test(entry.name)) continue;
             readFileSync(full, 'utf8').split('\n').forEach((line, i) => {
-                if (/\bconsole\s*(\.|\[)/.test(line.replace(/\/\/.*$/, ''))) offenders.push(`${full.slice(root.length + 1)}:${i + 1}: ${line.trim()}`);
+                const code = line.replace(/^\s*\/\/.*$/, '');
+                for (const [rule, why] of LOG_RULES) {
+                    if (rule.test(code)) offenders.push(`${full.slice(root.length + 1)}:${i + 1}: ${why}\n      ${line.trim()}`);
+                }
             });
         }
     };
     walk(join(root, 'src'));
     if (offenders.length) {
-        console.log(`[e2e] console.* in src/ — use the logger instead:\n  ${offenders.join('\n  ')}`);
+        console.log(`[e2e] logging rules broken in src/:\n  ${offenders.join('\n  ')}`);
         process.exit(1);
     }
 }
-checkNoConsole();
+checkLogging();
+
+// The logger's guarantees (context, redaction, levels, throttle) — loggingCheck.mjs.
+{
+    const r = spawnSync(process.execPath, [join(here, 'loggingCheck.mjs')], { cwd: root, encoding: 'utf8' });
+    let results;
+    try { results = JSON.parse(r.stdout); } catch { console.log(`[e2e] logging check crashed:\n${r.stdout}\n${r.stderr}`); process.exit(1); }
+    const failedChecks = results.filter((c) => !c.ok);
+    console.log(`[e2e] logging: ${results.length - failedChecks.length}/${results.length} checks passed`);
+    for (const c of failedChecks) console.log(`FAIL  logging: ${c.name}${c.detail ? ` — ${c.detail}` : ''}`);
+    if (failedChecks.length) process.exit(1);
+}
 
 let failed = 0;
 let callio = null;

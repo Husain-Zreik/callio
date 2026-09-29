@@ -41,7 +41,7 @@ class PeerRegistry {
                 audioCoordinator.handleSupervisorTrack(callId, track);
                 return;
             }
-            log.debug({ callId }, `Track received: type=${connectionType}, trackId=${track.id}`);
+            log.debug({ callId, leg: connectionType, trackId: track.id }, 'Track received');
             audioCoordinator.handleTrackReceived(callId, connectionType, track, stream);
 
             // If a CUSTOMER audio track arrives after checkAndStartBridging already ran
@@ -102,7 +102,7 @@ class PeerRegistry {
     // ── Peer connection creation ───────────────────────────────────────────────
 
     createPeerConnection(callId, connectionType) {
-        log.info({ callId }, `Creating ${connectionType} peer connection`);
+        log.debug({ callId }, `Creating ${connectionType} peer connection`);
         return new RTCPeerConnection(PeerConfig.getDefaultConfig());
     }
 
@@ -208,7 +208,7 @@ class PeerRegistry {
                 queueId: callRecord?.queue_id ?? null,
             };
 
-            log.info({ callId }, `IVR mode — starting IVR session, menu ${ivrFlowId}`);
+            log.info({ callId, ivrFlowId }, 'IVR mode — starting the IVR session');
             await ivrCoordinator.startSession(callId, ivrFlowId, customerPc, customerTrack, callMeta, customerPeer);
             return;
         }
@@ -218,7 +218,7 @@ class PeerRegistry {
         const customerResult = this.getConnectionData(callId, ConnectionType.CUSTOMER, true);
 
         if (!frontendResult.valid || !customerResult.valid) {
-            log.info({ callId }, `Bridge not ready — AGENT=${frontendResult.valid}, CUSTOMER=${customerResult.valid}`);
+            log.debug({ callId }, `Bridge not ready — AGENT=${frontendResult.valid}, CUSTOMER=${customerResult.valid}`);
             this._scheduleIceStallWarning(callId, frontendResult.valid, customerResult.valid);
             return;
         }
@@ -235,7 +235,7 @@ class PeerRegistry {
             context.update({ tenantId: resolvedTenantId });
         }
 
-        log.info({ callId }, 'Both connections ready, starting bridge');
+        log.debug({ callId }, 'Both connections ready, starting bridge');
         await audioCoordinator.checkAndStartBridging(
             callId,
             frontendResult.data,
@@ -275,7 +275,7 @@ class PeerRegistry {
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
     async closePeerConnection(callId, connectionType = null) {
-        log.info({ callId }, `Closing connection (type: ${connectionType || 'all'})`);
+        log.debug({ callId }, `Closing connection (type: ${connectionType || 'all'})`);
 
         const callConnections = this.peerConnections.get(callId);
         if (!callConnections) {
@@ -287,7 +287,7 @@ class PeerRegistry {
         const closingFrontend = connectionType === ConnectionType.AGENT;
 
         if (closingAll || connectionType === ConnectionType.CUSTOMER) {
-            log.info({ callId }, 'Stopping recording');
+            log.debug({ callId }, 'Stopping recording');
             await audioCoordinator.stopRecording(callId);
         }
 
@@ -309,7 +309,7 @@ class PeerRegistry {
                 log.error({ callId, err }, `Error during ${type} cleanup`);
             } finally {
                 delete callConnections[type];
-                log.info(`${type} connection closed`);
+                log.debug(`${type} connection closed`);
             }
         }));
 
@@ -327,7 +327,7 @@ class PeerRegistry {
             this._clearIceStallTimers(callId);
 
             await redisPubSubService.unsubscribeFromCall(callId);
-            log.info({ callId }, 'Unsubscribed from events');
+            log.debug({ callId }, 'Unsubscribed from events');
 
             this.peerConnections.delete(callId);
 
@@ -338,7 +338,7 @@ class PeerRegistry {
             await CallConnectionRepository.terminateConnections(callId)
                 .catch(err => log.error({ err }, 'Failed to terminate connections in DB'));
 
-            log.info({ callId }, 'Call fully cleaned up');
+            log.debug({ callId }, 'Call fully cleaned up');
         } else if (connectionType === ConnectionType.MONITOR) {
             log.info({ callId }, 'Monitor disconnected, main call continues');
         } else {

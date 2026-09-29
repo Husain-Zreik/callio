@@ -45,7 +45,7 @@ class QueueRouter {
         try {
             if (await CallRepository.hasUnassignedCalls(queue.id)) return null;
         } catch (err) {
-            log.warn({ err }, `FIFO guard failed for queue ${queue.id} — skipping sync claim`);
+            log.warn({ queueId: queue.id, err }, 'FIFO guard failed — skipping the sync claim');
             return null;
         }
         const members = await this.getMembers(queue);

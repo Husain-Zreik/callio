@@ -112,6 +112,8 @@ export const config = {
         levels: process.env.LOG_LEVELS || "",
         // stdout: on by default outside PM2 (PM2 sends worker output to /dev/null).
         stdout: process.env.LOG_STDOUT ? process.env.LOG_STDOUT === "true" : process.env.pm_id === undefined,
+        // Lowest level shown on stdout (files keep everything the components log).
+        stdoutLevel: (process.env.LOG_STDOUT_LEVEL || "trace").toLowerCase(),
         // stdout format: 'pretty' (readable lines) or 'json'. Files are always JSON.
         format: process.env.LOG_FORMAT || (process.env.NODE_ENV === "production" ? "json" : "pretty"),
         // Mask customer phone numbers / SIP users in records (off by default).

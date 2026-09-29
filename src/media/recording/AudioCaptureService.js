@@ -45,7 +45,7 @@ export class AudioCaptureService {
             // Log track state BEFORE attaching the sink. A track that is already
             // 'ended' or muted here means the RTP stream never arrived from Meta —
             // the sink will attach but ondata will never fire (138021 diagnostic).
-            log.debug({ callId }, `Attaching ${trackType} sink: readyState=${track.readyState}, muted=${track.muted}, enabled=${track.enabled}, id=${track.id}`);
+            log.debug({ callId, trackType, trackId: track.id, readyState: track.readyState, muted: track.muted, enabled: track.enabled }, 'Attaching sink');
 
             const audioSink = new nonstandard.RTCAudioSink(track);
             leakMetrics.audioSinkCreated++;   // DIAGNOSTIC (native): recording sink

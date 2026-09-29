@@ -95,7 +95,7 @@ class IvrCoordinator {
         this._sessions.set(callId, { _pending: true });
         let sessionEstablished = false;
 
-        log.info({ callId }, `Starting session, menu ${ivrFlowId}`);
+        log.info({ callId, ivrFlowId }, 'Starting IVR session');
 
         // Guard against call:terminated firing during the async setup window (menu fetch,
         // audio path resolution / S3 downloads / ffmpeg decode, DB session creation).
@@ -114,7 +114,7 @@ class IvrCoordinator {
             // 1. Fetch menu structure + audio file metadata
             const menu = await IvrRepository.findFlow(ivrFlowId, callMeta.tenantId ?? null);
             if (!menu) {
-                log.warn({ callId }, `IVR menu ${ivrFlowId} not found`);
+                log.warn({ callId, ivrFlowId }, 'IVR flow not found');
                 return;
             }
             const menuMeta = {
@@ -480,7 +480,7 @@ class IvrCoordinator {
 
             const audioFile = audioFilesById[audioFileId];
             if (!audioFile?.storage_key) {
-                log.warn(`No storage record for audioFileId=${audioFileId} on node ${node.id}`);
+                log.warn({ audioFileId, nodeId: node.id }, 'No storage record for the node audio');
                 continue;
             }
 
@@ -495,10 +495,10 @@ class IvrCoordinator {
                 // Decode to PCM once at IVR session start — IvrEngine calls player.play(pcm)
                 // which hits the Int16Array fast-path and skips all per-play ffmpeg spawns.
                 const pcm = await IvrAudioPlayer.decode(rawInput);
-                log.info(`Pre-decoded audio for node ${node.id}: ${pcm.length} samples`);
+                log.debug({ nodeId: node.id, samples: pcm.length }, 'Pre-decoded node audio');
                 map.set(node.id, pcm);
             } catch (err) {
-                log.warn({ err }, `Could not resolve/decode audio for node ${node.id}`);
+                log.warn({ nodeId: node.id, err }, 'Could not resolve or decode the node audio');
             }
         }
 

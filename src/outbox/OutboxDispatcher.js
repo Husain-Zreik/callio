@@ -124,9 +124,10 @@ class OutboxDispatcher {
             error,
             nextAttemptInSeconds: giveUp ? null : BACKOFF_SECONDS[attemptsMade - 1],
         });
-        const msg = `[Outbox] ${delivery.event_type} ${delivery.event_id} to consumer ${delivery.consumer_id}: ${error}`;
-        if (giveUp) log.error(`${msg} — giving up after ${attemptsMade} attempts`);
-        else log.warn(`${msg} — retry #${attemptsMade + 1} in ${BACKOFF_SECONDS[attemptsMade - 1]}s`);
+        const fields = { consumerId: delivery.consumer_id, eventType: delivery.event_type, eventId: delivery.event_id,
+            attempts: attemptsMade, error };
+        if (giveUp) log.error(fields, 'Webhook delivery failed — giving up');
+        else log.warn({ ...fields, retryInSeconds: BACKOFF_SECONDS[attemptsMade - 1] }, 'Webhook delivery failed — will retry');
     }
 }
 

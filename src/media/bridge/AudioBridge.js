@@ -49,7 +49,7 @@ export class AudioBridge {
         this._silenceWatchdog = null;
         this._networkMonitor = null;
 
-        log.info({ callId: this.callId }, 'Created');
+        log.debug({ callId: this.callId }, 'Created');
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ export class AudioBridge {
             }
         }
 
-        log.debug(`Relay ${fromType} → ${toType}, track=${track.id}`);
+        log.debug({ callId: this.callId, from: fromType, to: toType, trackId: track.id }, 'Relaying track');
         targetConnection.deliverTrack(track, stream);
         this.stats.tracksRelayed++;
 
@@ -502,7 +502,7 @@ export class AudioBridge {
                     // Whisper/barge mode: rebuild the relay targeting the new AGENT sender.
                     this._rebuildFrontendRelay(track);
                 } else {
-                    log.debug({ callId: this.callId }, `Re-relaying customer track to new frontend: ${track.id}`);
+                    log.debug({ callId: this.callId, trackId: track.id }, 'Re-relaying the customer track to the new frontend');
                     this.relayTrack(track, null, ConnectionType.CUSTOMER, ConnectionType.AGENT);
                 }
                 return;
@@ -517,7 +517,7 @@ export class AudioBridge {
         const customerBuffer = this.customerConnection?.audio?.trackBuffer ?? [];
 
         if (frontendBuffer.length > 0) {
-            log.info({ callId: this.callId }, `Flushing ${frontendBuffer.length} buffered frontend tracks`);
+            log.debug({ callId: this.callId }, `Flushing ${frontendBuffer.length} buffered frontend tracks`);
             frontendBuffer.forEach(({ track, stream }) => {
                 this.relayTrack(track, stream, ConnectionType.AGENT, ConnectionType.CUSTOMER);
             });
@@ -529,7 +529,7 @@ export class AudioBridge {
         }
 
         if (customerBuffer.length > 0) {
-            log.info({ callId: this.callId }, `Flushing ${customerBuffer.length} buffered customer tracks`);
+            log.debug({ callId: this.callId }, `Flushing ${customerBuffer.length} buffered customer tracks`);
             customerBuffer.forEach(({ track, stream }) => {
                 this.relayTrack(track, stream, ConnectionType.CUSTOMER, ConnectionType.AGENT);
             });
@@ -583,13 +583,13 @@ export class AudioBridge {
         }
 
         if (alreadySending) {
-            log.debug(`Monitor track ${track.id} already sending, skipping`);
+            log.debug({ callId: this.callId, trackId: track.id }, 'Monitor track already sending — skipping');
             return;
         }
 
         this.monitorConnection.deliverMonitorTrack(track);
         this.stats.tracksRelayed++;
-        log.debug(`Monitor track relayed: ${label.toUpperCase()} (${track.id})`);
+        log.debug({ callId: this.callId, leg: label.toUpperCase(), trackId: track.id }, 'Monitor track relayed');
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -625,7 +625,7 @@ export class AudioBridge {
                 supervisorMode: this.supervisorMode,
                 agentPrivate: this._agentPrivate,
             });
-            log.debug({ callId: this.callId }, `✓ Monitor agent track refreshed: ${agentTrack.id}`);
+            log.debug({ callId: this.callId, trackId: agentTrack.id }, 'Monitor agent track refreshed');
         } catch (err) {
             log.error({ callId: this.callId, err }, 'Monitor agent track refresh failed');
         }

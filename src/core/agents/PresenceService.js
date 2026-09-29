@@ -31,7 +31,7 @@ class PresenceService {
         if (this.isInitialized) return;
         await redisBaseService.init();
         this.isInitialized = true;
-        log.debug(`Worker ${this.workerId} initialized`);
+        log.debug('Initialized');
     }
 
     async ensureInitialized() {
@@ -55,7 +55,7 @@ class PresenceService {
             pipeline.expire(workerKey, this.ttl);
             await redisBaseService.executePipeline(pipeline);
 
-            log.info({ agentId: userId }, `User connected (Socket: ${socketId})`);
+            log.debug({ agentId: userId, socketId }, 'Agent socket tracked');
         } catch (error) {
             log.error({ err: error }, 'Error tracking connection');
         }
@@ -71,7 +71,7 @@ class PresenceService {
             await redisBaseService.executePipeline(pipeline);
 
             const remaining = await redisBaseService.scard(this.#userSocketsKey(userId));
-            log.info({ agentId: userId }, remaining === 0 ? 'User is now completely offline' : `User disconnected (${remaining} socket(s) remaining)`);
+            log.debug({ agentId: userId }, remaining === 0 ? 'User is now completely offline' : `User disconnected (${remaining} socket(s) remaining)`);
         } catch (error) {
             log.error({ err: error }, 'Error tracking disconnection');
         }
@@ -119,7 +119,7 @@ class PresenceService {
             pipeline.del(workerKey);
             await redisBaseService.executePipeline(pipeline);
 
-            log.info(`Cleared ${entries.length} stale socket(s) from worker ${this.workerId}'s previous run`);
+            log.info({ count: entries.length }, 'Cleared stale sockets from the previous run');
         } catch (error) {
             log.error({ err: error }, 'Error clearing stale presence');
         }

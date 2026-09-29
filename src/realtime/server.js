@@ -32,7 +32,7 @@ export function createWebSocketServer(httpServer) {
     try {
         const { pubClient, subClient } = redisPubSubService.getAdapterClients();
         io.adapter(createAdapter(pubClient, subClient));
-        log.info(`Socket.IO Redis adapter initialized for worker ${redisPubSubService.workerId}`);
+        log.info('Socket.IO Redis adapter initialized');
     } catch (error) {
         log.error({ err: error }, 'Failed to initialize Redis adapter');
         throw error;

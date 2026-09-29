@@ -43,7 +43,7 @@ docker compose -f deploy/sip-gateway/docker-compose.local.yml up -d   # SIP gate
 npm run test:e2e                  # end-to-end suites with real WebRTC media (test/e2e/README.md)
 npm run test:e2e -- routing       # one suite
 
-npm run logs -- --call 42 --level warn --component channels.sip   # also --follow, --tenant, --grep, --since 15m, --json
+npm run logs -- --call 42 --level warn --component channels.sip   # --level info..warn / debug,error; --where queueId=3; --follow, --since 15m, --stats, --json
 npm run log-level -- channels.sip=debug --for 30m                 # live, every worker; --reset to undo
 node --check <file>               # syntax-check a file (no build step)
 ```
@@ -97,12 +97,14 @@ Background loops (`CallCleanupService`, `QueueTimeoutService`, `RedisCleanupServ
 
 ### Logging
 
-- **Never `console.*` in `src/`** (the e2e runner fails on it). Each module takes a component logger:
-  `import { logger } from '…/infra/logging/logger.js'; const log = logger('channels.sip.SipIngress');` — `<layer>.<area>.<File>`.
-- Call shape is pino's: `log.warn({ callId, err }, 'rtpengine offer failed')` — fields first, then a short message with no `[Prefix]` and no emojis. Errors go in as `err` (the object, never `.message`) so stacks survive. Ids that identify the record (`callId`, `tenantId`, `agentId`) are fields, not text.
-- Levels: `error` needs someone to look, `warn` is unexpected but handled, `info` is a lifecycle step (call created/answered/ended, agent connected, worker started), `debug` is per-step detail (SDP/ICE/tracks/relays/pub-sub), `trace` is per-packet/frame. Anything a scanner or a loop can trigger many times a second goes through `throttle()`.
-- Context: call events (`RedisPubSubService`), socket events (`connectionHandler`) and HTTP requests (`http/accessLog.js`) bind `callId` / `tenantId` / `agentId` / `requestId` with `runWithLogContext`, so records inside them carry those fields without naming them.
-- Records are JSON lines in `storage/logs/app/worker-N/YYYY-MM-DD.log` (+ `.error.log`); secrets are redacted by key name; `LOG_MASK_PII=true` masks phone numbers. Levels: `LOG_LEVEL`, `LOG_LEVELS=media=warn,channels.sip=debug` (longest prefix wins), or live with `npm run log-level`. CLI scripts that import `src/` log to stderr only and write no files.
+All of it is in `src/infra/logging/`; **`policy.js` is the one place for the rules** (levels, field names, redaction keys, PII fields, reserved components) and `config/envConfig.js` → `logging` for the settings (`.env.example`, LOGGING).
+
+- **Never `console.*` in `src/`.** Each module takes a component logger: `import { logger } from '…/infra/logging/logger.js'; const log = logger('channels.sip.SipIngress');` — `<layer>.<area>.<File>`. `logger.js` is the only logging module the rest of `src/` imports (plus `policy.js` for its constants).
+- **Fields first, then a short message:** `log.warn({ callId, providerCallId, err }, 'rtpengine offer failed')`. Ids are always fields (names from `policy.FIELDS`: `callId`, `providerCallId`, `tenantId`, `agentId`, `queueId`, `channelId`, `socketId`, …), never inside the text; no `[Prefix]`, no emojis; errors as `err` (the object) so stacks survive. An expected outcome (a SIP 486) is a field, not an `err`. The e2e runner fails on `console.*`, `[Prefix]` messages and emojis.
+- **Levels:** `error` someone needs to look · `warn` unexpected, handled · `info` a lifecycle step (call offered/answered/ended, leg connected, bridge started/stopped, agent connected, worker started) · `debug` internal steps (peers, SDP/ICE, tracks, relays, pub/sub, ownership) · `trace` per packet/frame. A call should read as a handful of `info` lines. Anything that can repeat many times a second goes through `throttle()`.
+- **Context:** call events (`RedisPubSubService`), socket events (`connectionHandler`) and HTTP requests (`http/accessLog.js`) bind `callId` / `tenantId` / `agentId` / `requestId` with `runWithLogContext`; records inside carry them without naming them.
+- **What is recorded vs. what you see:** components log at `LOG_LEVEL` / `LOG_LEVELS=media=warn,channels.sip=debug` (longest prefix wins) or live via `npm run log-level`; stdout can show less (`LOG_STDOUT_LEVEL`). Files (`storage/logs/app/worker-N/YYYY-MM-DD.log`, `.error.log`, JSON) keep everything recorded; `npm run logs -- --level warn | info..warn | debug,error` picks what to read.
+- Secrets are redacted by key name always; `LOG_MASK_PII=true` masks phone numbers. CLI scripts that import `src/` log to stderr only and write no files.
 
 ### Config
 

@@ -10,6 +10,8 @@
     "logs": "node scripts/logs.js",
     "logs:follow": "node scripts/logs.js --follow",
     "logs:errors": "node scripts/logs.js --errors",
+    "logs:warn": "node scripts/logs.js --level warn",
+    "logs:stats": "node scripts/logs.js --stats",
     "log-level": "node scripts/log-level.js",
     "migrate:status": "knex migrate:status",
     "migrate:latest": "knex migrate:latest",

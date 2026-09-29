@@ -9,9 +9,9 @@
 // Worker threads keep the levels they started with.
 import { redisClient } from '../redis/RedisClient.js';
 import { logger, resetLogLevels, setLogLevels } from './logger.js';
-import { LOG_LEVELS_CHANNEL, LOG_LEVELS_KEY } from './logLevelKeys.js';
+import { COMPONENTS, LOG_LEVELS_CHANNEL, LOG_LEVELS_KEY } from './policy.js';
 
-const log = logger('infra.logging');
+const log = logger(COMPONENTS.logging);
 
 class LogLevelControl {
     #subscriber = null;

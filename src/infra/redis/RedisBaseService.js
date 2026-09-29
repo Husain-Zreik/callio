@@ -23,7 +23,7 @@ class RedisBaseService {
         try {
             this.client = redisClient.getClient();
             this.isInitialized = true;
-            log.debug(`Worker ${this.workerId} initialized`);
+            log.debug('Initialized');
         } catch (error) {
             log.error({ err: error }, 'Initialization failed');
             throw error;
@@ -345,7 +345,7 @@ class RedisBaseService {
     async close() {
         this.client = null;
         this.isInitialized = false;
-        log.info(`Worker ${this.workerId} closed`);
+        log.info('Closed');
     }
 }
 

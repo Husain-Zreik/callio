@@ -19,7 +19,7 @@ class CallOwnershipService {
     // Initialize the service (call during app startup)
     async init() {
         await redisBaseService.init();
-        log.debug(`Worker ${this.workerId} initialized`);
+        log.debug('Initialized');
     }
 
     // Build Redis key for call ownership
@@ -37,7 +37,7 @@ class CallOwnershipService {
             const claimed = await redisBaseService.setnx(key, workerId, ttl);
 
             if (claimed) {
-                log.debug({ callId }, `Worker ${workerId} claimed call (TTL: ${ttl}s)`);
+                log.debug({ callId, ttlSeconds: ttl }, 'Claimed call ownership');
             }
 
             return claimed;
@@ -61,14 +61,14 @@ class CallOwnershipService {
             }
 
             if (currentOwner !== workerId) {
-                log.warn({ callId }, `Worker ${workerId} cannot make call permanent (owned by ${currentOwner})`);
+                log.warn({ callId, owner: currentOwner }, 'Cannot make ownership permanent — another worker owns the call');
                 return false;
             }
 
             const result = await redisBaseService.persist(key);
 
             if (result) {
-                log.debug({ callId }, `Worker ${workerId} made call ownership permanent`);
+                log.debug({ callId }, 'Made call ownership permanent');
             }
 
             return result;
@@ -92,12 +92,12 @@ class CallOwnershipService {
             }
 
             if (currentOwner !== workerId) {
-                log.warn({ callId }, `Worker ${workerId} cannot release call (owned by ${currentOwner})`);
+                log.warn({ callId, owner: currentOwner }, 'Cannot release ownership — another worker owns the call');
                 return false;
             }
 
             await redisBaseService.del(key);
-            log.debug({ callId }, `Worker ${workerId} released call`);
+            log.debug({ callId }, 'Released call ownership');
             return true;
         } catch (error) {
             log.error({ callId, err: error }, 'Error releasing call');

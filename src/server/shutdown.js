@@ -120,11 +120,11 @@ export async function shutdown(server, io) {
                     return [
                         callDuration !== null
                             ? CallRepository.updateDuration(c.id, 'call_duration', callDuration)
-                                .catch(err => log.warn({ err }, `call_duration failed for call ${c.id}`))
+                                .catch(err => log.warn({ callId: c.id, err }, 'Setting call_duration failed'))
                             : null,
                         ringingDuration !== null
                             ? CallRepository.updateDuration(c.id, 'ringing_duration', ringingDuration)
-                                .catch(err => log.warn({ err }, `ringing_duration failed for call ${c.id}`))
+                                .catch(err => log.warn({ callId: c.id, err }, 'Setting ringing_duration failed'))
                             : null,
                     ].filter(Boolean);
                 }));
@@ -136,7 +136,7 @@ export async function shutdown(server, io) {
             if (ivrCalls.length > 0) {
                 await Promise.allSettled(ivrCalls.map(c =>
                     ivrCoordinator.stopSession(c.id, 'hung_up')
-                        .catch(err => log.warn({ err }, `ivrCoordinator.stopSession failed for call ${c.id}`))
+                        .catch(err => log.warn({ callId: c.id, err }, 'Stopping the IVR session failed'))
                 ));
             }
 
@@ -149,7 +149,7 @@ export async function shutdown(server, io) {
                         reason: 'service_maintenance',
                         message: 'Call ended due to service maintenance',
                     }).catch(err =>
-                        log.warn({ err }, `lifecycle log failed for call ${c.id}`)
+                        log.warn({ callId: c.id, err }, 'Lifecycle log failed')
                     )
                 ));
 
@@ -158,7 +158,7 @@ export async function shutdown(server, io) {
                 log.info(`Gracefully terminating ${callsNeedingTermination.length} active call(s)...`);
                 await Promise.allSettled(callsNeedingTermination.map(c =>
                     customerChannels.terminate(c.id).catch(err =>
-                        log.warn({ err }, `Provider terminate failed for call ${c.id}`)
+                        log.warn({ callId: c.id, err }, 'Provider terminate failed')
                     )
                 ));
             }

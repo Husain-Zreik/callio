@@ -84,7 +84,7 @@ class StreamUploader {
                             recordingId: completion.recordingId,
                             durationSeconds: completion.durationSeconds,
                         });
-                        log.info(`Recording ${completion.recordingId} marked completed`);
+                        log.info({ recordingId: completion.recordingId }, 'Recording marked completed');
                     }
                 })
                 .catch(async (error) => {

@@ -79,7 +79,7 @@ export class CustomerSilenceWatchdog {
             }
         };
 
-        log.debug({ callId }, `Attached track=${track.id}`);
+        log.debug({ callId, trackId: track.id }, 'Attached');
     }
 
     get state() { return this._state; }
@@ -88,6 +88,6 @@ export class CustomerSilenceWatchdog {
         this._active = false;
         try { this._sink.stop(); } catch { /* best effort */ }
         leakMetrics.audioSinkStopped++;
-        log.info({ callId: this._callId }, 'Detached');
+        log.debug({ callId: this._callId }, 'Detached');
     }
 }

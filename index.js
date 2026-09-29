@@ -7,6 +7,7 @@
 // into the logger before any other import can write a line.
 import "./src/infra/logging/serverLogging.js";
 import { logger, flushLogs } from "./src/infra/logging/logger.js";
+import { COMPONENTS } from "./src/infra/logging/policy.js";
 
 import { config } from "./config/envConfig.js";
 import { createWebSocketServer } from "./src/realtime/server.js";
@@ -25,7 +26,7 @@ const log = logger('server');
 
 const fastify = Fastify({
     bodyLimit: 10 * 1024 * 1024,
-    loggerInstance: logger('http'),
+    loggerInstance: logger(COMPONENTS.http),
     // http/accessLog.js writes one line per request instead of Fastify's two.
     logController: new LogController({ disableRequestLogging: true, requestIdLogLabel: 'requestId' }),
     requestIdHeader: 'x-request-id',

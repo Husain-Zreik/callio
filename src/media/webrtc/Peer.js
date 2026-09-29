@@ -28,7 +28,7 @@ export class Peer {
         this.localSdp = null;
         this.remoteSdp = null;
 
-        log.info({ callId: callContext.callId }, `${connectionType} connection created`);
+        log.debug({ callId: callContext.callId }, `${connectionType} connection created`);
     }
 
     // ── Convenience getters ────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ export class Peer {
 
             if (existing) {
                 this.connectionId = existing.id;
-                log.debug(`Existing connection record used: ${this.connectionId}`);
+                log.debug({ callId: this.context.callId, connectionId: this.connectionId }, 'Existing connection record used');
                 return;
             }
 
@@ -162,7 +162,7 @@ export class Peer {
             });
 
             this.connectionId = id;
-            log.debug(`Connection record created: ${this.connectionId}`);
+            log.debug({ callId: this.context.callId, connectionId: this.connectionId }, 'Connection record created');
 
         } catch (error) {
             log.error({ err: error }, 'Connection record insert failed');
@@ -204,6 +204,6 @@ export class Peer {
                 .catch(err => log.error({ err }, 'Failed to terminate connection in DB'));
         }
 
-        log.info({ callId: this.context.callId }, 'Peer cleanup done');
+        log.debug({ callId: this.context.callId }, 'Peer cleanup done');
     }
 }

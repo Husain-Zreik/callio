@@ -74,7 +74,7 @@ class RecordingManager {
         const session = this.activeSessions.get(callId);
 
         if (!session) {
-            log.info({ callId }, 'No active recording — nothing to stop');
+            log.debug({ callId }, 'No active recording — nothing to stop');
             return { success: false, reason: 'Not recording' };
         }
 
