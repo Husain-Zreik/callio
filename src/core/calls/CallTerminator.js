@@ -25,6 +25,7 @@ import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
 import { EventTypes } from '../events/EventTypes.js';
 import { CallDirection } from '../constants/CallConstants.js';
 import { logger } from '../../infra/logging/logger.js';
+import { recordCallEnded } from '../../infra/monitoring/metrics.js';
 
 const log = logger('core.calls.CallTerminator');
 
@@ -118,6 +119,7 @@ class CallTerminator {
         agentAssignmentCoordinator.emitQueueUpdate(call.tenant_id, call.queue_id ?? null)
             .catch((err) => log.error({ callId, err }, 'Queue update failed'));
 
+        recordCallEnded(call, { reason, terminatedBy });
         log.info({ callId }, `Call ended — ${reason}/${terminatedBy}${source ? ` (${source})` : ''}`);
     }
 

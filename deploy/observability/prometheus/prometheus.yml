@@ -1,0 +1,15 @@
+# Prometheus on the Callio server (docker-compose.yml, host network).
+# One target per PM2 worker: each worker serves its own /metrics.
+# Match the ports to BASE_PORT / WORKER_COUNT in Callio's .env.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: callio
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/metrics_token   # = METRICS_TOKEN in Callio's .env
+    static_configs:
+      - targets: ['127.0.0.1:3003', '127.0.0.1:3004']

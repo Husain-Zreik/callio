@@ -1,0 +1,56 @@
+# The same stack for a development machine with Docker Desktop (no host
+# networking): Callio runs on the host (npm run dev / npm start, port 3001).
+#   docker compose -f deploy/observability/docker-compose.local.yml up -d
+#   Grafana: http://localhost:3300  (admin / admin)
+name: callio-observability-local
+
+services:
+  loki:
+    image: grafana/loki:3.4.2
+    command: ["-config.file=/etc/loki/loki.yml", "-config.expand-env=true"]
+    ports: ["127.0.0.1:3100:3100"]
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+
+  alloy:
+    image: grafana/alloy:v1.7.5
+    command: ["run", "/etc/alloy/config.alloy", "--storage.path=/var/lib/alloy/data", "--server.http.listen-addr=0.0.0.0:12345"]
+    environment:
+      LOKI_PUSH_URL: http://loki:3100/loki/api/v1/push
+    ports: ["127.0.0.1:12345:12345"]
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - ../../storage/logs/app:/callio-logs:ro
+      - alloy-data:/var/lib/alloy/data
+    depends_on: [loki]
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+    ports: ["127.0.0.1:9090:9090"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - ./prometheus/prometheus.local.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/metrics_token:/etc/prometheus/metrics_token:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    ports: ["127.0.0.1:3300:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      PROMETHEUS_URL: http://prometheus:9090
+      LOKI_URL: http://loki:3100
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on: [loki, prometheus]
+
+volumes:
+  loki-data:
+  alloy-data:
+  prometheus-data:
+  grafana-data:

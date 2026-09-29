@@ -1,0 +1,40 @@
+# Loki, single process, filesystem storage — enough for one server.
+auth_enabled: false
+
+server:
+  http_listen_address: ${LOKI_LISTEN_ADDRESS:-0.0.0.0}
+  http_listen_port: 3100
+  grpc_listen_address: 127.0.0.1
+  grpc_listen_port: 9096
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+
+schema_config:
+  configs:
+    - from: 2026-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  allow_structured_metadata: true
+  retention_period: 336h            # 14 days, like the files
+  reject_old_samples: false         # the first sync may ship a day or two of files
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem

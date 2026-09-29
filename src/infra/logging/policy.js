@@ -40,7 +40,11 @@ export const FIELDS = Object.freeze({
 export const CONTEXT_FIELDS = Object.freeze(['callId', 'tenantId', 'agentId', 'requestId']);
 
 // Fields every record carries from the process.
-export const BASE_FIELDS = Object.freeze(['time', 'level', 'msg', 'worker', 'thread', 'pid', 'component', 'mod']);
+// Fields every record carries from the process. service / env / host tell
+// services and servers apart in a shared log store (Loki); level is text
+// ("info"), which Grafana, Loki and most collectors recognise.
+export const BASE_FIELDS = Object.freeze(['time', 'level', 'msg', 'service', 'env', 'host', 'worker', 'thread', 'pid',
+    'component', 'mod']);
 
 // ── Redaction (always on) ───────────────────────────────────────────────────
 // Values under these keys (case-insensitive, up to REDACT_DEPTH levels deep)

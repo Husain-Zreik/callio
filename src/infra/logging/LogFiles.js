@@ -12,10 +12,10 @@
 import fs from 'fs';
 import path from 'path';
 import pino from 'pino';
-import { OUTPUT } from './policy.js';
+import { LEVEL_VALUES, OUTPUT } from './policy.js';
 
 const today = () => new Date().toISOString().slice(0, 10);
-const LEVEL_AT_START = /^\{"level":(\d+)/;
+const LEVEL_AT_START = /^\{"level":"(\w+)"/;
 
 class DailyFile {
     constructor(dir, suffix, capBytes) {
@@ -50,11 +50,11 @@ class DailyFile {
     write(chunk) {
         this.#open();
         if (this.capBytes && this.bytes >= this.capBytes) {
-            const level = Number(LEVEL_AT_START.exec(chunk)?.[1] ?? 50);
+            const level = LEVEL_VALUES[LEVEL_AT_START.exec(chunk)?.[1]] ?? LEVEL_VALUES.error;
             if (level < OUTPUT.dailyCapLevelBelow) { this.drops.cap++; return true; }
             if (!this.capNoticed) {
                 this.capNoticed = true;
-                this.dest.write(`${JSON.stringify({ level: 40, time: new Date().toISOString(), component: 'infra.logging',
+                this.dest.write(`${JSON.stringify({ level: 'warn', time: new Date().toISOString(), component: 'infra.logging',
                     msg: 'Daily log cap reached — keeping warn and above until midnight UTC', capBytes: this.capBytes })}\n`);
             }
         }

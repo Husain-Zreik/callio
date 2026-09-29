@@ -13,6 +13,8 @@ const check = (name, ok, detail = '') => results.push({ name, ok: Boolean(ok), d
 const log = logger('check.logging.Sample');
 
 let r = took(() => runWithLogContext({ callId: 7 }, () => { log.info({ first: 1 }, 'one'); log.info('two'); }));
+check('records carry a text level and service / env / host for log stores (Loki)',
+    r[0]?.level === 'info' && r[0]?.service === 'callio' && typeof r[0]?.env === 'string' && typeof r[0]?.host === 'string', JSON.stringify(r[0]));
 check('context fields reach every record in the flow', r.every((x) => x.callId === 7));
 check("one record's fields do not leak into the next", r[1] && r[1].first === undefined, JSON.stringify(r[1]));
 
@@ -55,8 +57,8 @@ check('throttle lets the first through and counts the rest', seen[0] === 0 && se
     const dir = mkdtempSync(join(tmpdir(), 'callio-logcap-'));
     const files = openLogFiles({ baseDir: dir, workerId: 'cap', retentionDays: 1, dailyCapBytes: 2000 });
     const rec = (level, i) => `${JSON.stringify({ level, time: new Date().toISOString(), msg: `record ${i}`, pad: 'x'.repeat(80) })}\n`;
-    for (let i = 0; i < 100; i++) files.all.write(rec(30, i));
-    files.all.write(rec(50, 'late error'));
+    for (let i = 0; i < 100; i++) files.all.write(rec('info', i));
+    files.all.write(rec('error', 'late error'));
     files.all.flushSync();
     const drops = files.all.takeDrops();
     const written = readFileSync(join(dir, 'worker-cap', readdirSync(join(dir, 'worker-cap'))[0]), 'utf8');

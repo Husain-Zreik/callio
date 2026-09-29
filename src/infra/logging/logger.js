@@ -19,6 +19,7 @@
 //   throttle.js      one record per window for repeating events
 //   consoleBridge.js console.* from libraries
 //   LogLevelControl  runtime level changes over Redis (npm run log-level)
+import { hostname } from 'os';
 import { isMainThread, threadId } from 'worker_threads';
 import pino from 'pino';
 import { config } from '../../../config/envConfig.js';
@@ -39,11 +40,14 @@ const registry = new LevelRegistry({ level: settings.level, levels: settings.lev
 
 const root = pino({
     level: 'trace',   // components carry the real levels (registry)
-    base: { worker: config.runtime.workerId, pid: process.pid, ...(isMainThread ? {} : { thread: threadId }) },
+    base: {
+        service: settings.service, env: settings.env, host: hostname(),
+        worker: config.runtime.workerId, pid: process.pid, ...(isMainThread ? {} : { thread: threadId }),
+    },
     timestamp: pino.stdTimeFunctions.isoTime,
     messageKey: 'msg',
     serializers: { err: serializeError, error: serializeError },
-    formatters: { level: (label, number) => ({ level: number }), log: redact },
+    formatters: { level: (label) => ({ level: label }), log: redact },
     mixin: currentLogContext,
     hooks: settings.maskPii ? { logMethod: maskingHook } : {},
 }, destination);
@@ -87,8 +91,16 @@ export function initLogging() {
     // Records dropped to protect the service (stalled disk, daily cap) are reported, not silent.
     setInterval(() => {
         const drops = takeDrops();
-        if (drops.buffer || drops.cap) logger(COMPONENTS.logging).warn({ dropped: drops }, 'Log records dropped to protect the service');
+        if (!drops.buffer && !drops.cap) return;
+        logger(COMPONENTS.logging).warn({ dropped: drops }, 'Log records dropped to protect the service');
+        for (const fn of dropListeners) fn(drops);
     }, 60_000).unref();
+}
+
+const dropListeners = [];
+/** Called with { buffer, cap } counts whenever records were dropped (e.g. for metrics). */
+export function onLogDrops(fn) {
+    dropListeners.push(fn);
 }
 
 /** console.* from libraries into the logger. */

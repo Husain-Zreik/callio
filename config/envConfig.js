@@ -108,6 +108,9 @@ export const config = {
     logging: {
         // Default level, and per-component overrides by prefix:
         // LOG_LEVELS=media=warn,channels.sip=debug (longest prefix wins).
+        // service / env on every record: tell services and servers apart in Loki.
+        service: process.env.LOG_SERVICE || "callio",
+        env: process.env.LOG_ENV || process.env.NODE_ENV || "development",
         level: (process.env.LOG_LEVEL || "info").toLowerCase(),
         levels: process.env.LOG_LEVELS || "",
         // stdout: on by default outside PM2 (PM2 sends worker output to /dev/null).
@@ -122,6 +125,10 @@ export const config = {
         // Per worker per day; past it only warn and above are kept (0 = no cap).
         dailyCapMb: Math.max(0, parseInt(process.env.LOG_MAX_DAILY_MB || "1024", 10) || 0),
         dir: process.env.LOG_DIR ? resolve(process.env.LOG_DIR) : resolve(__dirname, "../storage/logs/app"),
+    },
+    metrics: {
+        // Bearer token Prometheus sends to GET /metrics. Unset = endpoint off.
+        token: process.env.METRICS_TOKEN || null,
     },
     notifications: {
         oneSignal: {

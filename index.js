@@ -6,7 +6,7 @@
 // Logging first: the log files open and console.* (libraries) is bridged
 // into the logger before any other import can write a line.
 import "./src/infra/logging/serverLogging.js";
-import { logger, flushLogs } from "./src/infra/logging/logger.js";
+import { logger, flushLogs, onLogDrops } from "./src/infra/logging/logger.js";
 import { COMPONENTS } from "./src/infra/logging/policy.js";
 
 import { config } from "./config/envConfig.js";
@@ -21,6 +21,7 @@ import { randomUUID } from "crypto";
 import Fastify, { LogController } from "fastify";
 import fastifyCors from "@fastify/cors";
 import { registerAccessLog } from "./src/http/accessLog.js";
+import { metrics, registerRuntimeGauges } from "./src/infra/monitoring/metrics.js";
 
 const log = logger('server');
 
@@ -52,6 +53,14 @@ async function startServer() {
         server = fastify.server;
 
         io = createWebSocketServer(server);
+        registerRuntimeGauges({
+            activeMediaCalls: () => peerRegistry.peerConnections.size,
+            agentSockets: () => io.engine.clientsCount,
+        });
+        onLogDrops(({ buffer, cap }) => {
+            if (buffer) metrics.logDropped.inc({ reason: 'buffer' }, buffer);
+            if (cap) metrics.logDropped.inc({ reason: 'cap' }, cap);
+        });
 
         // Reject new Socket.IO connections when this worker is at capacity.
         // The client's built-in reconnect + the load balancer route the retry to

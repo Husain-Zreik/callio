@@ -14,6 +14,7 @@ import { sipDialogs } from './SipDialogs.js';
 import { finishLeg } from './sipLegs.js';
 import { dialledNumber, callerOf, sourceAllowed } from './sipAddress.js';
 import { logger, throttle } from '../../infra/logging/logger.js';
+import { metrics } from '../../infra/monitoring/metrics.js';
 
 const log = logger('channels.sip.SipIngress');
 
@@ -27,6 +28,7 @@ export async function handleInvite(req, res) {
 
     // Refusals are rate-limited per source: an internet scanner sends many a second.
     const refuse = (status, msg, fields) => {
+        metrics.sipRefused.inc({ status: String(status) });
         const repeated = throttle(`sip-refuse:${source}:${status}`, 60_000);
         if (repeated !== null) log.warn({ source, did, uri: req.uri, ...fields, ...(repeated ? { repeated } : {}) }, msg);
         return res.send(status);

@@ -15,6 +15,7 @@ import { redisBaseService } from '../infra/redis/RedisBaseService.js';
 import { signPayload } from './signing.js';
 import { config } from '../../config/envConfig.js';
 import { logger } from '../infra/logging/logger.js';
+import { metrics } from '../infra/monitoring/metrics.js';
 
 const log = logger('outbox.OutboxDispatcher');
 
@@ -108,6 +109,7 @@ class OutboxDispatcher {
             status = response.status;
             if (status >= 200 && status < 300) {
                 await OutboxRepository.markDelivered(delivery.id, status);
+                metrics.webhookDeliveries.inc({ result: 'delivered' });
                 return;
             }
             await this.#failed(delivery, status, `HTTP ${status}`);
@@ -126,6 +128,7 @@ class OutboxDispatcher {
         });
         const fields = { consumerId: delivery.consumer_id, eventType: delivery.event_type, eventId: delivery.event_id,
             attempts: attemptsMade, error };
+        metrics.webhookDeliveries.inc({ result: giveUp ? 'failed' : 'retry' });
         if (giveUp) log.error(fields, 'Webhook delivery failed — giving up');
         else log.warn({ ...fields, retryInSeconds: BACKOFF_SECONDS[attemptsMade - 1] }, 'Webhook delivery failed — will retry');
     }

@@ -1,0 +1,62 @@
+// Grafana Alloy: ships Callio's log files to Loki.
+//
+// Reads storage/logs/app/worker-*/YYYY-MM-DD.log (mounted at /callio-logs).
+// The .error.log files hold the same error records again and are skipped, so
+// nothing arrives twice. Positions survive restarts (the data volume).
+//
+// Labels (indexed, low-cardinality): service, env, host, level, component.
+// Structured metadata (queryable, not indexed): worker and the ids — query
+// them with e.g.  {service="callio"} | callId="42"
+
+local.file_match "callio" {
+    path_targets = [{
+        __path__         = "/callio-logs/worker-*/*.log",
+        __path_exclude__ = "/callio-logs/worker-*/*.error.log",
+    }]
+    sync_period = "10s"
+}
+
+loki.source.file "callio" {
+    targets    = local.file_match.callio.targets
+    forward_to = [loki.process.callio.receiver]
+}
+
+loki.process "callio" {
+    stage.json {
+        expressions = {
+            time           = "time",
+            level          = "level",
+            service        = "service",
+            env            = "env",
+            host           = "host",
+            component      = "component",
+            worker         = "worker",
+            callId         = "callId",
+            providerCallId = "providerCallId",
+            tenantId       = "tenantId",
+            agentId        = "agentId",
+            requestId      = "requestId",
+        }
+    }
+
+    stage.timestamp {
+        source = "time"
+        format = "RFC3339Nano"
+    }
+
+    stage.labels {
+        values = { service = "", env = "", host = "", level = "", component = "" }
+    }
+
+    stage.structured_metadata {
+        values = { worker = "", callId = "", providerCallId = "", tenantId = "", agentId = "", requestId = "" }
+    }
+
+    forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+    endpoint {
+        url = sys.env("LOKI_PUSH_URL")
+    }
+}

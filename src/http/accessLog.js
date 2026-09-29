@@ -1,13 +1,15 @@
 // src/http/accessLog.js
 // One access-log record per HTTP request (component http.access), with the
 // request id bound to everything logged while the request is handled.
-//   2xx/3xx info · 4xx warn · 5xx error · /health and unmatched routes debug
+//   2xx/3xx info · 4xx warn · 5xx error · probes, /metrics and unmatched routes debug
+// Also the HTTP metrics, by route template (never the raw path: bounded labels).
 // Query strings are left out (webhook verification puts a token there).
 import { logger, runWithLogContext } from '../infra/logging/logger.js';
 import { COMPONENTS } from '../infra/logging/policy.js';
+import { metrics } from '../infra/monitoring/metrics.js';
 
 const log = logger(COMPONENTS.access);
-const QUIET = new Set(['/health']);
+const QUIET = new Set(['/health', '/v1/health', '/metrics']);
 
 export function registerAccessLog(fastify) {
     // Callback style: the rest of the request (hooks, handler) runs inside the context.
@@ -26,5 +28,10 @@ export function registerAccessLog(fastify) {
         };
         const level = QUIET.has(path) || !route ? 'debug' : status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info';
         log[level](fields, `${request.method} ${path} ${status}`);
+        if (path !== '/metrics') {
+            const labels = { method: request.method, route: route ?? 'unmatched' };
+            metrics.httpRequests.inc({ ...labels, status: String(status) });
+            metrics.httpDuration.observe(labels, reply.elapsedTime / 1000);
+        }
     });
 }
