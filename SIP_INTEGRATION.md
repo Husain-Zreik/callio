@@ -216,8 +216,11 @@ an agent, with two-way audio.
 
 1. A real DID from Digitalk, and all of its signalling and media source IPs
    (trunk CIDRs, firewall for 5060 and rtpengine's RTP range).
-2. Hang-up from each side, and IVR key presses: whether Digitalk falls back
-   to in-band DTMF when telephone-event is declined (if it insists on
-   RFC 4733, Callio needs to take DTMF from the events instead: rtpengine can
-   report them).
+2. IVR key presses on Digitalk: whether it falls back to in-band DTMF when
+   telephone-event is declined (if it insists on RFC 4733, Callio needs to
+   take DTMF from the events instead: rtpengine can report them). Check with
+   `npm run ivr:test -- --consumer midlr-dev --tenant 103 --channel sip-digitalk`.
+   Verified on the softphone channel (2026-09-29, in-band DTMF): IVR menu,
+   keys 1/9, transfer to an agent, hang-up from each side, and a caller giving
+   up in the queue after the IVR (NO_ANSWER).
 3. Outbound needs Digitalk to enable it (the `503` from Milestone A).
