@@ -7,6 +7,9 @@
 import { redisClient } from '../../infra/redis/RedisClient.js';
 import { redisBaseService } from '../../infra/redis/RedisBaseService.js';
 import { config } from '../../../config/envConfig.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('channels.sip.SipDialogs');
 
 const OWNER_TTL_SECONDS = 86400;
 const ownerKey = (providerCallId) => `callio:sip:owner:${providerCallId}`;
@@ -27,7 +30,7 @@ class SipDialogs {
             let command;
             try { command = JSON.parse(message); } catch { return; }
             Promise.resolve(onCommand(command)).catch((err) =>
-                console.error(`[SIP] Routed ${command?.action} for ${command?.providerCallId} failed:`, err)
+                log.error({ err }, `Routed ${command?.action} for ${command?.providerCallId} failed`)
             );
         });
         await this._subscriber.subscribe(workerChannel(this.workerId));

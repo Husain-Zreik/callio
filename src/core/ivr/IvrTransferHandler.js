@@ -22,6 +22,9 @@ import { queueAudioCoordinator } from '../../media/playback/QueueAudioCoordinato
 import { sdpCoordinator } from '../../media/webrtc/SDPCoordinator.js';
 import { resolveStoragePath } from '../../infra/storage/StorageResolver.js';
 import { ConnectionType, AgentAvailability } from '../constants/CallConstants.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.ivr.IvrTransferHandler');
 
 class IvrTransferHandler {
 
@@ -50,9 +53,9 @@ class IvrTransferHandler {
         try {
             availability = await this._targetAvailability(targetType, targetId, tenantId);
         } catch (err) {
-            console.error(`[IvrTransferHandler] Target availability check failed for call ${callId}:`, err);
+            log.error({ callId, err }, 'Target availability check failed');
         }
-        console.log(`[IvrTransferHandler] Target availability for call ${callId}: ${availability}`);
+        log.info({ callId }, `Target availability: ${availability}`);
 
         // ── 2. Resolve offline / busy config from transfer node data ───────────
         const offlineAction = transferData?.offlineAction ?? 'hangup';
@@ -97,19 +100,19 @@ class IvrTransferHandler {
         // So these three run FIRST, immediately, ahead of the audio/logging work below
         // that has no bearing on queue-scan eligibility.
         await CallRepository.updateTimestamp(callId, 'ringing_at').catch((err) =>
-            console.error(`[IvrTransferHandler] Failed to reset ringing_at for call ${callId}:`, err.message)
+            log.error({ callId, err }, 'Failed to reset ringing_at')
         );
         // queued_at starts the queue's max wait; the queue changes if the node names another.
         const enteringQueueId = targetType === 'queue' && targetId && String(targetId) !== String(callMeta.queueId) ? targetId : null;
         await CallRepository.enterQueue(callId, enteringQueueId).catch((err) =>
-            console.warn(`[IvrTransferHandler] Failed to put call ${callId} in its queue:`, err)
+            log.warn({ callId, err }, 'Failed to put call in its queue')
         );
         await sdpCoordinator.createSDPOffer(
             callId,
             ConnectionType.AGENT,
             callEventHandler.handleCallEvent,
         ).catch((err) =>
-            console.error(`[IvrTransferHandler] AGENT SDP pre-creation failed for call ${callId}:`, err.message)
+            log.error({ callId, err }, 'AGENT SDP pre-creation failed')
         );
 
         // For busy+wait: play the node's busyAudio as the queue hold music override
@@ -132,11 +135,11 @@ class IvrTransferHandler {
                 callId, tenantId, sender, customerPc, busyAudioOverridePath,
                 targetType === 'queue' ? targetId : (callMeta.queueId ?? null),
             ).catch((err) =>
-                console.warn(`[IvrTransferHandler] QueueAudioCoordinator start failed for call ${callId}:`, err.message)
+                log.warn({ callId, err }, 'QueueAudioCoordinator start failed')
             );
         }
 
-        console.log(`[IvrTransferHandler] Call ${callId} moved to QUEUE (status=RINGING) after IVR transfer`);
+        log.info({ callId }, 'Call moved to QUEUE (status=RINGING) after IVR transfer');
 
         // Notify dashboards
         EventBus.emit('call:ivr_transferred', {
@@ -152,7 +155,7 @@ class IvrTransferHandler {
             await agentAssignmentCoordinator.assignTransferredCall(
                 callId, callRecord, tenantId, targetType, targetId,
             ).catch((err) =>
-                console.error(`[IvrTransferHandler] assignTransferredCall error for call ${callId}:`, err.message)
+                log.error({ callId, err }, 'assignTransferredCall error')
             );
         } else if (tenantId) {
             await agentAssignmentCoordinator.emitQueueUpdate(tenantId).catch(() => { });
@@ -194,7 +197,7 @@ class IvrTransferHandler {
                     const player = new IvrAudioPlayer(audioSource);
                     await player.play(audioPath);
                 } catch (err) {
-                    console.warn(`[IvrTransferHandler] One-shot audio playback failed for call ${callId}:`, err.message);
+                    log.warn({ callId, err }, 'One-shot audio playback failed');
                 }
             }
         }

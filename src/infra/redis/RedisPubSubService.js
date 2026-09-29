@@ -1,6 +1,9 @@
 // src/infra/redis/RedisPubSubService.js
 import { redisClient } from './RedisClient.js';
 import { config } from '../../../config/envConfig.js';
+import { logger, runWithLogContext } from '../logging/logger.js';
+
+const log = logger('infra.redis.RedisPubSubService');
 
 /**
  * Manages Redis pub/sub for cross-worker communication.
@@ -50,9 +53,9 @@ class RedisPubSubService {
             });
 
             this.isInitialized = true;
-            console.log(`[RedisPubSub] Worker ${this.workerId} initialized`);
+            log.debug(`Worker ${this.workerId} initialized`);
         } catch (error) {
-            console.error('[RedisPubSub] Initialization failed:', error.message);
+            log.error({ err: error }, 'Initialization failed');
             throw error;
         }
     }
@@ -89,29 +92,27 @@ class RedisPubSubService {
             eventType = data.eventType;
             data.callId = callId;
         } catch (parseError) {
-            console.error(`[RedisPubSub] Failed to parse message on channel ${channel}:`, parseError.message);
+            log.error({ err: parseError }, `Failed to parse message on channel ${channel}`);
             return;
         }
 
         const handler = this.subscriptions.get(callId);
         if (!handler) return; // No handler registered on this worker
 
-        console.log(`[RedisPubSub] Worker ${this.workerId} processing ${eventType} for call ${callId}`);
+        log.debug({ callId }, `Worker ${this.workerId} processing ${eventType}`);
 
         // handler is async — await the promise and catch rejections so they are
         // always logged and never become silent unhandled promise rejections.
-        Promise.resolve(handler(eventType, data)).catch(err => {
-            console.error(
-                `[RedisPubSub] Unhandled error in handler for event '${eventType}' on call ${callId}:`,
-                err?.message ?? err
-            );
+        // Everything logged while handling it carries the call id.
+        runWithLogContext({ callId }, () => Promise.resolve(handler(eventType, data))).catch(err => {
+            log.error({ callId, err }, `Unhandled error in handler for event '${eventType}'`);
         });
     }
 
     // Publish an event for a call
     async publishCallEvent(callId, eventType, data) {
         if (!this.isInitialized) {
-            console.error('[RedisPubSub] Cannot publish - not initialized');
+            log.warn('Cannot publish - not initialized');
             return 0;
         }
 
@@ -127,11 +128,11 @@ class RedisPubSubService {
             });
 
             const subscriberCount = await this.publisherClient.publish(channel, message);
-            console.log(`[RedisPubSub] Worker ${this.workerId} published ${eventType} for call ${callId} (${subscriberCount} subscriber(s))`);
+            log.debug({ callId }, `Worker ${this.workerId} published ${eventType} (${subscriberCount} subscriber(s))`);
 
             return subscriberCount;
         } catch (error) {
-            console.error(`[RedisPubSub] Error publishing ${eventType} for call ${callId}:`, error.message);
+            log.error({ callId, err: error }, `Error publishing ${eventType}`);
             return 0;
         }
     }
@@ -139,12 +140,12 @@ class RedisPubSubService {
     // Subscribe to all events for a call
     async subscribeToCallEvents(callId, handler) {
         if (!this.isInitialized) {
-            console.error('[RedisPubSub] Cannot subscribe - not initialized');
+            log.warn('Cannot subscribe - not initialized');
             return false;
         }
 
         if (this.subscriptions.has(callId)) {
-            console.log(`[RedisPubSub] Worker ${this.workerId} already subscribed to call ${callId}`);
+            log.debug({ callId }, `Worker ${this.workerId} already subscribed`);
             return true;
         }
 
@@ -153,11 +154,11 @@ class RedisPubSubService {
             await this.subscriberClient.subscribe(channel);
             this.subscriptions.set(callId, handler);
 
-            console.log(`[RedisPubSub] Worker ${this.workerId} subscribed to call ${callId}`);
+            log.debug({ callId }, `Worker ${this.workerId} subscribed`);
             return true;
 
         } catch (error) {
-            console.error(`[RedisPubSub] Error subscribing to call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Error subscribing');
             return false;
         }
     }
@@ -173,11 +174,11 @@ class RedisPubSubService {
             await this.subscriberClient.unsubscribe(channel);
             this.subscriptions.delete(callId);
 
-            console.log(`[RedisPubSub] Worker ${this.workerId} unsubscribed from call ${callId}`);
+            log.debug({ callId }, `Worker ${this.workerId} unsubscribed from call`);
             return true;
 
         } catch (error) {
-            console.error(`[RedisPubSub] Error unsubscribing from call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Error unsubscribing from call');
             return false;
         }
     }
@@ -192,7 +193,7 @@ class RedisPubSubService {
             await this.unsubscribeFromCall(callId);
         }
 
-        console.log(`[RedisPubSub] Worker ${this.workerId} unsubscribed from all calls`);
+        log.info(`Worker ${this.workerId} unsubscribed from all calls`);
     }
 
     // Get active subscriptions
@@ -223,9 +224,9 @@ class RedisPubSubService {
                 } else if (client.status !== 'end') {
                     await client.quit();
                 }
-                console.log(`[RedisPubSub] ${name} closed`);
+                log.info(`${name} closed`);
             } catch (err) {
-                console.warn(`[RedisPubSub] ${name} close error, forcing disconnect:`, err.message);
+                log.warn({ err }, `${name} close error, forcing disconnect`);
                 try { client.disconnect(); } catch { }
             } finally {
                 // Closed here — untrack so RedisClient.closeAll() (called right after
@@ -249,9 +250,9 @@ class RedisPubSubService {
             this.subscriptions.clear();
             this.isInitialized = false;
 
-            console.log(`[RedisPubSub] Worker ${this.workerId} closed`);
+            log.info(`Worker ${this.workerId} closed`);
         } catch (error) {
-            console.error('[RedisPubSub] Error during close:', error.message);
+            log.error({ err: error }, 'Error during close');
         }
     }
 }

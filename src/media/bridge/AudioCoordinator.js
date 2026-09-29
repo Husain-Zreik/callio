@@ -17,6 +17,9 @@ import { recordingCoordinator } from '../recording/RecordingCoordinator.js';
 import { dtmfCoordinator } from '../dtmf/DTMFCoordinator.js';
 import { ConnectionType } from '../../core/constants/CallConstants.js';
 import EventBus from '../../core/EventBus.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.bridge.AudioCoordinator');
 
 export class AudioCoordinator {
     constructor() {
@@ -46,7 +49,7 @@ export class AudioCoordinator {
         // sender.track is later swapped to the real track via replaceTrack(), which
         // would otherwise lose our only handle to stop the RTCAudioSource on teardown.
         sender._placeholderTrack = track;
-        console.log(`[AudioCoordinator] Placeholder added for ${peer.connectionType} (type=${type}), track=${track.id}`);
+        log.debug(`Placeholder added for ${peer.connectionType} (type=${type}), track=${track.id}`);
         peer.addPlaceholderSender(sender);
     }
 
@@ -71,7 +74,7 @@ export class AudioCoordinator {
         // Signal QueueAudioCoordinator to stop the queue waiting audio (if running)
         EventBus.emit('call:queue_audio_stop', { callId });
 
-        console.log(`[AudioCoordinator] Bridge started for call ${callId} — checking recording`);
+        log.info({ callId }, 'Bridge started — checking recording');
 
         const tenantId = frontendData?.context?.tenantId
             ?? customerData?.context?.tenantId
@@ -87,7 +90,7 @@ export class AudioCoordinator {
         } catch (err) {
             // Recording failure must never abort bridge start. The bridge ran successfully;
             // only recording init threw (e.g. native getReceivers() in an edge state).
-            console.error(`[AudioCoordinator] Recording init failed for call ${callId}: ${err.message}`, err);
+            log.error({ callId, err }, 'Recording init failed');
         }
 
         // DTMF detection is not started here — IvrCoordinator owns its own DTMF
@@ -102,7 +105,7 @@ export class AudioCoordinator {
     handleTrackReceived(callId, connectionType, track, stream) {
         const bridge = this.bridgeManager.getBridge(callId);
         if (!bridge) {
-            console.log(`[AudioCoordinator] No bridge for call ${callId}, track buffered: ${track.id}`);
+            log.debug({ callId }, `No bridge, track buffered: ${track.id}`);
             return;
         }
 
@@ -110,10 +113,10 @@ export class AudioCoordinator {
             const toType = connectionType === ConnectionType.AGENT
                 ? ConnectionType.CUSTOMER
                 : ConnectionType.AGENT;
-            console.log(`[AudioCoordinator] Relaying track: ${connectionType} → ${toType}`);
+            log.debug(`Relaying track: ${connectionType} → ${toType}`);
             bridge.handleIncomingTrack(track, stream, connectionType);
         } else {
-            console.log(`[AudioCoordinator] Bridge not active, track buffered: ${track.id}`);
+            log.debug(`Bridge not active, track buffered: ${track.id}`);
         }
     }
 
@@ -125,7 +128,7 @@ export class AudioCoordinator {
     async handleFrontendDisconnected(callId) {
         const bridge = this.bridgeManager.getBridge(callId);
         if (!bridge?.isActive) {
-            console.log(`[AudioCoordinator] No active bridge for call ${callId}, skipping beep`);
+            log.debug({ callId }, 'No active bridge, skipping beep');
             return;
         }
 
@@ -134,12 +137,12 @@ export class AudioCoordinator {
 
         const beepTrack = await placeholderTrackFactory.createAndRegister(callId, 'reconnecting', onFrame);
         if (!beepTrack) {
-            console.error(`[AudioCoordinator] Failed to create beep track for call ${callId}`);
+            log.error({ callId }, 'Failed to create beep track');
             return;
         }
 
         bridge.relayTrack(beepTrack, new wrtc.MediaStream([beepTrack]), ConnectionType.AGENT, ConnectionType.CUSTOMER);
-        console.log(`[AudioCoordinator] Reconnect beep attached for call ${callId}`);
+        log.info({ callId }, 'Reconnect beep attached');
     }
 
     // ─────────────────────────────────────────────────────────────────

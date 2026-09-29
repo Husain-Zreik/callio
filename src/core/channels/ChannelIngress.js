@@ -52,6 +52,9 @@ import {
     TerminationReason,
     TerminatedBy,
 } from '../constants/CallConstants.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.channels.ChannelIngress');
 
 // Tombstone written when the provider's end-of-call arrives before its
 // inbound offer. The late offer looks this up to persist the call directly
@@ -71,7 +74,7 @@ class ChannelIngress {
     // A call row may only be touched by events for its own line.
     _belongsTo(call, channel) {
         if (String(call.channel_id) === String(channel.id)) return true;
-        console.warn(`[ChannelIngress] Call ${call.id} is on channel ${call.channel_id}, not ${channel.id} — event ignored`);
+        log.warn({ callId: call.id }, `Call is on channel ${call.channel_id}, not ${channel.id} — event ignored`);
         return false;
     }
 
@@ -88,7 +91,7 @@ class ChannelIngress {
         const claimed = await callOwnershipService.claimCall(key, 180);
         if (!claimed) {
             const owner = await callOwnershipService.getCallOwner(key);
-            console.log(`[ChannelIngress] Skipping ${key} — already owned by worker ${owner}`);
+            log.debug(`Skipping ${key} — already owned by worker ${owner}`);
             return;
         }
         try {
@@ -98,7 +101,7 @@ class ChannelIngress {
             if (!latestCall || [CallStatus.TERMINATED, CallStatus.FAILED].includes(latestCall.status)) {
                 await redisCleanupService.cleanupCall(key);
             } else if (!(await callOwnershipService.setCallOwnershipPermanent(key))) {
-                console.warn(`[ChannelIngress] Could not make ownership permanent for ${key}`);
+                log.warn(`Could not make ownership permanent for ${key}`);
             }
         }
     }
@@ -108,7 +111,7 @@ class ChannelIngress {
     async inboundCall(channel, event) {
         const existing = await this._findCall(channel, event.providerCallId);
         if (existing) {
-            console.warn(`[ChannelIngress:incoming] Call ${event.providerCallId} already exists, skipping`);
+            log.warn(`Call ${event.providerCallId} already exists, skipping`);
             return;
         }
         await this._withOwnership(channel, event.providerCallId, () => this._handleIncomingCall(channel, event));
@@ -149,13 +152,10 @@ class ChannelIngress {
             // CANCELLED for the audit trail and stop — no ring, no media.
             const activeCall = await CallRepository.findActiveInboundByCustomer(tenantId, customer.address);
             if (activeCall) {
-                console.warn(
-                    `[ChannelIngress:incoming] Dedup: customer ${customer.address} already has active call ${activeCall.id} ` +
-                    `(providerCallId=${activeCall.provider_call_id}) for tenant ${tenantId} — recording ${providerCallId} as CANCELLED`
-                );
+                log.warn({ tenantId }, `Dedup: customer ${customer.address} already has active call ${activeCall.id} (providerCallId=${activeCall.provider_call_id}) — recording ${providerCallId} as CANCELLED`);
                 const dupCallId = await CallRepository.create({ ...baseRow, metadata })
                     .catch((err) => {
-                        console.error(`[ChannelIngress:incoming] Failed to record duplicate call ${providerCallId}:`, err);
+                        log.error({ err }, `Failed to record duplicate call ${providerCallId}`);
                         return null;
                     });
                 if (dupCallId) {
@@ -168,7 +168,7 @@ class ChannelIngress {
                         callDuration: 0,
                         ringingDuration: 0,
                     }).catch((err) =>
-                        console.error(`[ChannelIngress:incoming] Failed to finalize duplicate call ${dupCallId}:`, err)
+                        log.error({ err }, `Failed to finalize duplicate call ${dupCallId}`)
                     );
                     callLifecycleLogger.logTerminated(dupCallId, tenantId, null, {
                         reason: TerminationReason.CANCELLED,
@@ -248,7 +248,7 @@ class ChannelIngress {
                     source: 'provider_end_before_offer',
                     log: { out_of_order_terminate: true, race: 'offer_create_after_terminate_tombstone' },
                 });
-                console.log(`[ChannelIngress:incoming] Race detected for ${providerCallId}: finalized call ${callId} as CANCELLED.`);
+                log.info({ callId }, `Race detected for ${providerCallId}: finalized call as CANCELLED.`);
                 return;
             }
 
@@ -273,7 +273,7 @@ class ChannelIngress {
 
             // ── IVR: answer the customer without waiting for an agent ──
             if (ivrFlowId) {
-                console.log(`[ChannelIngress:incoming] IVR call ${callId} — auto-accepting for flow ${ivrFlowId}`);
+                log.info({ callId }, `IVR call — auto-accepting for flow ${ivrFlowId}`);
                 const ivrAnsweredAt = new Date();
                 const flowHeader = await IvrRepository.findFlowHeader(ivrFlowId, tenantId).catch(() => null);
                 try {
@@ -293,9 +293,9 @@ class ChannelIngress {
                         ivr_flow_name: flowHeader?.name ?? null,
                         accepted_by: 'system',
                     });
-                    console.log(`[ChannelIngress:incoming] IVR call ${callId} accepted by system — IVR session starts on media connect`);
+                    log.info({ callId }, 'IVR call accepted by system — IVR session starts on media connect');
                 } catch (ivrErr) {
-                    console.error(`[ChannelIngress:incoming] IVR auto-accept failed for call ${callId}:`, ivrErr);
+                    log.error({ callId, err: ivrErr }, 'IVR auto-accept failed');
                 }
 
                 // Supervisors see the call; IVR assignment type tells clients no
@@ -336,13 +336,13 @@ class ChannelIngress {
                 // No agent claimed on arrival (all busy, or older calls waiting)
                 // — drain now so it's picked up as soon as someone is free.
                 agentAssignmentCoordinator.assignOldestUnassignedCall(tenantId).catch((err) =>
-                    console.error(`[ChannelIngress:incoming] deferred assignment trigger failed for call ${callId}:`, err)
+                    log.error({ callId, err }, 'deferred assignment trigger failed')
                 );
             }
 
             await agentAssignmentCoordinator.emitQueueUpdate(tenantId, queue?.id ?? null);
         } catch (error) {
-            console.error(`[ChannelIngress:incoming] Failed to handle call ${providerCallId}:`, error);
+            log.error({ err: error }, `Failed to handle call ${providerCallId}`);
         }
     }
 
@@ -412,7 +412,7 @@ class ChannelIngress {
         callLifecycleLogger.logQueued(callId, baseRow.tenant_id, {
             providerCallId: baseRow.provider_call_id,
             out_of_order_terminate: true,
-        }).catch((err) => console.error(`[ChannelIngress:incoming] missed-call logQueued error:`, err));
+        }).catch((err) => log.error({ err }, 'missed-call logQueued error'));
 
         await callTerminator.settle(callId, {
             reason: isFailed ? TerminationReason.PROVIDER_ERROR : terminationReason,
@@ -421,10 +421,7 @@ class ChannelIngress {
             log: { out_of_order_terminate: true },
         });
 
-        console.log(
-            `[ChannelIngress:incoming] Out-of-order end consumed for ${baseRow.provider_call_id}; ` +
-            `created missed call ${callId} (no agent assigned, no ring).`
-        );
+        log.info({ callId }, `Out-of-order end consumed for ${baseRow.provider_call_id}; created missed call (no agent assigned, no ring).`);
     }
 
     // ── Outbound call answered ────────────────────────────────────────────────
@@ -432,14 +429,14 @@ class ChannelIngress {
     async outboundAnswered(channel, { providerCallId, sdpAnswer }) {
         const existingCall = await this._findCall(channel, providerCallId);
         if (!existingCall) {
-            console.warn(`[ChannelIngress:outgoing] No outgoing call found for providerCallId=${providerCallId}`);
+            log.warn(`No outgoing call found for providerCallId=${providerCallId}`);
             return;
         }
         if (!this._belongsTo(existingCall, channel)) return;
         // The provider's answer may arrive after its RINGING status (delivery
         // order isn't guaranteed), so RINGING still takes the answer.
         if (existingCall.status !== CallStatus.INITIATED && existingCall.status !== CallStatus.RINGING) {
-            console.warn(`[ChannelIngress:outgoing] Outgoing call ${existingCall.id} is ${existingCall.status}, not awaiting an answer — skipping`);
+            log.warn(`Outgoing call ${existingCall.id} is ${existingCall.status}, not awaiting an answer — skipping`);
             return;
         }
         // The worker holding the agent's media applies the answer.
@@ -455,12 +452,12 @@ class ChannelIngress {
     // ── Provider status updates ───────────────────────────────────────────────
 
     async statusChanged(channel, { providerCallId, status, at }) {
-        console.log(`[ChannelIngress:status] providerCallId=${providerCallId}, status=${status}`);
+        log.info(`providerCallId=${providerCallId}, status=${status}`);
 
         try {
             const call = await this._findCall(channel, providerCallId);
             if (!call) {
-                console.warn(`[ChannelIngress:status] Call not found for providerCallId=${providerCallId}`);
+                log.warn(`Call not found for providerCallId=${providerCallId}`);
                 return;
             }
             if (!this._belongsTo(call, channel)) return;
@@ -484,10 +481,7 @@ class ChannelIngress {
                             : (call.ended_at ? new Date(call.ended_at) : new Date());
                         const retroRingingDuration = Math.max(0, Math.floor((ringingEnd - timestampValue) / 1000));
                         await CallRepository.updateDuration(callId, 'ringing_duration', retroRingingDuration);
-                        console.log(
-                            `[ChannelIngress:status/RINGING] Retroactive ringing_duration=${retroRingingDuration}s ` +
-                            `for already-terminal call ${callId}`
-                        );
+                        log.debug({ callId }, `Retroactive ringing_duration=${retroRingingDuration}s for already-terminal call`);
                     }
                     if (!isTerminal && previousStatus === CallStatus.INITIATED) {
                         await CallRepository.updateStatus(callId, CallStatus.RINGING);
@@ -603,9 +597,9 @@ class ChannelIngress {
                 answeredAt: status === 'ACCEPTED' ? timestampValue.toISOString() : undefined,
             });
 
-            console.log(`[ChannelIngress:status] Updated call ${callId} to ${status}`);
+            log.info({ callId }, `Updated call to ${status}`);
         } catch (error) {
-            console.error(`[ChannelIngress:status] Error processing ${status} for providerCallId=${providerCallId}:`, error);
+            log.error({ err: error }, `Error processing ${status} for providerCallId=${providerCallId}`);
         }
     }
 
@@ -647,10 +641,7 @@ class ChannelIngress {
                         recordedAt: Date.now(),
                     });
                     await redisBaseService.setnx(tombstoneKey(channel, providerCallId), tombstonePayload, TERMINATE_TOMBSTONE_TTL_SECONDS);
-                    console.warn(
-                        `[ChannelIngress:ended] Out-of-order: no row for ${providerCallId} after retry; ` +
-                        `recorded tombstone (TTL ${TERMINATE_TOMBSTONE_TTL_SECONDS}s) for the late offer`
-                    );
+                    log.warn(`Out-of-order: no row for ${providerCallId} after retry; recorded tombstone (TTL ${TERMINATE_TOMBSTONE_TTL_SECONDS}s) for the late offer`);
                     return;
                 }
             }
@@ -676,7 +667,7 @@ class ChannelIngress {
                     try {
                         existingFailureDetails = JSON.parse(existingFailureDetailsRaw);
                     } catch {
-                        console.warn(`[ChannelIngress:ended] Malformed failure_details for call ${callId} — treating as null`);
+                        log.warn({ callId }, 'Malformed failure_details — treating as null');
                     }
                 } else {
                     existingFailureDetails = existingFailureDetailsRaw;
@@ -806,7 +797,7 @@ class ChannelIngress {
                 }
             }
         } catch (error) {
-            console.error(`[ChannelIngress:ended] Error for call ${providerCallId}:`, error);
+            log.error({ err: error }, `Error for call ${providerCallId}`);
         }
     }
 }

@@ -11,6 +11,9 @@ import { TerminationEventHandler } from './handlers/TerminationEventHandler.js';
 import { RejectionEventHandler } from './handlers/RejectionEventHandler.js';
 import { TransferEventHandler } from './handlers/TransferEventHandler.js';
 import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinator.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.events.CallEventHandler');
 
 export class CallEventHandler {
     constructor() {
@@ -41,10 +44,10 @@ export class CallEventHandler {
     async handleCallEvent(eventType, data) {
         const { callId } = data;
 
-        console.log(`[CallEventHandler] 📨 Handling ${eventType} for call ${callId}`);
+        log.debug({ callId }, `Handling ${eventType}`);
 
         if (!isValidEventType(eventType)) {
-            console.warn(`[CallEventHandler] Unknown event type: ${eventType}`);
+            log.warn(`Unknown event type: ${eventType}`);
             return;
         }
 
@@ -109,11 +112,11 @@ export class CallEventHandler {
                     break;
 
                 default:
-                    console.warn(`[CallEventHandler] Unhandled event type: ${eventType}`);
+                    log.warn(`Unhandled event type: ${eventType}`);
             }
         } catch (error) {
             const isKnownRace = error.message.includes('already terminated') || error.message.includes('already failed');
-            console[isKnownRace ? 'warn' : 'error'](`[CallEventHandler] Error handling ${eventType} for call ${callId}:`, error.message);
+            log[isKnownRace ? 'warn' : 'error']({ callId, err: error }, `Error handling ${eventType}`);
             // Target the socket that triggered this event when we know it (data.socketId,
             // e.g. agent_joined/call_rejected) so a per-actor failure (like losing a
             // ring-group accept race) isn't broadcast to every socket in the call room —

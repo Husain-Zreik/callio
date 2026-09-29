@@ -1,6 +1,9 @@
 // src/realtime/namespaces/call/handlers/media.js
 import EventBus from '../../../../core/EventBus.js';
 import { roomManager } from '../../../managers/RoomManager.js';
+import { logger } from '../../../../infra/logging/logger.js';
+
+const log = logger('realtime.media');
 
 export function registerCallMediaListeners() {
     EventBus.on('connection:ice-candidate', (data) => {
@@ -25,7 +28,7 @@ export function registerCallMediaListeners() {
     // Fired by AudioBridge._refreshAgentTrackInMonitor after the monitor's agent-audio
     // sender is seamlessly refreshed with the new AGENT track.
     EventBus.on('call:monitor:agent:reconnected', ({ callId, supervisorMode, agentPrivate }) => {
-        console.log(`[EventBus] Monitor audio restored after agent reconnect for call ${callId} (mode=${supervisorMode}, private=${agentPrivate})`);
+        log.info({ callId }, `Monitor audio restored after agent reconnect (mode=${supervisorMode}, private=${agentPrivate})`);
         roomManager.broadcastToCall(callId, 'call:monitor:agent:reconnected', { callId });
 
         // Re-deliver the active supervisor mode so the reconnected agent sees the correct

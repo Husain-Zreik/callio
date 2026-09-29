@@ -11,6 +11,9 @@
 import { resolve as resolvePath, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.playback.IvrErrorAudioProvider');
 
 const __dirname_esm = dirname(fileURLToPath(import.meta.url));
 
@@ -34,12 +37,12 @@ class IvrErrorAudioProvider {
             const candidate = resolvePath(STORAGE_DIR, `${BASE_NAME}.${ext}`);
             if (fs.existsSync(candidate)) {
                 this._path = candidate;
-                console.log(`[IvrErrorAudioProvider] Found static error audio: ${candidate}`);
+                log.debug(`Found static error audio: ${candidate}`);
                 return this._path;
             }
         }
 
-        console.warn(`[IvrErrorAudioProvider] No error audio file found in ${STORAGE_DIR} — callers will hear silence on error`);
+        log.warn(`No error audio file found in ${STORAGE_DIR} — callers will hear silence on error`);
         this._path = null;
         return null;
     }

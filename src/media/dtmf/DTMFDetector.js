@@ -24,6 +24,9 @@
 //   confirmWindows — raise for fewer false positives, lower for faster response.
 //   silenceWindows — raise to prevent multi-fire on the same keypress.
 //   cooldownMs     — hard floor between successive events of the same digit.
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.dtmf.DTMFDetector');
 
 const ROW_FREQS = [697, 770, 852, 941];     // DTMF low group
 const COL_FREQS = [1209, 1336, 1477, 1633]; // DTMF high group
@@ -199,12 +202,7 @@ export class DTMFDetector {
         this._pendingCount = 0;
         this._lastEmit[digit] = now;
 
-        console.log(
-            `[DTMFDetector] Digit '${digit}' confirmed — ` +
-            `row=${row.freq}Hz power=${row.power.toExponential(2)}, ` +
-            `col=${col.freq}Hz power=${col.power.toExponential(2)}, ` +
-            `twist=${twist.toFixed(2)}`
-        );
+        log.debug(`Digit '${digit}' confirmed — row=${row.freq}Hz power=${row.power.toExponential(2)}, col=${col.freq}Hz power=${col.power.toExponential(2)}, twist=${twist.toFixed(2)}`);
 
         return { digit, rowHz: row.freq, colHz: col.freq, rowPower: row.power, colPower: col.power };
     }

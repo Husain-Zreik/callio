@@ -7,6 +7,9 @@ import CallRepository from '../../persistence/CallRepository.js';
 import { AgentAvailability } from '../constants/CallConstants.js';
 import { config } from '../../../config/envConfig.js';
 import { presenceService } from '../agents/PresenceService.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.routing.CallAgentAssignmentService');
 
 const isAvailable = (agent) => agent.availability === AgentAvailability.AVAILABLE;
 
@@ -42,7 +45,7 @@ class CallAgentAssignmentService {
                 1, lockKey, token
             );
         } catch (error) {
-            console.error(`[AgentAssignment] Failed to release lock ${lockKey}:`, error);
+            log.error({ err: error }, `Failed to release lock ${lockKey}`);
         }
     }
 
@@ -127,7 +130,7 @@ class CallAgentAssignmentService {
         if (!orderedCandidates.length) return null;
         const lockKey = this.#lockKey(queueId);
         const token = await this.acquireLock(lockKey);
-        if (!token) console.warn(`[AgentAssignment] Could not acquire assignment lock for queue ${queueId} — claiming without it`);
+        if (!token) log.warn(`Could not acquire assignment lock for queue ${queueId} — claiming without it`);
         try {
             for (const candidate of orderedCandidates) {
                 if (await claimFn(candidate.id)) {
@@ -170,7 +173,7 @@ class CallAgentAssignmentService {
 
         // Isolated: a failed count must not break the snapshot the queue UI relies on.
         const waitingCount = await CallRepository.countUnassignedCalls(queueId).catch((err) => {
-            console.error(`[CallAgentAssignmentService] countUnassignedCalls failed for queue ${queueId}:`, err);
+            log.error({ err }, `countUnassignedCalls failed for queue ${queueId}`);
             return 0;
         });
 

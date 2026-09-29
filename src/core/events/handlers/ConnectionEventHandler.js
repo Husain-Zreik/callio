@@ -6,6 +6,9 @@ import { callTerminator } from '../../calls/CallTerminator.js';
 import { audioCoordinator } from '../../../media/bridge/AudioCoordinator.js';
 import { iceCoordinator } from '../../../media/webrtc/ice/ICECandidateCoordinator.js';
 import { TerminationReason, TerminatedBy } from '../../constants/CallConstants.js';
+import { logger } from '../../../infra/logging/logger.js';
+
+const log = logger('core.events.ConnectionEventHandler');
 
 // How long (ms) to wait for agent reconnect before terminating the call.
 const RECONNECT_TIMEOUT_MS = 120_000;
@@ -20,7 +23,7 @@ export class ConnectionEventHandler {
         if (timerId !== undefined) {
             clearTimeout(timerId);
             this._reconnectTimers.delete(callId);
-            console.log(`[ConnectionEventHandler] ⏱️ Reconnect timer cleared for call ${callId}`);
+            log.info({ callId }, 'Reconnect timer cleared');
         }
     }
 
@@ -41,12 +44,12 @@ export class ConnectionEventHandler {
         if (userId) {
             const call = await CallRepository.findById(callId);
             if (!call || String(call.agent_id) !== String(userId)) {
-                console.log(`[ConnectionEventHandler] Ignoring stale FRONTEND_DISCONNECTED for call ${callId} — user ${userId} is not the current assigned agent`);
+                log.debug({ callId, agentId: userId }, 'Ignoring stale FRONTEND_DISCONNECTED — user is not the current assigned agent');
                 return;
             }
         }
 
-        console.log(`[ConnectionEventHandler] Frontend disconnected for call ${callId}`);
+        log.info({ callId }, 'Frontend disconnected');
 
         callLifecycleLogger.logDisconnected(callId, data.tenantId, userId ?? null, {
             reason: data.reason ?? 'disconnect',
@@ -55,13 +58,13 @@ export class ConnectionEventHandler {
         try {
             await audioCoordinator.handleFrontendDisconnected(callId);
         } catch (error) {
-            console.error(`[ConnectionEventHandler] Failed to attach beep for call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Failed to attach beep');
         }
 
         this.clearReconnectTimer(callId);
         const timerId = setTimeout(async () => {
             this._reconnectTimers.delete(callId);
-            console.warn(`[ConnectionEventHandler] ⚠️ Agent did not reconnect within ${RECONNECT_TIMEOUT_MS / 1000}s for call ${callId} — terminating`);
+            log.warn({ callId }, `Agent did not reconnect within ${RECONNECT_TIMEOUT_MS / 1000}s — terminating`);
             try {
                 // The agent is gone (browser closed, network died): end the call,
                 // tell the provider so the customer isn't left on a dead line, and
@@ -77,7 +80,7 @@ export class ConnectionEventHandler {
                     agentAfter: 'offline',
                 });
             } catch (err) {
-                console.error(`[ConnectionEventHandler] Failed to end call ${callId} after the agent disconnected:`, err);
+                log.error({ callId, err }, 'Failed to end call after the agent disconnected');
             }
         }, RECONNECT_TIMEOUT_MS);
         this._reconnectTimers.set(callId, timerId);
@@ -86,7 +89,7 @@ export class ConnectionEventHandler {
     async handleICECandidate(data) {
         const { callId, candidate, connectionType } = data;
 
-        console.log(`[ConnectionEventHandler] ICE candidate for ${connectionType} on call ${callId}`);
+        log.debug({ callId }, `ICE candidate for ${connectionType}`);
 
         try {
             const result = peerRegistry.getConnectionData(callId, connectionType);
@@ -95,7 +98,7 @@ export class ConnectionEventHandler {
                 candidate, callId, connectionType
             );
         } catch (error) {
-            console.error(`[ConnectionEventHandler] Failed to handle ICE candidate for call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Failed to handle ICE candidate');
         }
     }
 }

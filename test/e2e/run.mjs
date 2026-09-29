@@ -52,6 +52,8 @@ const env = {
     // Keep real provider credentials out of the test process.
     AWS_ACCESS_KEY_ID: '', AWS_SECRET_ACCESS_KEY: '', ONESIGNAL_APP_ID: '', APNS_KEY_ID: '',
     FIREBASE_SERVICE_ACCOUNT_PATH: join(work, 'no-firebase.json'),
+    // Each suite's Callio output (pretty, debug) lands in <work>/<suite>.callio.log.
+    LOG_LEVEL: process.env.TEST_LOG_LEVEL || 'debug', LOG_STDOUT: 'true', LOG_FORMAT: 'pretty',
     ...sipEnv,
 };
 
@@ -95,6 +97,27 @@ function suiteFiles() {
     }
     return only.length ? all.filter((f) => only.some((o) => f.includes(o))) : all;
 }
+
+// Code in src/ logs through src/infra/logging/logger.js, never console.* (CLAUDE.md, Logging).
+function checkNoConsole() {
+    const offenders = [];
+    const walk = (dir) => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            const full = join(dir, entry.name);
+            if (entry.isDirectory()) { if (full !== join(root, 'src', 'infra', 'logging')) walk(full); continue; }
+            if (!/\.m?js$/.test(entry.name)) continue;
+            readFileSync(full, 'utf8').split('\n').forEach((line, i) => {
+                if (/\bconsole\s*(\.|\[)/.test(line.replace(/\/\/.*$/, ''))) offenders.push(`${full.slice(root.length + 1)}:${i + 1}: ${line.trim()}`);
+            });
+        }
+    };
+    walk(join(root, 'src'));
+    if (offenders.length) {
+        console.log(`[e2e] console.* in src/ — use the logger instead:\n  ${offenders.join('\n  ')}`);
+        process.exit(1);
+    }
+}
+checkNoConsole();
 
 let failed = 0;
 let callio = null;

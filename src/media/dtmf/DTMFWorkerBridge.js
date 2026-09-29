@@ -10,6 +10,9 @@
 import { Worker } from 'worker_threads';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.dtmf.DTMFWorkerBridge');
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -68,7 +71,7 @@ class DTMFWorkerBridge {
      */
     startSession(callId, onDigit) {
         if (!this._ready) {
-            console.warn(`[DTMFWorkerBridge] startSession: worker not ready — DTMF detection disabled for call ${callId}`);
+            log.warn({ callId }, 'startSession: worker not ready — DTMF detection disabled');
             return false;
         }
         this._callbacks.set(callId, onDigit);
@@ -169,7 +172,7 @@ class DTMFWorkerBridge {
                 worker.on('error', (err) => { if (!this._terminating) this._onWorkerDown(`Worker error: ${err.message}`); });
                 worker.on('exit', (code) => { if (code !== 0 && !this._terminating) this._onWorkerDown(`Worker exited with code ${code}`); });
 
-                console.log(`[DTMFWorkerBridge] Worker ready (threadId=${worker.threadId})`);
+                log.info(`Worker ready (threadId=${worker.threadId})`);
                 resolve();
             });
         });
@@ -178,30 +181,30 @@ class DTMFWorkerBridge {
     _onWorkerDown(reason) {
         if (!this._ready) return;
 
-        console.error(`[DTMFWorkerBridge] Worker down — ${reason}`);
+        log.error(`Worker down — ${reason}`);
         this._ready = false;
         this._worker = null;
         this._callbacks.clear();
 
         if (this._terminating || this._restartAttempts >= MAX_RESTART_ATTEMPTS) {
             if (!this._terminating) {
-                console.error('[DTMFWorkerBridge] Max restart attempts reached — DTMF detection disabled until process restart');
+                log.warn('Max restart attempts reached — DTMF detection disabled until process restart');
             }
             return;
         }
 
         this._restartAttempts++;
         const delay = RESTART_BASE_DELAY_MS * (2 ** (this._restartAttempts - 1));
-        console.warn(`[DTMFWorkerBridge] Restarting worker (attempt ${this._restartAttempts}/${MAX_RESTART_ATTEMPTS}) in ${delay} ms...`);
+        log.warn(`Restarting worker (attempt ${this._restartAttempts}/${MAX_RESTART_ATTEMPTS}) in ${delay} ms...`);
 
         setTimeout(() => {
             this._spawn()
                 .then(() => {
                     this._restartAttempts = 0;
-                    console.log('[DTMFWorkerBridge] Worker restarted successfully');
+                    log.info('Worker restarted successfully');
                 })
                 .catch((err) => {
-                    console.error('[DTMFWorkerBridge] Worker restart failed:', err.message);
+                    log.error({ err }, 'Worker restart failed');
                     this._onWorkerDown(`Restart failed: ${err.message}`);
                 });
         }, delay);
@@ -217,7 +220,7 @@ class DTMFWorkerBridge {
                 break;
             }
             case 'error': {
-                console.error(`[DTMFWorkerBridge] Session error — call ${msg.callId}:`, msg.message);
+                log.error({ callId: msg.callId, reason: msg.message }, 'Session error');
                 break;
             }
         }

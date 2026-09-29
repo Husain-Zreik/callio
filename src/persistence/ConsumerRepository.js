@@ -4,6 +4,9 @@
 import { createHash } from 'crypto';
 import connection from '../../config/dbConnection.js';
 import { decryptJson, decryptSecret } from '../infra/crypto/secretBox.js';
+import { logger } from '../infra/logging/logger.js';
+
+const log = logger('persistence.ConsumerRepository');
 
 export function hashApiKey(apiKey) {
     return createHash('sha256').update(String(apiKey)).digest('hex');
@@ -41,7 +44,7 @@ class ConsumerRepository {
         const row = rows[0];
         if (!row) return null;
         connection.execute('UPDATE consumer_api_keys SET last_used_at = NOW() WHERE id = ?', [row.key_id])
-            .catch((err) => console.error('[ConsumerRepository] last_used_at update failed:', err));
+            .catch((err) => log.error({ err }, 'last_used_at update failed'));
         return row;
     }
 

@@ -9,6 +9,9 @@ import { callLifecycleLogger } from './CallLifecycleLogger.js';
 import { callTerminator } from './CallTerminator.js';
 import { autoOfflinePolicy } from '../routing/AutoOfflinePolicy.js';
 import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinator.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.calls.CallCleanupService');
 
 const CLEANUP_COOLDOWN = 30_000;
 const OUTBOUND_INTENT_TTL_MINUTES = 2;
@@ -58,15 +61,15 @@ class CallCleanupService {
         if (businessQueue.length === 0) return;
 
         this.lastCleanupTime.set(tenantId, now);
-        console.log(`[Cleanup] Processing ${businessQueue.length} queued calls for tenant ${tenantId}`);
+        log.info({ tenantId }, `Processing ${businessQueue.length} queued calls`);
 
         setImmediate(async () => {
             try {
                 await this.batchCleanupCalls(businessQueue);
                 businessQueue.forEach(item => this.cleanupQueue.delete(item.callId));
-                console.log(`[Cleanup] ✅ Batch cleanup completed for ${businessQueue.length} calls`);
+                log.info(`Batch cleanup completed for ${businessQueue.length} calls`);
             } catch (error) {
-                console.error(`[Cleanup] ❌ Batch cleanup failed:`, error);
+                log.error({ err: error }, 'Batch cleanup failed');
             }
         });
     }
@@ -99,15 +102,14 @@ class CallCleanupService {
                 provider: 'end',
                 source: 'cleanup',
             }).catch((err) => {
-                console.error(`[Cleanup] Ending stuck call ${call.id} failed:`, err);
+                log.error({ callId: call.id, err }, 'Ending stuck call failed');
                 return false;
             });
             if (ended) terminatedIds.add(call.id);
         }
 
         const skipped = callItems.length - terminatedIds.size;
-        console.log(`[Cleanup] Ended ${terminatedIds.size}/${callItems.length} stuck call(s)`
-            + (skipped > 0 ? ` (${skipped} skipped — already ended or moved on)` : ''));
+        log.info(`Ended ${terminatedIds.size}/${callItems.length} stuck call(s)${skipped > 0 ? ` (${skipped} skipped — already ended or moved on)` : ''}`);
         return terminatedIds;
     }
 
@@ -118,7 +120,7 @@ class CallCleanupService {
         const stuckCalls = await CallRepository.findStuckCallsForUser(userId, 1);
         if (stuckCalls.length === 0) return { releasedCount: 0 };
 
-        console.log(`[Cleanup] 📞 On-demand stale-call release for user ${userId}: ${stuckCalls.length} call(s)`);
+        log.info({ agentId: userId }, `On-demand stale-call release: ${stuckCalls.length} call(s)`);
 
         const callItems = stuckCalls.map(call => ({
             callId: call.id,
@@ -141,18 +143,18 @@ class CallCleanupService {
         await this._reconcileOrphanedPeers();
 
         await RecordingRepository.markStaleRecordingsFailed().catch((err) =>
-            console.error('[Cleanup] Stale recording scan failed:', err)
+            log.error({ err }, 'Stale recording scan failed')
         );
 
         await this._expireOutboundIntents().catch((err) =>
-            console.error('[Cleanup] Outbound intent expiry failed:', err)
+            log.error({ err }, 'Outbound intent expiry failed')
         );
 
         try {
             const stuckCalls = await CallRepository.findAllStuckCalls(1);
             if (stuckCalls.length === 0) return;
 
-            console.log(`[Cleanup] ⏰ Periodic scan found ${stuckCalls.length} stuck call(s)`);
+            log.debug(`Periodic scan found ${stuckCalls.length} stuck call(s)`);
 
             for (const call of stuckCalls) {
                 const reason = call.status === 'RINGING' ? 'NO_ANSWER' : (call.termination_reason ?? 'COMPLETED');
@@ -165,7 +167,7 @@ class CallCleanupService {
                 this.processCleanupQueue(bId);
             }
         } catch (err) {
-            console.error('[Cleanup] ❌ Periodic cleanup scan failed:', err.message);
+            log.error({ err }, 'Periodic cleanup scan failed');
         }
     }
 
@@ -191,7 +193,7 @@ class CallCleanupService {
             const stuckCalls = await CallRepository.findStuckIvrTransferredCalls();
             if (stuckCalls.length === 0) return;
 
-            console.log(`[Cleanup] ⏰ IVR ring timeout: ${stuckCalls.length} call(s) exceeded agent ring timeout`);
+            log.info(`IVR ring timeout: ${stuckCalls.length} call(s) exceeded agent ring timeout`);
 
             for (const call of stuckCalls) {
                 // Lifecycle event — written before termination so the duration is accurate.
@@ -202,7 +204,7 @@ class CallCleanupService {
                     ivr_flow_id: call.ivr_flow_id,
                     configured_timeout: call.agent_ring_timeout,
                 }).catch(err =>
-                    console.error(`[Cleanup] IVR lifecycle log failed for call ${call.id}:`, err.message)
+                    log.error({ callId: call.id, err }, 'IVR lifecycle log failed')
                 );
 
                 // A missed offer for the auto-offline policy. Counted here because
@@ -223,7 +225,7 @@ class CallCleanupService {
                 this.processCleanupQueue(bId);
             }
         } catch (err) {
-            console.error('[Cleanup] ❌ IVR ring cleanup scan failed:', err.message);
+            log.error({ err }, 'IVR ring cleanup scan failed');
         }
     }
 
@@ -248,7 +250,7 @@ class CallCleanupService {
         try {
             calls = await CallRepository.findByIds(localCallIds);
         } catch (err) {
-            console.error('[Cleanup] ♻️ Reconciler DB lookup failed:', err.message);
+            log.error({ err }, 'Reconciler DB lookup failed');
             return;
         }
 
@@ -260,9 +262,9 @@ class CallCleanupService {
             // Close if the call is terminal, or no longer exists in the DB at all.
             if (status !== undefined && !TERMINAL_STATUSES.has(status)) continue;
 
-            console.log(`[Cleanup] ♻️ Closing orphaned peer for call ${callId} (db status: ${status ?? 'not found'})`);
+            log.info({ callId }, `Closing orphaned peer (db status: ${status ?? 'not found'})`);
             await peerRegistry.closePeerConnection(callId).catch(err =>
-                console.error(`[Cleanup] ♻️ Reconciler close failed for call ${callId}:`, err.message)
+                log.error({ callId, err }, 'Reconciler close failed')
             );
 
             // Emit call:terminated so QueueAudioCoordinator (and any other EventBus

@@ -1,4 +1,7 @@
 // src/media/recording/encoding/OpusEncoder.js
+import { logger } from '../../../infra/logging/logger.js';
+
+const log = logger('media.recording.OpusEncoder');
 
 const SAMPLE_RATE = 48000;
 const CHANNELS = 2;
@@ -12,9 +15,9 @@ let OpusEncoder = null;
 try {
     const pkg = await import('@discordjs/opus');
     OpusEncoder = pkg.default?.OpusEncoder ?? pkg.OpusEncoder;
-    console.log('[OpusEncoder] ✅ Native Opus bindings loaded');
+    log.info('Native Opus bindings loaded');
 } catch (err) {
-    console.warn('[OpusEncoder] ⚠️ Native Opus bindings not available — encoding disabled:', err.message);
+    log.warn({ err }, 'Native Opus bindings not available — encoding disabled');
 }
 
 /**
@@ -83,7 +86,7 @@ export class PcmOpusEncoder {
     reset() {
         this._ringLen = 0;
         this.encoder  = new OpusEncoder(SAMPLE_RATE, CHANNELS);
-        console.log('[OpusEncoder] Reset');
+        log.info('Reset');
     }
 
     getFrameSize()  { return this.frameSize; }

@@ -10,6 +10,9 @@ import { audioCoordinator } from '../../../media/bridge/AudioCoordinator.js';
 import { CallErrorCodes } from '../CallErrorCodes.js';
 import { emitCallError } from '../CallErrorEmitter.js';
 import { ConnectionType } from '../../constants/CallConstants.js';
+import { logger } from '../../../infra/logging/logger.js';
+
+const log = logger('core.events.MonitorEventHandler');
 
 export class MonitorEventHandler {
 
@@ -31,12 +34,12 @@ export class MonitorEventHandler {
             const sdpAnswer = await sdpCoordinator.createSDPAnswer(callId, sdpOffer, ConnectionType.MONITOR);
             iceCoordinator.markClientReady(callId);
 
-            console.log(`[MonitorEventHandler] Monitoring session created for call ${callId}`);
+            log.info({ callId }, 'Monitoring session created');
 
             EventBus.emit('call:monitor:started', { callId, sdpAnswer, socketId });
 
         } catch (error) {
-            console.error(`[MonitorEventHandler] ❌ Start failed:`, error.message);
+            log.error({ err: error }, 'Start failed');
 
             const isValidationError =
                 error.message === 'Call not found or already ended' ||
@@ -66,9 +69,9 @@ export class MonitorEventHandler {
             // Confirm to the supervisor, and reflect the mode to the agent so their
             // active-call UI can show "supervisor is whispering" / "joined the call".
             EventBus.emit('call:monitor:mode:changed', { callId, mode, socketId });
-            console.log(`[MonitorEventHandler] Supervisor mode set to '${mode}' for call ${callId}`);
+            log.info({ callId }, `Supervisor mode set to '${mode}'`);
         } catch (error) {
-            console.error(`[MonitorEventHandler] ❌ Mode change failed:`, error.message);
+            log.error({ err: error }, 'Mode change failed');
             emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: error.message, socketId });
         }
     }
@@ -86,9 +89,9 @@ export class MonitorEventHandler {
             // Broadcast to the call room so the agent's UI confirms and the
             // supervisor's UI can show that the agent is replying privately.
             EventBus.emit('call:agent:private:changed', { callId, active: !!active, socketId });
-            console.log(`[MonitorEventHandler] Agent-private set to ${!!active} for call ${callId}`);
+            log.info({ callId }, `Agent-private set to ${!!active}`);
         } catch (error) {
-            console.error(`[MonitorEventHandler] ❌ Agent-private change failed:`, error.message);
+            log.error({ err: error }, 'Agent-private change failed');
             emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: error.message, socketId });
         }
     }
@@ -97,7 +100,7 @@ export class MonitorEventHandler {
         const { callId, userId, socketId } = data;
 
         try {
-            console.log(`[MonitorEventHandler] Stopping monitoring for call ${callId} by ${userId}`);
+            log.info({ callId, agentId: userId }, 'Stopping monitoring');
 
             await peerRegistry.closePeerConnection(callId, ConnectionType.MONITOR);
 
@@ -106,7 +109,7 @@ export class MonitorEventHandler {
             EventBus.emit('call:monitor:ended', { callId, userId, socketId });
 
         } catch (error) {
-            console.error(`[MonitorEventHandler] ❌ Stop failed:`, error.message);
+            log.error({ err: error }, 'Stop failed');
             emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: error.message, socketId });
         }
     }

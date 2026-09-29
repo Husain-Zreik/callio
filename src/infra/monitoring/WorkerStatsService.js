@@ -20,6 +20,9 @@ import { leakMetrics } from './leakMetrics.js';
 import { callStateCensus } from './callStateCensus.js';
 import { config } from '../../../config/envConfig.js';
 import EventBus from '../../core/EventBus.js';
+import { logger } from '../logging/logger.js';
+
+const log = logger('infra.monitoring.WorkerStatsService');
 
 const INTERVAL_MS = 30_000;  // write a line every 30 s
 const RETENTION_DAYS = 7;       // keep the last 7 days of stat files
@@ -66,10 +69,7 @@ class WorkerStatsService {
         this._timer = setInterval(() => this._write('periodic'), INTERVAL_MS);
         if (this._timer.unref) this._timer.unref();
 
-        console.log(
-            `[WorkerStats] Writing to ${LOG_DIR}/worker-${this._workerId}-*.log ` +
-            `(every ${INTERVAL_MS / 1000}s, kept ${RETENTION_DAYS} days)`
-        );
+        log.info(`Writing to ${LOG_DIR}/worker-${this._workerId}-*.log (every ${INTERVAL_MS / 1000}s, kept ${RETENTION_DAYS} days)`);
     }
 
     stop() {
@@ -227,7 +227,7 @@ class WorkerStatsService {
         this._streamDay = day;
         this._stream = fs.createWriteStream(this._filePath(day), { flags: 'a' });
         this._stream.on('error', (err) =>
-            console.error(`[WorkerStats] Log write error:`, err.message)
+            log.error({ err }, 'Log write error')
         );
     }
 
@@ -248,7 +248,7 @@ class WorkerStatsService {
                 const full = path.join(LOG_DIR, name);
                 if (fs.statSync(full).mtimeMs < cutoff) {
                     fs.unlinkSync(full);
-                    console.log(`[WorkerStats] Pruned old stats file: ${name}`);
+                    log.info(`Pruned old stats file: ${name}`);
                 }
             }
         } catch { /* non-fatal */ }
@@ -307,7 +307,7 @@ class WorkerStatsService {
                 process.stdout.write(line);
             }
         } catch (err) {
-            console.error('[WorkerStats] Write failed:', err.message);
+            log.error({ err }, 'Write failed');
         }
     }
 

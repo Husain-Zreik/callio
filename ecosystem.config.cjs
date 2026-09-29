@@ -15,10 +15,9 @@
 //                                if graceful S3 upload drain is needed; keep at
 //                                5000 only when recordings are disabled or short)
 //
-// AppLogService owns all application logging → storage/logs/app/worker-{id}/YYYY-MM-DD.*
-// PM2's own out_file / error_file are sent to /dev/null to avoid duplicate flat
-// files — the only output PM2 captures is the startup/shutdown banner that passes
-// through before AppLogService installs itself, which is negligible.
+// The app's logger (src/infra/logging) writes storage/logs/app/worker-{id}/YYYY-MM-DD.log
+// (+ .error.log), JSON, and turns stdout off under PM2 by default (LOG_STDOUT),
+// so PM2's own out_file / error_file go to /dev/null. Read with `npm run logs`.
 
 // ── Why dotenv.config() is called here ────────────────────────────────────────
 // The rule in this codebase is: never read process.env directly — always go

@@ -1,6 +1,9 @@
 // src/media/recording/AudioCaptureService.js
 import wrtc from '@roamhq/wrtc';
 import { leakMetrics } from '../../infra/monitoring/leakMetrics.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.recording.AudioCaptureService');
 
 // A gap of >2s without any RTP frame means the audio stream is interrupted.
 // Normal DTX / comfort-noise gaps from WebRTC are <500ms, so 2s filters those out
@@ -29,12 +32,12 @@ export class AudioCaptureService {
         const { nonstandard } = wrtc;
 
         if (!track || track.kind !== 'audio') {
-            console.error(`[AudioCapture] Invalid track for ${trackType}`);
+            log.error(`Invalid track for ${trackType}`);
             return false;
         }
 
         if (!nonstandard?.RTCAudioSink) {
-            console.error('[AudioCapture] RTCAudioSink not available (wrtc library issue)');
+            log.error('RTCAudioSink not available (wrtc library issue)');
             return false;
         }
 
@@ -42,10 +45,7 @@ export class AudioCaptureService {
             // Log track state BEFORE attaching the sink. A track that is already
             // 'ended' or muted here means the RTP stream never arrived from Meta —
             // the sink will attach but ondata will never fire (138021 diagnostic).
-            console.log(
-                `[AudioCapture] Attaching ${trackType} sink for call ${callId}: ` +
-                `readyState=${track.readyState}, muted=${track.muted}, enabled=${track.enabled}, id=${track.id}`
-            );
+            log.debug({ callId }, `Attaching ${trackType} sink: readyState=${track.readyState}, muted=${track.muted}, enabled=${track.enabled}, id=${track.id}`);
 
             const audioSink = new nonstandard.RTCAudioSink(track);
             leakMetrics.audioSinkCreated++;   // DIAGNOSTIC (native): recording sink
@@ -77,21 +77,14 @@ export class AudioCaptureService {
 
                 if (frameCount === 1) {
                     firstFrameAt = now;
-                    console.log(
-                        `[AudioCapture] 🔊 FIRST FRAME: ${trackType} call ${callId} — ` +
-                        `${firstFrameAt - captureStartedAt}ms after sink attach, ` +
-                        `rate=${data.sampleRate}Hz frames=${data.numberOfFrames}`
-                    );
+                    log.debug({ callId }, `FIRST FRAME: ${trackType} — ${firstFrameAt - captureStartedAt}ms after sink attach, rate=${data.sampleRate}Hz frames=${data.numberOfFrames}`);
                 }
 
                 // If a gap was active, it just ended — audio has resumed.
                 if (gapStartedAt !== null) {
                     const durationMs = now - gapStartedAt;
                     gaps.push({ startedAt: gapStartedAt, endedAt: now, durationMs });
-                    console.log(
-                        `[AudioCapture] ▶️  MEDIA RESUMED: ${trackType} call ${callId} — ` +
-                        `gap was ${durationMs}ms`
-                    );
+                    log.info({ callId }, `MEDIA RESUMED: ${trackType} — gap was ${durationMs}ms`);
                     gapStartedAt = null;
                 }
 
@@ -110,10 +103,7 @@ export class AudioCaptureService {
                 const silentMs = Date.now() - lastFrameAt;
                 if (silentMs >= MEDIA_GAP_THRESHOLD_MS && gapStartedAt === null) {
                     gapStartedAt = lastFrameAt;   // gap started right after the last frame
-                    console.log(
-                        `[AudioCapture] ⚠️  MEDIA GAP: ${trackType} call ${callId} — ` +
-                        `no frames for ${silentMs}ms`
-                    );
+                    log.info({ callId }, `MEDIA GAP: ${trackType} — no frames for ${silentMs}ms`);
                 }
             }, GAP_WATCHER_INTERVAL_MS);
 
@@ -132,11 +122,11 @@ export class AudioCaptureService {
             }
             this.activeSinks.get(callId)[trackType] = audioSink;
 
-            console.log(`[AudioCapture] ✅ Started capturing ${trackType} audio for call ${callId}`);
+            log.info({ callId }, `Started capturing ${trackType} audio`);
             return true;
 
         } catch (error) {
-            console.error(`[AudioCapture] ❌ Failed to start ${trackType} capture:`, error.message);
+            log.error({ err: error }, `Failed to start ${trackType} capture`);
             return false;
         }
     }
@@ -159,7 +149,7 @@ export class AudioCaptureService {
     stopCapture(callId, trackType) {
         const sinks = this.activeSinks.get(callId);
         if (!sinks || !sinks[trackType]) {
-            console.log(`[AudioCapture] No ${trackType} sink found for call ${callId} — already cleaned up`);
+            log.debug({ callId }, `No ${trackType} sink found — already cleaned up`);
             return false;
         }
 
@@ -195,10 +185,7 @@ export class AudioCaptureService {
                 gapSummary = `gaps=${gaps.length} longest=${longestMs}ms total_silent=${totalSilentMs}ms`;
             }
 
-            console.log(
-                `[AudioCapture] 📊 Sink closed: ${trackType} call ${callId} — ` +
-                `frames=${frames}, first_frame=${firstMsg}, last_frame=${lastMsg}, ${gapSummary}`
-            );
+            log.info({ callId }, `Sink closed: ${trackType} — frames=${frames}, first_frame=${firstMsg}, last_frame=${lastMsg}, ${gapSummary}`);
 
             // Stop the audio sink
             sink.stop();
@@ -209,11 +196,11 @@ export class AudioCaptureService {
                 this.activeSinks.delete(callId);
             }
 
-            console.log(`[AudioCapture] ✅ Stopped ${trackType} capture for call ${callId}`);
+            log.info({ callId }, `Stopped ${trackType} capture`);
             return true;
 
         } catch (error) {
-            console.error(`[AudioCapture] ❌ Failed to stop ${trackType} capture:`, error.message);
+            log.error({ err: error }, `Failed to stop ${trackType} capture`);
             return false;
         }
     }
@@ -224,11 +211,11 @@ export class AudioCaptureService {
     stopAllCaptures(callId) {
         const sinks = this.activeSinks.get(callId);
         if (!sinks) {
-            console.log(`[AudioCapture] No sinks found for call ${callId} — already cleaned up`);
+            log.debug({ callId }, 'No sinks found — already cleaned up');
             return false;
         }
 
-        console.log(`[AudioCapture] Stopping all captures for call ${callId}`);
+        log.info({ callId }, 'Stopping all captures');
 
         for (const trackType of Object.keys(sinks)) {
             this.stopCapture(callId, trackType);
@@ -241,11 +228,11 @@ export class AudioCaptureService {
      * Cleanup all captures (graceful shutdown).
      */
     cleanup() {
-        console.log(`[AudioCapture] Cleaning up ${this.activeSinks.size} active captures...`);
+        log.info(`Cleaning up ${this.activeSinks.size} active captures...`);
         for (const callId of this.activeSinks.keys()) {
             this.stopAllCaptures(callId);
         }
-        console.log('[AudioCapture] ✅ Cleanup complete');
+        log.info('Cleanup complete');
     }
 }
 

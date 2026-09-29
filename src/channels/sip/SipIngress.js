@@ -13,30 +13,37 @@ import { sipGateway } from './SipGateway.js';
 import { sipDialogs } from './SipDialogs.js';
 import { finishLeg } from './sipLegs.js';
 import { dialledNumber, callerOf, sourceAllowed } from './sipAddress.js';
+import { logger, throttle } from '../../infra/logging/logger.js';
+
+const log = logger('channels.sip.SipIngress');
 
 const TERMINAL = new Set([CallStatus.TERMINATED, CallStatus.FAILED, CallStatus.CANCELLED]);
 
 export async function handleInvite(req, res) {
     const providerCallId = req.get('Call-ID');
     const did = dialledNumber(req);
-    console.log(`[SIP:inbound] INVITE ${providerCallId} to ${did ?? req.uri} from ${req.source_address}`);
+    const source = req.source_address;
+    log.debug({ providerCallId, did, source }, 'INVITE received');
 
+    // Refusals are rate-limited per source: an internet scanner sends many a second.
+    const refuse = (status, msg, fields) => {
+        const repeated = throttle(`sip-refuse:${source}:${status}`, 60_000);
+        if (repeated !== null) log.warn({ source, did, uri: req.uri, ...fields, ...(repeated ? { repeated } : {}) }, msg);
+        return res.send(status);
+    };
     const channel = did ? await ChannelRepository.findActiveByAddress(Channel.SIP, did) : null;
-    if (!channel) {
-        console.warn(`[SIP:inbound] No active SIP channel for ${did ?? req.uri} — 404`);
-        return res.send(404);
-    }
+    if (!channel) return refuse(404, 'INVITE for a number with no active SIP channel — 404');
     const trunk = await SipTrunkRepository.findById(channel.sip_trunk_id);
-    if (!trunk || trunk.status !== 'ACTIVE' || !sourceAllowed(trunk, req.source_address)) {
-        console.warn(`[SIP:inbound] ${req.source_address} is not an allowed source for channel ${channel.id} — 403`);
-        return res.send(403);
+    if (!trunk || trunk.status !== 'ACTIVE' || !sourceAllowed(trunk, source)) {
+        return refuse(403, 'INVITE from a source the trunk does not allow — 403', { channelId: channel.id });
     }
+    log.info({ providerCallId, did, source, channelId: channel.id }, 'INVITE accepted');
 
     let sdpOffer;
     try {
         sdpOffer = await sipGateway.rtpengine.carrierOfferToWebrtc({ callId: providerCallId, sdp: req.body });
     } catch (err) {
-        console.error(`[SIP:inbound] rtpengine refused the offer for ${providerCallId}:`, err);
+        log.error({ err }, `rtpengine refused the offer for ${providerCallId}`);
         return res.send(488);
     }
 
@@ -47,7 +54,7 @@ export async function handleInvite(req, res) {
     req.on('cancel', () => {
         leg.res = null;
         finishLeg(leg, { providerStatus: 'CANCELLED' })
-            .catch((err) => console.error(`[SIP:inbound] Ending cancelled call ${providerCallId} failed:`, err));
+            .catch((err) => log.error({ err }, `Ending cancelled call ${providerCallId} failed`));
     });
 
     res.send(180);

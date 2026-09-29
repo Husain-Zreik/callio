@@ -7,6 +7,9 @@
 import Srf from 'drachtio-srf';
 import { RtpEngineClient } from './RtpEngineClient.js';
 import { config } from '../../../config/envConfig.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('channels.sip.SipGateway');
 
 class SipGateway {
     constructor() {
@@ -33,23 +36,23 @@ class SipGateway {
                 const key = String(reason);
                 if (key !== this._lastError) {
                     this._lastError = key;
-                    console.error(`[SIP] drachtio connection to ${drachtio.host}:${drachtio.port} failed: ${reason} — check that the gateway is running and DRACHTIO_SECRET matches drachtio.conf.xml`);
+                    log.error(`drachtio connection to ${drachtio.host}:${drachtio.port} failed: ${reason} — check that the gateway is running and DRACHTIO_SECRET matches drachtio.conf.xml`);
                 }
                 return;
             }
             this._lastError = null;
             this.connected = true;
-            console.log(`[SIP] Connected to drachtio-server (${hostport})`);
+            log.info(`Connected to drachtio-server (${hostport})`);
         });
         // drachtio-srf reconnects by itself; this only tracks the state.
         this.srf.on('error', (err) => {
             const reason = err?.message ?? err?.code ?? String(err);
             if (this.connected) {
-                console.warn(`[SIP] drachtio connection lost: ${reason}`);
+                log.warn(`drachtio connection lost: ${reason}`);
             } else if (reason !== this._lastError) {
                 // Not reachable at all (e.g. ECONNREFUSED: the gateway isn't running).
                 this._lastError = reason;
-                console.error(`[SIP] drachtio at ${drachtio.host}:${drachtio.port} unreachable: ${reason} — is the SIP gateway running?`);
+                log.error(`drachtio at ${drachtio.host}:${drachtio.port} unreachable: ${reason} — is the SIP gateway running?`);
             }
             this.connected = false;
         });

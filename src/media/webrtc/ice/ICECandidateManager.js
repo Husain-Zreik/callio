@@ -9,6 +9,9 @@
 
 import wrtc from '@roamhq/wrtc';
 import CallConnectionRepository from '../../../persistence/CallConnectionRepository.js';
+import { logger } from '../../../infra/logging/logger.js';
+
+const log = logger('media.webrtc.ICECandidateManager');
 
 export class ICECandidateManager {
     constructor(preConnectionBuffer) {
@@ -21,7 +24,7 @@ export class ICECandidateManager {
             await CallConnectionRepository.addICECandidate(callId, connectionType, candidateData);
 
             if (!peerConnection) {
-                console.warn(`No peer connection for ${connectionType} [${callId}] - should have been pre-buffered`);
+                log.warn({ callId }, `No peer connection for ${connectionType} - should have been pre-buffered`);
                 return false;
             }
 
@@ -40,7 +43,7 @@ export class ICECandidateManager {
             return true;
 
         } catch (error) {
-            console.error(`Failed to add ICE candidate to ${connectionType}: ${error.message}`);
+            log.error({ err: error }, `Failed to add ICE candidate to ${connectionType}`);
             return false;
         }
     }
@@ -66,7 +69,7 @@ export class ICECandidateManager {
         }
 
         if (!peerConnection) {
-            console.warn(`Cannot flush candidates: no peer connection for ${connectionType}`);
+            log.warn(`Cannot flush candidates: no peer connection for ${connectionType}`);
             return;
         }
 

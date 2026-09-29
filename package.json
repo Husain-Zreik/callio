@@ -10,6 +10,7 @@
     "logs": "node scripts/logs.js",
     "logs:follow": "node scripts/logs.js --follow",
     "logs:errors": "node scripts/logs.js --errors",
+    "log-level": "node scripts/log-level.js",
     "migrate:status": "knex migrate:status",
     "migrate:latest": "knex migrate:latest",
     "migrate:rollback": "knex migrate:rollback",
@@ -40,6 +41,7 @@
     "jsonwebtoken": "^9.0.2",
     "knex": "^3.1.0",
     "mysql2": "^3.14.2",
+    "pino": "^10.3.1",
     "socket.io": "^4.8.1"
   },
   "devDependencies": {

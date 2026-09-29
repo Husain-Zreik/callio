@@ -10,6 +10,9 @@ import TenantRepository from '../../persistence/TenantRepository.js';
 import { agentMissedCallTracker } from './AgentMissedCallTracker.js';
 import { queueRouter } from './QueueRouter.js';
 import { AgentAvailability } from '../constants/CallConstants.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.routing.AutoOfflinePolicy');
 
 class AutoOfflinePolicy {
     /**
@@ -33,12 +36,12 @@ class AutoOfflinePolicy {
             // A miss while the agent is on another active call was a
             // double-dispatch race, not negligence — don't count it.
             if (await CallRepository.hasAgentActiveCall(agentId, callId)) {
-                console.log(`[AutoOffline] Not counting a miss for agent ${agentId} — on an active call (missed=${callId})`);
+                log.info({ agentId, callId }, 'Not counting a miss — agent is on an active call');
                 return false;
             }
 
             const streak = await agentMissedCallTracker.increment(agentId);
-            console.log(`[AutoOffline] Agent ${agentId} missed-streak=${streak}/${policy.threshold} (tenant=${tenantId}, call=${callId})`);
+            log.info({ agentId, tenantId, callId }, `Missed streak ${streak}/${policy.threshold}`);
             if (streak < policy.threshold) return false;
 
             const flipped = await AgentRepository.updateAgentAvailability(agentId, AgentAvailability.OFFLINE);
@@ -53,10 +56,10 @@ class AutoOfflinePolicy {
                 consecutiveMissed: streak,
                 updatedAt: new Date().toISOString(),
             });
-            console.log(`[AutoOffline] Flipped agent ${agentId} OFFLINE after ${streak} consecutive missed calls`);
+            log.info({ agentId }, `Flipped agent OFFLINE after ${streak} consecutive missed calls`);
             return true;
         } catch (err) {
-            console.error(`[AutoOffline] policy check failed for agent ${agentId}:`, err);
+            log.error({ agentId, err }, 'policy check failed');
             return false;
         }
     }

@@ -1,6 +1,9 @@
 // src/infra/cluster/CallOwnershipService.js
 import { redisBaseService } from '../redis/RedisBaseService.js';
 import { config } from '../../../config/envConfig.js';
+import { logger } from '../logging/logger.js';
+
+const log = logger('infra.cluster.CallOwnershipService');
 
 /**
  * Manages call ownership across distributed workers using Redis.
@@ -16,7 +19,7 @@ class CallOwnershipService {
     // Initialize the service (call during app startup)
     async init() {
         await redisBaseService.init();
-        console.log(`[CallOwnership] Worker ${this.workerId} initialized`);
+        log.debug(`Worker ${this.workerId} initialized`);
     }
 
     // Build Redis key for call ownership
@@ -34,12 +37,12 @@ class CallOwnershipService {
             const claimed = await redisBaseService.setnx(key, workerId, ttl);
 
             if (claimed) {
-                console.log(`[CallOwnership] Worker ${workerId} claimed call ${callId} (TTL: ${ttl}s)`);
+                log.debug({ callId }, `Worker ${workerId} claimed call (TTL: ${ttl}s)`);
             }
 
             return claimed;
         } catch (error) {
-            console.error(`[CallOwnership] Error claiming call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Error claiming call');
             return false;
         }
     }
@@ -53,24 +56,24 @@ class CallOwnershipService {
             const currentOwner = await redisBaseService.get(key);
 
             if (!currentOwner) {
-                console.warn(`[CallOwnership] Cannot make call ${callId} permanent - no owner exists`);
+                log.warn({ callId }, 'Cannot make call permanent - no owner exists');
                 return false;
             }
 
             if (currentOwner !== workerId) {
-                console.warn(`[CallOwnership] Worker ${workerId} cannot make call ${callId} permanent (owned by ${currentOwner})`);
+                log.warn({ callId }, `Worker ${workerId} cannot make call permanent (owned by ${currentOwner})`);
                 return false;
             }
 
             const result = await redisBaseService.persist(key);
 
             if (result) {
-                console.log(`[CallOwnership] Worker ${workerId} made call ${callId} ownership permanent`);
+                log.debug({ callId }, `Worker ${workerId} made call ownership permanent`);
             }
 
             return result;
         } catch (error) {
-            console.error(`[CallOwnership] Error making call ${callId} permanent:`, error.message);
+            log.error({ callId, err: error }, 'Error making call permanent');
             return false;
         }
     }
@@ -84,20 +87,20 @@ class CallOwnershipService {
             const currentOwner = await redisBaseService.get(key);
 
             if (!currentOwner) {
-                console.log(`[CallOwnership] Call ${callId} has no owner to release`);
+                log.debug({ callId }, 'Call has no owner to release');
                 return true;
             }
 
             if (currentOwner !== workerId) {
-                console.warn(`[CallOwnership] Worker ${workerId} cannot release call ${callId} (owned by ${currentOwner})`);
+                log.warn({ callId }, `Worker ${workerId} cannot release call (owned by ${currentOwner})`);
                 return false;
             }
 
             await redisBaseService.del(key);
-            console.log(`[CallOwnership] Worker ${workerId} released call ${callId}`);
+            log.debug({ callId }, `Worker ${workerId} released call`);
             return true;
         } catch (error) {
-            console.error(`[CallOwnership] Error releasing call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Error releasing call');
             return false;
         }
     }
@@ -109,7 +112,7 @@ class CallOwnershipService {
         try {
             return await redisBaseService.get(key);
         } catch (error) {
-            console.error(`[CallOwnership] Error getting owner for call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Error getting owner');
             return null;
         }
     }
@@ -134,7 +137,7 @@ class CallOwnershipService {
             }
             return calls;
         } catch (error) {
-            console.error('[CallOwnership] Error getting owned calls:', error.message);
+            log.error({ err: error }, 'Error getting owned calls');
             return [];
         }
     }

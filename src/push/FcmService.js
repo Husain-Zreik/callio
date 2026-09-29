@@ -2,6 +2,9 @@ import admin from "firebase-admin";
 import { config } from "../../config/envConfig.js";
 import { notifyLog } from "./notificationLogger.js";
 import pushTokenRepository from "../persistence/PushTokenRepository.js";
+import { logger } from '../infra/logging/logger.js';
+
+const log = logger('push.FcmService');
 
 class FcmService {
     constructor() {
@@ -13,9 +16,11 @@ class FcmService {
                 credential: admin.credential.cert(config.firebase.credentialsPath),
             });
             this.fcm = admin.messaging(app);
-            console.log("[FCM] Firebase Admin initialized");
+            log.info('Firebase Admin initialized');
         } catch (error) {
-            console.error("[FCM] Initialization error:", error.message);
+            // Missing credentials is a configuration choice (push off), anything else a fault.
+            if (/ENOENT|no such file/.test(error?.message ?? '')) log.warn(`No Firebase credentials at ${config.firebase.credentialsPath} — FCM push disabled`);
+            else log.error({ err: error }, 'Initialization error — FCM push disabled');
             // this.fcm intentionally left undefined — sendToTokens guards against this
         }
     }
@@ -56,7 +61,7 @@ class FcmService {
         if (!tokens || tokens.length === 0) return;
 
         if (!this.fcm) {
-            console.error('[FCM] Service not initialized — skipping notification to', tokens.length, 'device(s)');
+            log.warn({ length: tokens.length }, 'Service not initialized — skipping notification to device(s)');
             return;
         }
 
@@ -140,7 +145,7 @@ class FcmService {
                         if (isInvalidToken) {
                             invalidTokenCount++;
                             await pushTokenRepository.removeToken("FCM", token).catch(err => {
-                                console.error(`[FCM] Failed to remove stale token from DB:`, err);
+                                log.error({ err }, 'Failed to remove stale token from DB');
                             });
                         }
                     }
@@ -153,23 +158,16 @@ class FcmService {
                 if (invalidTokenCount === response.failureCount) {
                     // Every failure was a stale/invalid token, already pruned above —
                     // this is routine cleanup, not something that needs attention.
-                    console.log(
-                        `[FCM] Pruned ${invalidTokenCount} stale token(s) after multicast send (${codesSummary})`,
-                    );
+                    log.info(`Pruned ${invalidTokenCount} stale token(s) after multicast send (${codesSummary})`);
                 } else {
                     const unexpectedCount = response.failureCount - invalidTokenCount;
-                    console.warn(
-                        `[FCM] Multicast send had ${unexpectedCount} unexpected failure(s) (plus ${invalidTokenCount} stale token(s) pruned) — codes: ${codesSummary}`,
-                    );
+                    log.warn(`Multicast send had ${unexpectedCount} unexpected failure(s) (plus ${invalidTokenCount} stale token(s) pruned) — codes: ${codesSummary}`);
                 }
             }
 
             return response;
         } catch (error) {
-            console.error(
-                "[FCM] Error sending multicast message:",
-                error.message,
-            );
+            log.error({ err: error }, 'Error sending multicast message');
         }
     }
 

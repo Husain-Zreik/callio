@@ -7,6 +7,9 @@ import { createAdapter } from "@socket.io/redis-adapter";
 import { roomManager } from "./managers/RoomManager.js";
 import { config } from "../../config/envConfig.js";
 import { Server } from "socket.io";
+import { logger } from '../infra/logging/logger.js';
+
+const log = logger('realtime.server');
 
 export function createWebSocketServer(httpServer) {
     const io = new Server(httpServer, {
@@ -29,9 +32,9 @@ export function createWebSocketServer(httpServer) {
     try {
         const { pubClient, subClient } = redisPubSubService.getAdapterClients();
         io.adapter(createAdapter(pubClient, subClient));
-        console.log(`[WS] ✅ Socket.IO Redis adapter initialized for worker ${redisPubSubService.workerId}`);
+        log.info(`Socket.IO Redis adapter initialized for worker ${redisPubSubService.workerId}`);
     } catch (error) {
-        console.error(`[WS] ❌ Failed to initialize Redis adapter:`, error.message);
+        log.error({ err: error }, 'Failed to initialize Redis adapter');
         throw error;
     }
 
@@ -42,11 +45,9 @@ export function createWebSocketServer(httpServer) {
     io.on("connection", handleConnection);
 
     io.engine.on("connection_error", (err) => {
-        console.error("[WS] Connection error:", {
-            code: err.code,
+        log.error({ code: err.code,
             message: err.message,
-            context: err.context,
-        });
+            context: err.context }, 'Connection error');
     });
 
     return io;

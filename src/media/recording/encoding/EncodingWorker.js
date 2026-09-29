@@ -25,6 +25,9 @@ import { parentPort } from 'worker_threads';
 import { PcmOpusEncoder, opusAvailable } from './OpusEncoder.js';
 import { OggMuxer } from './OggMuxer.js';
 import { StereoMixBuffer } from '../StereoMixBuffer.js';
+import { logger } from '../../../infra/logging/logger.js';
+
+const log = logger('media.recording.EncodingWorker');
 
 // callId -> { encoder: PcmOpusEncoder, muxer: OggMuxer, mixBuf: StereoMixBuffer }
 const sessions = new Map();
@@ -147,7 +150,7 @@ function handle(msg) {
 
                 sessions.delete(msg.callId);
                 parentPort.postMessage({ type: 'stopped', callId: msg.callId });
-                console.log(`[EncodingWorker] Session stopped: ${msg.callId} (active=${sessions.size})`);
+                log.debug({ callId: msg.callId }, `Session stopped (active=${sessions.size})`);
 
             } catch (err) {
                 sessions.delete(msg.callId);

@@ -20,6 +20,9 @@ import CallRepository from '../persistence/CallRepository.js';
 import dbPool from '../../config/dbConnection.js';
 import { outboxDispatcher } from '../outbox/OutboxDispatcher.js';
 import { queueTimeoutService } from '../core/routing/QueueTimeoutService.js';
+import { logger } from '../infra/logging/logger.js';
+
+const log = logger('server.shutdown');
 
 // Checked by callWebhookController before processing a new incoming-call webhook.
 // Live ES module binding — importers see updates made to this value below, not a
@@ -40,7 +43,7 @@ export async function shutdown(server, io) {
     // sequence twice — the second run would re-terminate calls and close
     // already-closed clients.
     if (isShuttingDown) return;
-    console.log("🛑 Shutting down server...");
+    log.info('Shutting down server...');
     isShuttingDown = true;
 
     try {
@@ -49,14 +52,14 @@ export async function shutdown(server, io) {
         if (io) {
             await new Promise((resolve) => io.close(resolve));
             await new Promise((resolve) => setTimeout(resolve, 800));
-            console.log("✅ Socket.IO closed");
+            log.info('Socket.IO closed');
         }
 
         // 2. Stop all active recordings — flushes the Opus encoder, finalizes the
         //    OGG stream, and calls uploadStream.end() on each PassThrough.
         //    This MUST happen before streamUploader.cleanup() so the streams are
         //    properly ended (not just destroyed) before we wait for S3 to confirm.
-        console.log("🎙️ Stopping active recordings...");
+        log.info('Stopping active recordings...');
         await recordingManager.cleanup();
 
         // 2a. Terminate both worker bridges in parallel — safe because every active
@@ -67,7 +70,7 @@ export async function shutdown(server, io) {
             encodingWorkerBridge.terminate(),
             dtmfWorkerBridge.terminate(),
         ]);
-        console.log(`✅ Worker threads terminated (${Date.now() - _workersT0}ms)`);
+        log.info(`Worker threads terminated (${Date.now() - _workersT0}ms)`);
 
         // 3. Close all WebRTC peer connections — this terminates any active media
         //    bridges and releases native wrtc resources. Calls whose recording was
@@ -75,10 +78,10 @@ export async function shutdown(server, io) {
         //    in step 5 below.
         const activeCalls = [...peerRegistry.peerConnections.keys()];
         if (activeCalls.length > 0) {
-            console.log(`📡 Closing ${activeCalls.length} peer connection(s)...`);
+            log.info(`Closing ${activeCalls.length} peer connection(s)...`);
             await Promise.allSettled(activeCalls.map((callId) =>
                 peerRegistry.closePeerConnection(callId).catch((err) =>
-                    console.warn(`[Shutdown] closePeerConnection failed for call ${callId}:`, err.message)
+                    log.warn({ callId, err }, 'closePeerConnection failed')
                 )
             ));
 
@@ -100,7 +103,7 @@ export async function shutdown(server, io) {
                 'SERVICE_MAINTENANCE',
                 'SYSTEM'
             ).catch(err =>
-                console.warn('[Shutdown] batchTerminateCalls failed:', err.message)
+                log.warn({ err }, 'batchTerminateCalls failed')
             );
 
             // Compute call/ringing durations for answered calls — finalizeFromWebhook
@@ -117,11 +120,11 @@ export async function shutdown(server, io) {
                     return [
                         callDuration !== null
                             ? CallRepository.updateDuration(c.id, 'call_duration', callDuration)
-                                .catch(err => console.warn(`[Shutdown] call_duration failed for call ${c.id}:`, err.message))
+                                .catch(err => log.warn({ err }, `call_duration failed for call ${c.id}`))
                             : null,
                         ringingDuration !== null
                             ? CallRepository.updateDuration(c.id, 'ringing_duration', ringingDuration)
-                                .catch(err => console.warn(`[Shutdown] ringing_duration failed for call ${c.id}:`, err.message))
+                                .catch(err => log.warn({ err }, `ringing_duration failed for call ${c.id}`))
                             : null,
                     ].filter(Boolean);
                 }));
@@ -133,7 +136,7 @@ export async function shutdown(server, io) {
             if (ivrCalls.length > 0) {
                 await Promise.allSettled(ivrCalls.map(c =>
                     ivrCoordinator.stopSession(c.id, 'hung_up')
-                        .catch(err => console.warn(`[Shutdown] ivrCoordinator.stopSession failed for call ${c.id}:`, err.message))
+                        .catch(err => log.warn({ err }, `ivrCoordinator.stopSession failed for call ${c.id}`))
                 ));
             }
 
@@ -146,16 +149,16 @@ export async function shutdown(server, io) {
                         reason: 'service_maintenance',
                         message: 'Call ended due to service maintenance',
                     }).catch(err =>
-                        console.warn(`[Shutdown] lifecycle log failed for call ${c.id}:`, err.message)
+                        log.warn({ err }, `lifecycle log failed for call ${c.id}`)
                     )
                 ));
 
                 // Tell the provider to end each connected call so the customer is not left hanging.
                 // Best-effort: if SIGKILL arrives mid-flight the DB is already updated above.
-                console.log(`[Shutdown] Gracefully terminating ${callsNeedingTermination.length} active call(s)...`);
+                log.info(`Gracefully terminating ${callsNeedingTermination.length} active call(s)...`);
                 await Promise.allSettled(callsNeedingTermination.map(c =>
                     customerChannels.terminate(c.id).catch(err =>
-                        console.warn(`[Shutdown] Provider terminate failed for call ${c.id}:`, err.message)
+                        log.warn({ err }, `Provider terminate failed for call ${c.id}`)
                     )
                 ));
             }
@@ -168,7 +171,7 @@ export async function shutdown(server, io) {
         // 5. Wait for S3 uploads to complete (max 45 s). Recordings stopped in step 2
         //    have their streams ended; this gives S3 time to finalize the multipart
         //    upload and write recording_url + status = 'completed' to the DB.
-        console.log("📦 Waiting for storage uploads to complete...");
+        log.info('Waiting for storage uploads to complete...');
         await streamUploader.cleanup(45_000);
 
         // 6. Stop background jobs (Redis reaper, outbox dispatcher lease)
@@ -176,11 +179,11 @@ export async function shutdown(server, io) {
         queueTimeoutService.stop();
         await outboxDispatcher.stop();
         for (const channel of customerChannels.all()) {
-            await Promise.resolve(channel.stop?.()).catch((err) => console.warn(`[Shutdown] ${channel.type} channel stop failed:`, err.message));
+            await Promise.resolve(channel.stop?.()).catch((err) => log.warn({ err }, `${channel.type} channel stop failed`));
         }
 
         // 7. Close Redis service connections (in reverse order)
-        console.log("📦 Closing Redis services...");
+        log.info('Closing Redis services...');
         await redisCleanupService.releaseLock();
         await redisPubSubService.close();
 
@@ -191,21 +194,21 @@ export async function shutdown(server, io) {
         await storageClient.close();
 
         // 10. Close the MySQL pool — last, since every step above may still write.
-        await dbPool.end().catch((err) => console.warn("[Shutdown] DB pool close failed:", err));
+        await dbPool.end().catch((err) => log.warn({ err }, 'DB pool close failed'));
 
-        console.log("✅ All services closed");
+        log.info('All services closed');
     } catch (err) {
-        console.error("[Shutdown] Error:", err.message);
+        log.error({ err }, 'Shutdown error');
     }
 
     server.close(() => {
-        console.log("✅ Server closed");
+        log.info('Server closed');
         process.exit(0);
     });
 
     // Hard kill after 60 s — long enough for S3 multipart finalization on slow links.
     setTimeout(() => {
-        console.warn("⏱️ Force exit after timeout");
+        log.warn('Force exit after timeout');
         process.exit(1);
     }, 60_000);
 }

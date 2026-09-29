@@ -9,6 +9,9 @@ import wrtc from '@roamhq/wrtc';
 import { dtmfWorkerBridge } from './DTMFWorkerBridge.js';
 import EventBus from '../../core/EventBus.js';
 import { leakMetrics } from '../../infra/monitoring/leakMetrics.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.dtmf.DTMFCaptureService');
 
 class DTMFCaptureService {
     constructor() {
@@ -22,7 +25,7 @@ class DTMFCaptureService {
 
     startCapture(callId, customerTrack) {
         if (this.activeSinks.has(callId)) {
-            console.warn(`[DTMFCapture] Already active for call ${callId} — skipping`);
+            log.warn({ callId }, 'Already active — skipping');
             return false;
         }
 
@@ -33,13 +36,13 @@ class DTMFCaptureService {
         if (this._idleSinks.has(callId)) this._idleSinks.delete(callId);
 
         if (!customerTrack || customerTrack.kind !== 'audio') {
-            console.error(`[DTMFCapture] Invalid customer track for call ${callId}`);
+            log.error({ callId }, 'Invalid customer track');
             return false;
         }
 
         const { nonstandard } = wrtc;
         if (!nonstandard?.RTCAudioSink) {
-            console.error('[DTMFCapture] RTCAudioSink unavailable — wrtc issue');
+            log.error('RTCAudioSink unavailable — wrtc issue');
             return false;
         }
 
@@ -47,7 +50,7 @@ class DTMFCaptureService {
             // Register the worker session so digit callbacks are wired before any
             // frames arrive (even though the sink starts paused with ondata=null).
             dtmfWorkerBridge.startSession(callId, (digit) => {
-                console.log(`[DTMFCapture] Digit '${digit}' on call ${callId}`);
+                log.info({ callId }, `Digit '${digit}'`);
                 EventBus.emit('call:dtmf', { callId, digit });
             });
 
@@ -63,11 +66,11 @@ class DTMFCaptureService {
             // pausedSincePriorResume starts true: no digit state exists yet, so the
             // first resumeCapture() may as well take the (harmless) full-reset path.
             this.activeSinks.set(callId, { sink, pausedSincePriorResume: true });
-            console.log(`[DTMFCapture] ✅ Started for call ${callId}, track=${customerTrack.id}`);
+            log.debug({ callId }, `Started, track=${customerTrack.id}`);
             return true;
 
         } catch (error) {
-            console.error(`[DTMFCapture] ❌ Failed to start for call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Failed to start');
             return false;
         }
     }
@@ -112,7 +115,7 @@ class DTMFCaptureService {
     stopCapture(callId) {
         const entry = this.activeSinks.get(callId);
         if (!entry) {
-            console.log(`[DTMFCapture] No active capture for call ${callId} — already cleaned up`);
+            log.debug({ callId }, 'No active capture — already cleaned up');
             return false;
         }
 
@@ -131,10 +134,10 @@ class DTMFCaptureService {
             // track survives IVR transfer. It is hard-released in destroy() at teardown.
             this._idleSinks.set(callId, entry.sink);
             this.activeSinks.delete(callId);
-            console.log(`[DTMFCapture] ✅ Soft-stopped for call ${callId} (sink retained for teardown)`);
+            log.info({ callId }, 'Soft-stopped (sink retained for teardown)');
             return true;
         } catch (error) {
-            console.error(`[DTMFCapture] ❌ Failed to stop for call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Failed to stop');
             this.activeSinks.delete(callId);
             return false;
         }
@@ -163,7 +166,7 @@ class DTMFCaptureService {
                 entry.sink.stop();
                 leakMetrics.audioSinkStopped++;   // DIAGNOSTIC (native): DTMF sink released
             } catch (error) {
-                console.error(`[DTMFCapture] Failed to destroy active sink for call ${callId}:`, error.message);
+                log.error({ callId, err: error }, 'Failed to destroy active sink');
             }
             this.activeSinks.delete(callId);
         }
@@ -174,7 +177,7 @@ class DTMFCaptureService {
                 idleSink.stop();
                 leakMetrics.audioSinkStopped++;   // DIAGNOSTIC (native): DTMF sink released
             } catch (error) {
-                console.error(`[DTMFCapture] Failed to destroy idle sink for call ${callId}:`, error.message);
+                log.error({ callId, err: error }, 'Failed to destroy idle sink');
             }
             this._idleSinks.delete(callId);
         }
@@ -197,11 +200,11 @@ class DTMFCaptureService {
 
     cleanup() {
         const ids = new Set([...this.activeSinks.keys(), ...this._idleSinks.keys()]);
-        console.log(`[DTMFCapture] Cleaning up ${ids.size} capture(s)...`);
+        log.info(`Cleaning up ${ids.size} capture(s)...`);
         for (const callId of ids) {
             this.destroy(callId);
         }
-        console.log('[DTMFCapture] ✅ Cleanup complete');
+        log.info('Cleanup complete');
     }
 }
 

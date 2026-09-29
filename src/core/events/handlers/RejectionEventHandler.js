@@ -15,12 +15,15 @@ import { emitCallError } from '../CallErrorEmitter.js';
 import { CallErrorCodes } from '../CallErrorCodes.js';
 import { callPushNotifier } from '../../../push/CallPushNotifier.js';
 import { queueRouter } from '../../routing/QueueRouter.js';
+import { logger } from '../../../infra/logging/logger.js';
+
+const log = logger('core.events.RejectionEventHandler');
 
 export class RejectionEventHandler {
 
     async handleCallRejected(data) {
         const { callId, userId, tenantId, deviceId, socketId } = data;
-        console.log(`[RejectionEventHandler] Agent ${userId} declining call ${callId}`);
+        log.info({ agentId: userId, callId }, 'Agent declining call');
 
         try {
             const call = await CallRepository.findById(callId);
@@ -30,7 +33,7 @@ export class RejectionEventHandler {
             // duplicated call:reject after the call went IN_PROGRESS must not
             // tear it down.
             if (call.status !== CallStatus.RINGING && call.status !== CallStatus.INITIATED) {
-                console.warn(`[RejectionEventHandler] Ignoring call:reject for call ${callId} — ${call.status}`);
+                log.warn({ callId }, `Ignoring call:reject — ${call.status}`);
                 return;
             }
 
@@ -44,8 +47,8 @@ export class RejectionEventHandler {
                 EventBus.emit('call:room:leave', { userId, callId });
                 EventBus.emit('call:offer_declined', { callId, tenantId, userId, deviceId: deviceId ?? null });
                 callPushNotifier.notifyCallResolved(callId, { resolvedAgentId: userId, tenantId })
-                    .catch((err) => console.error(`[RejectionEventHandler] dismiss push failed for call ${callId}:`, err));
-                console.log(`[RejectionEventHandler] Agent ${userId} declined RING_ALL offer for call ${callId}`);
+                    .catch((err) => log.error({ callId, err }, 'dismiss push failed'));
+                log.debug({ agentId: userId, callId }, 'Agent declined RING_ALL offer');
                 return;
             }
 
@@ -80,11 +83,11 @@ export class RejectionEventHandler {
             EventBus.emit('call:handled', { callId, userId, tenantId, agentName, deviceId: deviceId ?? null, action: 'rejected' });
             // call:handled doesn't reach a killed/backgrounded device; a push does.
             callPushNotifier.notifyCallResolved(callId, { resolvedAgentId: userId, tenantId })
-                .catch((err) => console.error(`[RejectionEventHandler] notifyCallResolved failed for call ${callId}:`, err));
+                .catch((err) => log.error({ callId, err }, 'notifyCallResolved failed'));
 
-            console.log(`[RejectionEventHandler] Call ${callId} declined by agent ${userId}`);
+            log.info({ callId, agentId: userId }, 'Call declined by agent');
         } catch (error) {
-            console.error(`[RejectionEventHandler] Failed to decline call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Failed to decline call');
 
             // Lost the claim: someone else has the call or it already ended —
             // expected, so tell the agent in words they can act on.

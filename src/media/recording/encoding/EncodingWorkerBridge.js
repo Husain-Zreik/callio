@@ -15,6 +15,9 @@ import { Worker } from 'worker_threads';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { config } from '../../../../config/envConfig.js';
+import { logger } from '../../../infra/logging/logger.js';
+
+const log = logger('media.recording.EncodingWorkerBridge');
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -63,7 +66,7 @@ class EncodingWorkerBridge {
         }
 
         if (readyCount < this._workerCount) {
-            console.warn(`[EncodingWorkerBridge] ${readyCount}/${this._workerCount} workers ready — recording will continue at reduced capacity`);
+            log.warn(`${readyCount}/${this._workerCount} workers ready — recording will continue at reduced capacity`);
         }
     }
 
@@ -102,12 +105,12 @@ class EncodingWorkerBridge {
     startSession(callId, onChunk, onError) {
         const workerIdx = this._pickWorker();
         if (workerIdx === -1) {
-            console.warn(`[EncodingWorkerBridge] startSession: no ready workers — call ${callId} cannot be recorded`);
+            log.warn({ callId }, 'startSession: no ready workers — call cannot be recorded');
             return false;
         }
         this._sessions.set(callId, { onChunk, onError, workerIdx });
         this._workers[workerIdx].worker.postMessage({ type: 'start', callId });
-        console.log(`[EncodingWorkerBridge] Session started: ${callId} → worker[${workerIdx}] (active=${this._sessions.size})`);
+        log.info({ callId }, `Session started on worker[${workerIdx}] (active=${this._sessions.size})`);
         return true;
     }
 
@@ -190,7 +193,7 @@ class EncodingWorkerBridge {
         if (ws?.worker && ws.ready) {
             ws.worker.postMessage({ type: 'stop', callId });
         }
-        console.log(`[EncodingWorkerBridge] Session discarded: ${callId} (active=${this._sessions.size})`);
+        log.info({ callId }, `Session discarded (active=${this._sessions.size})`);
     }
 
     /**
@@ -276,7 +279,7 @@ class EncodingWorkerBridge {
                 worker.on('error', (err) => { if (!this._terminating) this._onWorkerDown(idx, `Worker error: ${err.message}`); });
                 worker.on('exit', (code) => { if (code !== 0 && !this._terminating) this._onWorkerDown(idx, `Worker exited with code ${code}`); });
 
-                console.log(`[EncodingWorkerBridge] Worker[${idx}] ready (threadId=${worker.threadId}, opusAvailable=${msg.opusAvailable})`);
+                log.info(`Worker[${idx}] ready (threadId=${worker.threadId}, opusAvailable=${msg.opusAvailable})`);
                 resolve();
             });
         });
@@ -286,7 +289,7 @@ class EncodingWorkerBridge {
         const ws = this._workers[idx];
         if (!ws?.ready) return; // already handling a previous down event
 
-        console.error(`[EncodingWorkerBridge] Worker[${idx}] down — ${reason}`);
+        log.error(`Worker[${idx}] down — ${reason}`);
         ws.ready = false;
         ws.worker = null;
 
@@ -315,20 +318,20 @@ class EncodingWorkerBridge {
 
         if (this._terminating || ws.restartAttempts >= MAX_RESTART_ATTEMPTS) {
             if (!this._terminating) {
-                console.error(`[EncodingWorkerBridge] Worker[${idx}] max restart attempts reached — recording on this slot disabled until process restart`);
+                log.warn(`Worker[${idx}] max restart attempts reached — recording on this slot disabled until process restart`);
             }
             return;
         }
 
         ws.restartAttempts++;
         const delay = RESTART_BASE_DELAY_MS * (2 ** (ws.restartAttempts - 1));
-        console.warn(`[EncodingWorkerBridge] Restarting worker[${idx}] (attempt ${ws.restartAttempts}/${MAX_RESTART_ATTEMPTS}) in ${delay} ms...`);
+        log.warn(`Restarting worker[${idx}] (attempt ${ws.restartAttempts}/${MAX_RESTART_ATTEMPTS}) in ${delay} ms...`);
 
         setTimeout(() => {
             this._spawn(idx)
-                .then(() => console.log(`[EncodingWorkerBridge] Worker[${idx}] restarted successfully`))
+                .then(() => log.info(`Worker[${idx}] restarted successfully`))
                 .catch((err) => {
-                    console.error(`[EncodingWorkerBridge] Worker[${idx}] restart failed:`, err.message);
+                    log.error({ err }, `Worker[${idx}] restart failed`);
                     this._onWorkerDown(idx, `Restart failed: ${err.message}`);
                 });
         }, delay);
@@ -339,7 +342,7 @@ class EncodingWorkerBridge {
 
             case 'ready': {
                 // Should never arrive after init — indicates a worker-side bug.
-                console.error(`[EncodingWorkerBridge] Unexpected second "ready" from worker[${workerIdx}] — ignoring`);
+                log.warn(`Unexpected second "ready" from worker[${workerIdx}] — ignoring`);
                 break;
             }
 
@@ -357,12 +360,12 @@ class EncodingWorkerBridge {
                     pending.resolve();
                 }
                 this._sessions.delete(msg.callId);
-                console.log(`[EncodingWorkerBridge] Session stopped: ${msg.callId} (active=${this._sessions.size})`);
+                log.info({ callId: msg.callId }, `Session stopped (active=${this._sessions.size})`);
                 break;
             }
 
             case 'error': {
-                console.error(`[EncodingWorkerBridge] Session error — call ${msg.callId}:`, msg.message);
+                log.error({ callId: msg.callId, reason: msg.message }, 'Session error');
                 const session = this._sessions.get(msg.callId);
                 session?.onError?.(msg.message);
                 this._sessions.delete(msg.callId);

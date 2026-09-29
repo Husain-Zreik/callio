@@ -7,6 +7,9 @@ import axios from 'axios';
 import ConsumerRepository from '../../persistence/ConsumerRepository.js';
 import TenantRepository from '../../persistence/TenantRepository.js';
 import { signPayload } from '../../outbox/signing.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.calls.CustomerLookup');
 
 const LOOKUP_TIMEOUT_MS = 1500;
 
@@ -46,7 +49,7 @@ class CustomerLookup {
                 reject: data.action === 'reject',
             };
         } catch (err) {
-            console.warn(`[CustomerLookup] Lookup failed for tenant ${tenantId} — continuing without it: ${err.message}`);
+            log.warn({ tenantId, err }, 'Lookup failed — continuing without it');
             return empty;
         }
     }

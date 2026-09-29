@@ -7,6 +7,9 @@
 // Ownership of _placeholderInterval cleanup lives here, not in RecordingManager.
 import wrtc from '@roamhq/wrtc';
 import { leakMetrics } from '../../infra/monitoring/leakMetrics.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.bridge.PlaceholderTrackFactory');
 
 const _buildToneTable = (freq, rate = 48000) => {
     const period = Math.round(rate / freq);
@@ -105,7 +108,7 @@ class PlaceholderTrackFactory {
             return track;
 
         } catch (error) {
-            console.error('[PlaceholderTrackFactory] Cannot create audio source:', error.message);
+            log.error({ err: error }, 'Cannot create audio source');
             return null;
         }
     }
@@ -127,7 +130,7 @@ class PlaceholderTrackFactory {
         if (!track) return;
 
         if (this.releaseGeneratedTrack(track)) {
-            console.log(`[PlaceholderTrackFactory] 🔇 Placeholder released for call ${callId}`);
+            log.info({ callId }, 'Placeholder released');
         }
 
         this._tracks.delete(callId);

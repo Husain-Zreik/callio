@@ -10,6 +10,9 @@ import CallRepository from '../../../../persistence/CallRepository.js';
 import { AssignmentType } from '../../../../core/constants/CallConstants.js';
 import { callPushNotifier } from '../../../../push/CallPushNotifier.js';
 import QueueRepository from '../../../../persistence/QueueRepository.js';
+import { logger } from '../../../../infra/logging/logger.js';
+
+const log = logger('realtime.delivery');
 
 async function logDelivery(callId, tenantId, agentId, extra) {
     try {
@@ -23,17 +26,17 @@ async function logDelivery(callId, tenantId, agentId, extra) {
         if (!socketIds.length) {
             // The room emit still went out; RINGING_AGENT_RECONNECT re-delivers
             // when the agent comes back, and the push wakes a closed app.
-            console.warn(`[delivery] Agent ${agentId} has no live sockets at call:incoming time (call=${callId})`);
+            log.warn({ agentId, callId }, 'Agent has no live sockets at call:incoming time');
         }
     } catch (err) {
-        console.error(`[delivery] Failed to log delivery attempt for call ${callId}:`, err);
+        log.error({ callId, err }, 'Failed to log delivery attempt');
     }
 }
 
 export function registerCallDeliveryListeners() {
     EventBus.on('call:incoming', async (payload) => {
         const { callId, tenantId, agentId, offeredAgentIds, assignmentType } = payload;
-        console.log(`[delivery] Incoming call ${callId} (${assignmentType}) → agent=${agentId ?? '-'} offered=${(offeredAgentIds ?? []).join(',') || '-'}`);
+        log.info({ callId }, `Incoming call (${assignmentType}) → agent=${agentId ?? '-'} offered=${(offeredAgentIds ?? []).join(',') || '-'}`);
 
         // The supervisor view never carries the agent-leg SDP offer.
         const supervisorView = { ...payload, sdpOffer: undefined };
@@ -52,10 +55,10 @@ export function registerCallDeliveryListeners() {
             try {
                 priorCallId = await CallRepository.getConflictingRingingCallId(agentId, callId);
             } catch (guardErr) {
-                console.error(`[delivery] Double-assignment guard failed for call ${callId} — failing open:`, guardErr);
+                log.error({ callId, err: guardErr }, 'Double-assignment guard failed — failing open');
             }
             if (priorCallId !== null) {
-                console.warn(`[delivery] Double-assignment race: suppressing call ${callId} for agent ${agentId} — call ${priorCallId} is already ringing`);
+                log.warn({ callId, agentId }, `Double-assignment race: suppressing call — call ${priorCallId} is already ringing`);
                 await logDelivery(callId, tenantId, agentId, {
                     delivered: false,
                     suppression_reason: 'prior_ringing_call',
@@ -69,7 +72,7 @@ export function registerCallDeliveryListeners() {
 
         const targets = agentId ? [agentId] : (offeredAgentIds ?? []);
         if (!targets.length) {
-            console.log(`[delivery] Call ${callId} waiting — no agent to offer it to yet`);
+            log.debug({ callId }, 'Call waiting — no agent to offer it to yet');
             return;
         }
 
@@ -78,13 +81,13 @@ export function registerCallDeliveryListeners() {
         await Promise.all(targets.map((id) => logDelivery(callId, tenantId, id, { offered_to: targets.length })));
 
         callPushNotifier.notifyIncoming(payload, targets)
-            .catch((err) => console.error(`[delivery] Incoming push failed for call ${callId}:`, err));
+            .catch((err) => log.error({ callId, err }, 'Incoming push failed'));
     });
 
     // Dismiss any ringing UI for a call that ended.
     EventBus.on('call:terminated', ({ callId }) => {
         callPushNotifier.notifyCallEnded(callId)
-            .catch((err) => console.error(`[delivery] Call-ended push failed for call ${callId}:`, err));
+            .catch((err) => log.error({ callId, err }, 'Call-ended push failed'));
     });
 
     // Room membership changes requested by the core (transfers, RING_ALL declines).
@@ -106,7 +109,7 @@ export function registerCallDeliveryListeners() {
             await Promise.all(agentIds.map((id) => roomManager.removeUserFromCallRoom(id, callId)));
             await callPushNotifier.notifyCancelled(callId, agentIds);
         } catch (err) {
-            console.error(`[delivery] Failed to withdraw offer for call ${callId}:`, err);
+            log.error({ callId, err }, 'Failed to withdraw offer');
         }
     });
 
@@ -118,13 +121,13 @@ export function registerCallDeliveryListeners() {
             roomManager.emitToUsers(others, 'call:offer_withdrawn', { callId, reason: 'taken', takenBy });
             await Promise.all(others.map((id) => roomManager.removeUserFromCallRoom(id, callId)));
         } catch (err) {
-            console.error(`[delivery] Failed to withdraw RING_ALL offer for call ${callId}:`, err);
+            log.error({ callId, err }, 'Failed to withdraw RING_ALL offer');
         }
     });
 
     EventBus.on('call:transferred', (data) => {
         const { tenantId, oldAgentId, sdpOffer, ...safeData } = data;
-        console.log(`[delivery] Call ${safeData.callId} transferred`);
+        log.info({ callId: safeData.callId }, 'Call transferred');
         roomManager.broadcastToSupervisors(tenantId, 'call:transferred', safeData);
         if (oldAgentId) roomManager.emitToUser(oldAgentId, 'call:transferred', safeData);
     });

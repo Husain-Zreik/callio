@@ -4,20 +4,23 @@
 import { sdpCoordinator } from '../../../media/webrtc/SDPCoordinator.js';
 import { ConnectionType } from '../../constants/CallConstants.js';
 import { customerChannels } from '../../channels/CustomerChannels.js';
+import { logger } from '../../../infra/logging/logger.js';
+
+const log = logger('core.events.CustomerEventHandler');
 
 export class CustomerEventHandler {
 
     async handleCustomerAnswerReceived(data) {
         const { callId, sdpAnswer } = data;
 
-        console.log(`[CustomerEventHandler] Processing customer SDP answer for call ${callId}`);
+        log.debug({ callId }, 'Processing customer SDP answer');
 
         try {
             const { channel } = await customerChannels.forCall(callId);
             await sdpCoordinator.processSDPAnswer(callId, sdpAnswer, ConnectionType.CUSTOMER, { sdpProfile: channel.sdp });
-            console.log(`[CustomerEventHandler] ✅ Customer leg connected for call ${callId}`);
+            log.info({ callId }, 'Customer leg connected');
         } catch (error) {
-            console.error(`[CustomerEventHandler] Failed to process customer answer for call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Failed to process customer answer');
             throw error;
         }
     }

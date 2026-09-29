@@ -106,7 +106,18 @@ export const config = {
         publicUrl: process.env.AWS_URL || null,
     },
     logging: {
-        enableNotificationLogs: process.env.ENABLE_NOTIFICATION_LOGS === "true",
+        // Default level, and per-component overrides by prefix:
+        // LOG_LEVELS=media=warn,channels.sip=debug (longest prefix wins).
+        level: (process.env.LOG_LEVEL || "info").toLowerCase(),
+        levels: process.env.LOG_LEVELS || "",
+        // stdout: on by default outside PM2 (PM2 sends worker output to /dev/null).
+        stdout: process.env.LOG_STDOUT ? process.env.LOG_STDOUT === "true" : process.env.pm_id === undefined,
+        // stdout format: 'pretty' (readable lines) or 'json'. Files are always JSON.
+        format: process.env.LOG_FORMAT || (process.env.NODE_ENV === "production" ? "json" : "pretty"),
+        // Mask customer phone numbers / SIP users in records (off by default).
+        maskPii: process.env.LOG_MASK_PII === "true",
+        retentionDays: parseInt(process.env.LOG_RETENTION_DAYS || "14", 10) || 14,
+        dir: process.env.LOG_DIR ? resolve(process.env.LOG_DIR) : resolve(__dirname, "../storage/logs/app"),
     },
     notifications: {
         oneSignal: {

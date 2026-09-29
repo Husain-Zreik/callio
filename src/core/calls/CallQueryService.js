@@ -7,6 +7,9 @@ import CallConnectionRepository from '../../persistence/CallConnectionRepository
 import { callCleanupService } from './CallCleanupService.js';
 import { toCallView } from './CallView.js';
 import { ConnectionType, CallDirection, CallStatus } from '../constants/CallConstants.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.calls.CallQueryService');
 
 class CallQueryService {
 
@@ -62,7 +65,7 @@ class CallQueryService {
                     : null;
                 return view;
             } catch (err) {
-                console.error(`[CallQueryService] Failed to process call ${call.id}:`, err);
+                log.error({ callId: call.id, err }, 'Failed to process call');
                 return null;
             }
         });

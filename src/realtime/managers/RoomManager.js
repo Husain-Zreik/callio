@@ -1,5 +1,8 @@
 // src/realtime/managers/RoomManager.js
 import { presenceService } from "../../core/agents/PresenceService.js";
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('realtime.RoomManager');
 
 class RoomManager {
     io = null;
@@ -158,7 +161,7 @@ class RoomManager {
                 }
             }
         } catch (err) {
-            console.error(`[RoomManager] Failed to clear call binding for user ${userId}, call ${callId}:`, err.message);
+            log.error({ agentId: userId, callId, err }, 'Failed to clear call binding');
         }
 
         await this.io.in(`user:${userId}`).socketsLeave(roomName);

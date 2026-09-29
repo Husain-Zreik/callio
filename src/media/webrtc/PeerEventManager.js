@@ -5,6 +5,9 @@ import { ConnectionType } from '../../core/constants/CallConstants.js';
 import { EventEmitter } from './EventEmitter.js';
 import EventBus from '../../core/EventBus.js';
 import wrtc from '@roamhq/wrtc';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.webrtc.PeerEventManager');
 
 export class PeerEventManager extends EventEmitter {
     constructor(iceCoordinator) {
@@ -67,7 +70,7 @@ export class PeerEventManager extends EventEmitter {
         if (storedState) storedState.iceGatheringState = state;
 
         CallConnectionRepository.updateICEGatheringState(callId, connectionType, state)
-            .catch(err => console.error('Failed to update ICE gathering state:', err));
+            .catch(err => log.error({ err }, 'Failed to update ICE gathering state'));
     }
 
     handleIceCandidate(event, callId, connectionType) {
@@ -86,20 +89,20 @@ export class PeerEventManager extends EventEmitter {
         // Log every transition — the full timeline is essential for 138021 "no media"
         // analysis: we need to know exactly when (and whether) ICE reached 'connected'
         // for the CUSTOMER leg before the call was terminated.
-        console.log(`[PeerEventManager] ICE state: ${callId} ${connectionType} → ${iceState}`);
+        log.debug({ callId }, `ICE state: ${connectionType} → ${iceState}`);
         const key = `${callId}-${connectionType}`;
         // Only update an existing entry — never recreate after cleanup (see above).
         const storedState = this.connectionStates.get(key);
         if (storedState) storedState.iceConnectionState = iceState;
 
         CallConnectionRepository.updateICEState(callId, connectionType, iceState)
-            .catch(err => console.error('Failed to update ICE state:', err.message));
+            .catch(err => log.error({ err }, 'Failed to update ICE state'));
     }
 
     async handleConnectionStateChange(peerConnection, callId, connectionType) {
         const connectionState = peerConnection.connectionState;
         const iceState = peerConnection.iceConnectionState;
-        console.log(`[PeerEventManager] Connection state: ${callId} ${connectionType} → ${connectionState} (ice=${iceState})`);
+        log.debug({ callId }, `Connection state: ${connectionType} → ${connectionState} (ice=${iceState})`);
 
         try {
             await CallConnectionRepository.updateConnectionState(callId, connectionType, connectionState, iceState);
@@ -124,7 +127,7 @@ export class PeerEventManager extends EventEmitter {
             }
 
         } catch (error) {
-            console.error(`Failed to update connection state: ${error.message}`);
+            log.error({ err: error }, 'Failed to update connection state');
         }
     }
 
@@ -144,7 +147,7 @@ export class PeerEventManager extends EventEmitter {
 
     _setupDTMFReceiver(peerConnection, callId) {
         const receivers = peerConnection.getReceivers();
-        console.log(`[DTMF] Inspecting ${receivers.length} receiver(s) for call ${callId}`);
+        log.debug({ callId }, `Inspecting ${receivers.length} receiver(s)`);
 
         receivers.forEach((receiver, i) => {
             const track = receiver.track;
@@ -153,25 +156,21 @@ export class PeerEventManager extends EventEmitter {
             const receiverKeys = Object.getOwnPropertyNames(Object.getPrototypeOf(receiver))
                 .filter(k => k !== 'constructor');
 
-            console.log(
-                `[DTMF] Receiver[${i}]: kind=${track?.kind ?? 'null'}, readyState=${track?.readyState ?? 'null'}` +
-                `, 'dtmf' in receiver=${hasDtmf}, dtmf=${dtmfValue}` +
-                `, proto keys=[${receiverKeys.join(', ')}]`
-            );
+            log.debug(`Receiver[${i}]: kind=${track?.kind ?? 'null'}, readyState=${track?.readyState ?? 'null'}, 'dtmf' in receiver=${hasDtmf}, dtmf=${dtmfValue}, proto keys=[${receiverKeys.join(', ')}]`);
 
             // Also check transceiver if accessible
             try {
                 const transceivers = peerConnection.getTransceivers?.();
                 if (transceivers) {
-                    console.log(`[DTMF] getTransceivers() returned ${transceivers.length} transceiver(s)`);
+                    log.debug(`getTransceivers returned ${transceivers.length} transceiver(s)`);
                     transceivers.forEach((t, ti) => {
-                        console.log(`[DTMF] Transceiver[${ti}]: direction=${t.direction}, currentDirection=${t.currentDirection}, mid=${t.mid}`);
+                        log.debug(`Transceiver[${ti}]: direction=${t.direction}, currentDirection=${t.currentDirection}, mid=${t.mid}`);
                     });
                 } else {
-                    console.log('[DTMF] getTransceivers() not available on this peerConnection');
+                    log.debug('getTransceivers not available on this peerConnection');
                 }
             } catch (e) {
-                console.log(`[DTMF] getTransceivers() error: ${e.message}`);
+                log.debug({ err: e }, 'getTransceivers failed');
             }
         });
 
@@ -179,10 +178,10 @@ export class PeerEventManager extends EventEmitter {
             if (receiver.track?.kind === 'audio' && receiver.dtmf) {
                 receiver.dtmf.ontonechange = (event) => {
                     if (!event.tone) return; // empty string signals end of tone sequence
-                    console.log(`[DTMF] Digit '${event.tone}' detected on call ${callId}`);
+                    log.info({ callId }, `Digit '${event.tone}' detected`);
                     EventBus.emit('call:dtmf', { callId, digit: event.tone });
                 };
-                console.log(`[DTMF] RTCDtmfReceiver attached for call ${callId}`);
+                log.info({ callId }, 'RTCDtmfReceiver attached');
                 return;
             }
         }

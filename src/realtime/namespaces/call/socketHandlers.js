@@ -13,6 +13,9 @@ import { EventTypes } from "../../../core/events/EventTypes.js";
 import { CallErrorCodes } from "../../../core/events/CallErrorCodes.js";
 import { emitCallError } from "../../../core/events/CallErrorEmitter.js";
 import { AgentRole } from "../../../core/constants/CallConstants.js";
+import { logger } from '../../../infra/logging/logger.js';
+
+const log = logger('realtime.socketHandlers');
 
 export default function registerCallSocketListeners(socket) {
     const identity = () => ({
@@ -43,7 +46,7 @@ export default function registerCallSocketListeners(socket) {
                 socket.emit('call:agent_queue', snapshot);
             }
         } catch (error) {
-            console.error('[Socket] Fetch ongoing calls error:', error);
+            log.error({ err: error }, 'Fetch ongoing calls error');
             emitCallError({ callId: null, code: CallErrorCodes.FAILED_FETCH_ACTIVE, message: 'Failed to fetch ongoing calls', socket });
         }
     };
@@ -58,7 +61,7 @@ export default function registerCallSocketListeners(socket) {
                 socket.emit('call:agent_queue', snapshot);
             }
         } catch (error) {
-            console.error('[Socket] Fetch agent queue error:', error);
+            log.error({ err: error }, 'Fetch agent queue error');
             emitCallError({ callId: null, code: CallErrorCodes.AGENT_QUEUE_SYNC_FAILED, message: 'Failed to sync agent queue', socket });
         }
     });
@@ -69,7 +72,7 @@ export default function registerCallSocketListeners(socket) {
             if (!tenantId) return;
             await agentAssignmentCoordinator.syncAgentAvailability(tenantId, socket.user?.id, data?.userId ?? socket.user?.id);
         } catch (error) {
-            console.error('[Socket] Agent availability sync error:', error);
+            log.error({ err: error }, 'Agent availability sync error');
             emitCallError({ callId: null, code: CallErrorCodes.AGENT_AVAILABILITY_SYNC_FAILED, message: 'Failed to sync agent availability', socket });
         }
     });
@@ -88,7 +91,7 @@ export default function registerCallSocketListeners(socket) {
                 emitCallError({ callId: null, code: CallErrorCodes.AGENT_AVAILABILITY_SYNC_FAILED, message: 'Availability change not allowed', socket });
             }
         } catch (error) {
-            console.error('[Socket] Set availability error:', error);
+            log.error({ err: error }, 'Set availability error');
             emitCallError({ callId: null, code: CallErrorCodes.AGENT_AVAILABILITY_SYNC_FAILED, message: 'Failed to set availability', socket });
         }
     });
@@ -122,7 +125,7 @@ export default function registerCallSocketListeners(socket) {
             socket.emit('call:started', callData);
             roomManager.broadcastToSupervisors(callData.tenantId, 'call:initiated', { ...callData, sdpOffer: undefined, sdpAnswer: undefined });
         } catch (error) {
-            console.error('[Socket] Call start error:', error);
+            log.error({ err: error }, 'Call start error');
             emitCallError({ callId: callId ?? null, code: CallErrorCodes.CALL_INITIATION_FAILED, message: error.message || 'Failed to start call', socket });
         }
     });
@@ -157,7 +160,7 @@ export default function registerCallSocketListeners(socket) {
                 deviceId: socket.user?.deviceId ?? null,
             });
         } catch (error) {
-            console.error('[Socket] Accept call error:', error);
+            log.error({ err: error }, 'Accept call error');
             roomManager.leaveCallRoom(socket, callId);
             emitCallError({ callId, code: CallErrorCodes.ACCEPT_FAILED, message: error?.message || 'Failed to accept call', socket });
         }
@@ -184,7 +187,7 @@ export default function registerCallSocketListeners(socket) {
             });
             roomManager.leaveCallRoom(socket, callId);
         } catch (error) {
-            console.error('[Socket] Reject call error:', error);
+            log.error({ err: error }, 'Reject call error');
             emitCallError({ callId, code: CallErrorCodes.REJECT_FAILED, message: 'Failed to reject call', socket });
         }
     });
@@ -214,7 +217,7 @@ export default function registerCallSocketListeners(socket) {
             });
             roomManager.leaveCallRoom(socket, callId);
         } catch (error) {
-            console.error('[Socket] End call error:', error);
+            log.error({ err: error }, 'End call error');
             emitCallError({ callId, code: errorCode, message: 'Failed to end call', socket });
         }
     };
@@ -250,7 +253,7 @@ export default function registerCallSocketListeners(socket) {
                 reconnectTrigger: reconnectTrigger ?? null,
             });
         } catch (error) {
-            console.error('[Socket] Reconnect call error:', error);
+            log.error({ err: error }, 'Reconnect call error');
             emitCallError({ callId, code: CallErrorCodes.RECONNECT_FAILED, message: 'Failed to reconnect call', socket });
         }
     });
@@ -282,7 +285,7 @@ export default function registerCallSocketListeners(socket) {
                 assignorId: socket.user?.id,
             });
         } catch (error) {
-            console.error('[Socket] Call transfer error:', error);
+            log.error({ err: error }, 'Call transfer error');
             emitCallError({ callId, code: CallErrorCodes.CALL_TRANSFER_FAILED, message: error.message || 'Failed to transfer the call', socket });
         }
     });
@@ -300,7 +303,7 @@ export default function registerCallSocketListeners(socket) {
                 socketId: socket.id,
             });
         } catch (error) {
-            console.error('[Socket] ICE candidate error:', error);
+            log.error({ err: error }, 'ICE candidate error');
         }
     });
 
@@ -332,7 +335,7 @@ export default function registerCallSocketListeners(socket) {
                 socketId: socket.id,
             });
         } catch (error) {
-            console.error('[Socket] Monitor call error:', error);
+            log.error({ err: error }, 'Monitor call error');
             roomManager.leaveCallRoom(socket, callId);
             socket.isMonitoring = false;
             emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: error.message, socket });
@@ -356,7 +359,7 @@ export default function registerCallSocketListeners(socket) {
                 socketId: socket.id,
             });
         } catch (error) {
-            console.error('[Socket] Monitor mode change error:', error);
+            log.error({ err: error }, 'Monitor mode change error');
             emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: error.message, socket });
         }
     });
@@ -375,7 +378,7 @@ export default function registerCallSocketListeners(socket) {
                 socketId: socket.id,
             });
         } catch (error) {
-            console.error('[Socket] Agent private change error:', error);
+            log.error({ err: error }, 'Agent private change error');
             emitCallError({ callId, code: CallErrorCodes.AGENT_PRIVATE_FAILED, message: error.message, socket });
         }
     });
@@ -405,7 +408,7 @@ export default function registerCallSocketListeners(socket) {
             roomManager.leaveCallRoom(socket, callId);
             socket.isMonitoring = false;
         } catch (error) {
-            console.error('[Socket] Stop monitoring error:', error);
+            log.error({ err: error }, 'Stop monitoring error');
             emitCallError({ callId, code: CallErrorCodes.STOP_MONITOR_FAILED, message: error.message, socket });
         }
     });
@@ -417,7 +420,7 @@ export default function registerCallSocketListeners(socket) {
         const userId = socket.user?.id;
 
         if (socket.isMonitoring) {
-            console.log(`[Socket] Monitor ${userId} disconnected from call ${socket.callId}`);
+            log.info({ agentId: userId, callId: socket.callId }, 'Monitor disconnected from call');
             await redisPubSubService.publishCallEvent(socket.callId, EventTypes.MONITOR_STOPPED, {
                 callId: socket.callId,
                 userId,
@@ -425,7 +428,7 @@ export default function registerCallSocketListeners(socket) {
                 socketId: socket.id,
             });
         } else {
-            console.log(`[Socket] Agent ${userId} disconnected from call ${socket.callId}`);
+            log.info({ agentId: userId, callId: socket.callId }, 'Agent disconnected from call');
             await redisPubSubService.publishCallEvent(socket.callId, EventTypes.AGENT_DISCONNECTED, {
                 callId: socket.callId,
                 userId,

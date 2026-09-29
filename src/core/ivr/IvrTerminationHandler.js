@@ -6,6 +6,9 @@
 import EventBus from '../EventBus.js';
 import { callTerminator } from '../calls/CallTerminator.js';
 import { TerminationReason, TerminatedBy } from '../constants/CallConstants.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.ivr.IvrTerminationHandler');
 
 export function ivrTerminationReason(action) {
     switch (String(action || '').toLowerCase()) {
@@ -28,7 +31,7 @@ class IvrTerminationHandler {
 
     async #handle({ callId, action }) {
         const terminationReason = ivrTerminationReason(action);
-        console.log(`[IvrTermination] call=${callId}, action=${action}, terminationReason=${terminationReason}`);
+        log.info({ callId }, `IVR ended the call — action=${action}, reason=${terminationReason}`);
         try {
             await callTerminator.end(callId, {
                 reason: terminationReason,
@@ -37,7 +40,7 @@ class IvrTerminationHandler {
                 source: 'ivr',
             });
         } catch (err) {
-            console.error(`[IvrTermination] Failed to end call ${callId}:`, err);
+            log.error({ callId, err }, 'Failed to end call');
         }
     }
 }

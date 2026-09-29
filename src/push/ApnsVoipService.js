@@ -2,6 +2,9 @@ import apn from "@parse/node-apn";
 import { config } from "../../config/envConfig.js";
 import pushTokenRepository from "../persistence/PushTokenRepository.js";
 import { callUuid } from "../core/calls/CallView.js";
+import { logger } from '../infra/logging/logger.js';
+
+const log = logger('push.ApnsVoipService');
 
 // Sends VoIP push notifications (Apple PushKit) directly to APNs — a
 // separate channel from FcmService's regular FCM/APNs delivery. Firebase's
@@ -12,7 +15,7 @@ class ApnsVoipService {
     constructor() {
         const { apnsKeyPath, apnsKeyId, apnsTeamId, production } = config.apple;
         if (!apnsKeyId || !apnsTeamId) {
-            console.warn("[ApnsVoip] APNS_KEY_ID/APNS_TEAM_ID not configured — VoIP push sending disabled");
+            log.warn('APNS_KEY_ID/APNS_TEAM_ID not configured — VoIP push sending disabled');
             this.provider = null;
             return;
         }
@@ -29,9 +32,9 @@ class ApnsVoipService {
                 // worst-case all-timeouts path from ~16s to ~8.5s.
                 requestTimeout: 2500,
             });
-            console.log(`[ApnsVoip] Provider initialized (production=${production})`);
+            log.info(`Provider initialized (production=${production})`);
         } catch (error) {
-            console.error("[ApnsVoip] Initialization error:", error.message);
+            log.error({ err: error }, 'Initialization error');
             this.provider = null;
         }
     }
@@ -44,7 +47,7 @@ class ApnsVoipService {
         if (!tokens || tokens.length === 0) return;
 
         if (!this.provider) {
-            console.error("[ApnsVoip] Provider not initialized — skipping VoIP push to", tokens.length, "device(s)");
+            log.warn({ length: tokens.length }, 'Provider not initialized — skipping VoIP push to device(s)');
             return;
         }
 
@@ -112,7 +115,7 @@ class ApnsVoipService {
         // multiple calls are in flight. startedAt lets the final summary
         // report total wall-clock spent across all attempts, so it's visible
         // whether retries are costing meaningful ring time.
-        const logTag = `[ApnsVoip] [callId=${callData.callId}]`;
+        const plog = log.child({ callId: callData.callId });
         const startedAt = Date.now();
 
         for (let attempt = 1; attempt <= maxAttempts && pendingTokens.length > 0; attempt++) {
@@ -127,7 +130,7 @@ class ApnsVoipService {
                 // for a genuinely catastrophic provider-level error (e.g.
                 // malformed note, provider misconfiguration). Retrying that
                 // class of error would just repeat the same failure 3x.
-                console.error(`${logTag} Error sending VoIP push on attempt ${attempt}/${maxAttempts}:`, error.message);
+                plog.error({ err: error }, `Error sending VoIP push on attempt ${attempt}/${maxAttempts}`);
                 return { sent };
             }
 
@@ -137,7 +140,7 @@ class ApnsVoipService {
             // gated behind a debug flag without making every successful
             // send (including a recovered retry) invisible in the logs.
             for (const success of result.sent) {
-                console.log(`${logTag} APNs accepted push for token ${success.device?.substring(0, 10)}... on attempt ${attempt}/${maxAttempts}`);
+                plog.info(`APNs accepted push for token ${success.device?.substring(0, 10)}... on attempt ${attempt}/${maxAttempts}`);
             }
 
             if (result.failed.length === 0) break;
@@ -152,11 +155,11 @@ class ApnsVoipService {
                 // never worth retrying.
                 if (reason === "Unregistered" || reason === "BadDeviceToken") {
                     invalidTokens.push(failure.device);
-                    console.warn(`${logTag} Invalid VoIP token ${tokenPreview}... (${reason}) — removing from DB`);
+                    plog.warn(`Invalid VoIP token ${tokenPreview}... (${reason}) — removing from DB`);
                     pushTokenRepository.removeToken("APNS_VOIP", failure.device).then((removed) => {
-                        console.warn(`${logTag} Removed ${removed} VoIP token row(s) (reason: ${reason})`);
+                        plog.warn(`Removed ${removed} VoIP token row(s) (reason: ${reason})`);
                     }).catch((err) =>
-                        console.error(`${logTag} Failed to remove stale VoIP token from DB: ${err.message}`)
+                        plog.error({ err }, `Failed to remove stale VoIP token from DB`)
                     );
                 } else if (reason === "TooManyRequests") {
                     // Apple's documented reason for HTTP 429 on this token
@@ -170,12 +173,12 @@ class ApnsVoipService {
                     // not retry this token for THIS call at all and let the
                     // next genuinely new call (naturally spaced apart in
                     // time) try again, rather than hammering it again in ~500ms.
-                    console.warn(`${logTag} Rate-limited (429) for token ${tokenPreview}... — not retrying this call, token left valid for next call`);
+                    plog.warn(`Rate-limited (429) for token ${tokenPreview}... — not retrying this call, token left valid for next call`);
                 } else if (attempt < maxAttempts) {
                     retryableTokens.push(failure.device);
-                    console.warn(`${logTag} Transient delivery failure for token ${tokenPreview}... on attempt ${attempt}/${maxAttempts}, will retry: ${reasonOrMessage}`);
+                    plog.warn(`Transient delivery failure for token ${tokenPreview}... on attempt ${attempt}/${maxAttempts}, will retry: ${reasonOrMessage}`);
                 } else {
-                    console.warn(`${logTag} Giving up on token ${tokenPreview}... after ${attempt} attempt(s), last error: ${reasonOrMessage}`);
+                    plog.warn(`Giving up on token ${tokenPreview}... after ${attempt} attempt(s), last error: ${reasonOrMessage}`);
                 }
             }
 
@@ -188,9 +191,9 @@ class ApnsVoipService {
         const durationMs = Date.now() - startedAt;
         const undelivered = validTokens.length - sent.length - invalidTokens.length;
         if (sent.length === validTokens.length) {
-            console.log(`${logTag} VoIP push delivered to all ${sent.length} token(s) in ${durationMs}ms`);
+            plog.info(`VoIP push delivered to all ${sent.length} token(s) in ${durationMs}ms`);
         } else {
-            console.warn(`${logTag} VoIP push finished: ${sent.length}/${validTokens.length} delivered, ${invalidTokens.length} invalid, ${undelivered} undelivered, in ${durationMs}ms`);
+            plog.warn(`VoIP push finished: ${sent.length}/${validTokens.length} delivered, ${invalidTokens.length} invalid, ${undelivered} undelivered, in ${durationMs}ms`);
         }
 
         return { sent };

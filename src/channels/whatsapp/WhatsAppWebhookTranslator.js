@@ -8,6 +8,9 @@ import ChannelRepository from '../../persistence/ChannelRepository.js';
 import TenantRepository from '../../persistence/TenantRepository.js';
 import { channelIngress } from '../../core/channels/ChannelIngress.js';
 import { Channel, CustomerAddressType, TerminatedBy } from '../../core/constants/CallConstants.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('channels.whatsapp.WhatsAppWebhookTranslator');
 
 // Max number of call/status events processed in parallel within one webhook payload.
 // Prevents a single large payload from spawning unbounded concurrent DB + Redis chains.
@@ -43,18 +46,18 @@ class WhatsAppWebhookTranslator {
         // calls on another channel, so a payload can't touch other lines' calls.
         const channel = await ChannelRepository.findActiveByProviderAccount(Channel.WHATSAPP, metadata?.phone_number_id);
         if (!channel) {
-            console.warn(`[WhatsApp:webhook] No active WhatsApp channel for phone_number_id=${metadata?.phone_number_id} — payload ignored`);
+            log.warn(`No active WhatsApp channel for phone_number_id=${metadata?.phone_number_id} — payload ignored`);
             return { accepted: false, reason: 'unknown_channel' };
         }
         if (consumerId != null && String(await TenantRepository.getConsumerId(channel.tenant_id)) !== String(consumerId)) {
-            console.warn(`[WhatsApp:webhook] Channel ${channel.id} does not belong to consumer ${consumerId} — payload rejected`);
+            log.warn(`Channel ${channel.id} does not belong to consumer ${consumerId} — payload rejected`);
             return { accepted: false, reason: 'channel_not_owned' };
         }
 
         const thunks = [];
         for (const call of Array.isArray(calls) ? calls : []) {
             thunks.push(() => this._callEvent(call, channel, contacts?.[0]).catch((err) =>
-                console.error(`[WhatsApp:webhook] Error processing call ${call?.id}:`, err)
+                log.error({ callId: call?.id, err }, 'Error processing call')
             ));
         }
         for (const status of Array.isArray(statuses) ? statuses : []) {
@@ -63,7 +66,7 @@ class WhatsAppWebhookTranslator {
                 providerCallId: status.id,
                 status: status.status,
                 at: fromUnix(status.timestamp),
-            }).catch((err) => console.error(`[WhatsApp:webhook] Error processing status:`, err)));
+            }).catch((err) => log.error({ err }, 'Error processing status')));
         }
 
         if (thunks.length) await this._runConcurrent(thunks, WEBHOOK_CONCURRENCY);
@@ -95,14 +98,14 @@ class WhatsAppWebhookTranslator {
         }
 
         if (event !== 'connect') {
-            console.warn(`[WhatsApp:webhook] Unknown call event type: ${event}`);
+            log.warn(`Unknown call event type: ${event}`);
             return;
         }
 
         const { direction, session } = call;
         const sdpType = session?.sdp_type?.toLowerCase();
         if (!session?.sdp || !['offer', 'answer'].includes(sdpType)) {
-            console.error(`[WhatsApp:webhook] Invalid session payload for call ${providerCallId}`);
+            log.error(`Invalid session payload for call ${providerCallId}`);
             return;
         }
 

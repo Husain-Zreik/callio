@@ -2,6 +2,9 @@
 import { RecordingSession } from './RecordingSession.js';
 import { audioCaptureService } from './AudioCaptureService.js';
 import { placeholderTrackFactory } from '../bridge/PlaceholderTrackFactory.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.recording.RecordingManager');
 
 class RecordingManager {
     constructor() {
@@ -10,19 +13,19 @@ class RecordingManager {
 
     async startRecording(callId, tenantId, tracks) {
         if (this.activeSessions.has(callId)) {
-            console.warn(`[RecordingManager] Call ${callId} is already being recorded`);
+            log.warn({ callId }, 'Call is already being recorded');
             return { success: false, reason: 'Already recording' };
         }
 
         const { agentTrack, customerTrack } = tracks;
 
         if (!agentTrack || !customerTrack) {
-            console.error(`[RecordingManager] Missing tracks for call ${callId}`);
+            log.warn({ callId }, 'Missing tracks');
             return { success: false, reason: 'Missing audio tracks' };
         }
 
         try {
-            console.log(`[RecordingManager] Starting recording for call ${callId}`);
+            log.info({ callId }, 'Starting recording');
 
             const session = new RecordingSession(callId, tenantId);
             this.activeSessions.set(callId, session);
@@ -56,11 +59,11 @@ class RecordingManager {
                 return { success: false, reason: 'Failed to capture customer audio' };
             }
 
-            console.log(`[RecordingManager] ✅ Recording started for call ${callId}`);
+            log.info({ callId }, 'Recording started');
             return { success: true, recordingId: session.recordingId };
 
         } catch (error) {
-            console.error(`[RecordingManager] ❌ Failed to start recording for call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Failed to start recording');
             audioCaptureService.stopAllCaptures(callId);
             this.activeSessions.delete(callId);
             return { success: false, reason: error.message };
@@ -71,12 +74,12 @@ class RecordingManager {
         const session = this.activeSessions.get(callId);
 
         if (!session) {
-            console.log(`[RecordingManager] No active recording for call ${callId} — nothing to stop`);
+            log.info({ callId }, 'No active recording — nothing to stop');
             return { success: false, reason: 'Not recording' };
         }
 
         try {
-            console.log(`[RecordingManager] Stopping recording for call ${callId}`);
+            log.info({ callId }, 'Stopping recording');
 
             // Clear any active placeholder interval
             placeholderTrackFactory.clearTrack(callId);
@@ -91,12 +94,12 @@ class RecordingManager {
                 return { success: false, reason: 'Failed to stop recording session' };
             }
 
-            console.log(`[RecordingManager] ✅ Recording stopped for call ${callId}`);
+            log.info({ callId }, 'Recording stopped');
 
             return { success: true, recordingId: session.recordingId };
 
         } catch (error) {
-            console.error(`[RecordingManager] ❌ Failed to stop recording for call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Failed to stop recording');
             return { success: false, reason: error.message };
         }
     }
@@ -110,7 +113,7 @@ class RecordingManager {
         audioCaptureService.stopCapture(callId, 'agent');
         // Tell the worker's mix buffer to fill the agent channel with silence while paused
         this.activeSessions.get(callId).setTrackActive('agent', false);
-        console.log(`[RecordingManager] ⏸️ Agent capture paused for call ${callId} — customer continues`);
+        log.info({ callId }, 'Agent capture paused — customer continues');
     }
 
     /**
@@ -121,12 +124,12 @@ class RecordingManager {
         const session = this.activeSessions.get(callId);
 
         if (!session) {
-            console.warn(`[RecordingManager] replaceAgentTrack: no active session for call ${callId}`);
+            log.warn({ callId }, 'replaceAgentTrack: no active session');
             return false;
         }
 
         if (!newAgentTrack || newAgentTrack.readyState !== 'live') {
-            console.error(`[RecordingManager] replaceAgentTrack: new agent track is not live for call ${callId}`);
+            log.error({ callId }, 'replaceAgentTrack: new agent track is not live');
             return false;
         }
 
@@ -136,7 +139,7 @@ class RecordingManager {
 
             // Stop any lingering agent sink
             audioCaptureService.stopCapture(callId, 'agent');
-            console.log(`[RecordingManager] 🔄 Old agent track capture stopped for call ${callId}`);
+            log.debug({ callId }, 'Old agent track capture stopped');
 
             // Re-enable agent channel in the worker's mix buffer and reset encoder state
             session.setTrackActive('agent', true);
@@ -148,15 +151,15 @@ class RecordingManager {
             );
 
             if (!started) {
-                console.error(`[RecordingManager] ❌ Failed to start capture on new agent track for call ${callId}`);
+                log.error({ callId }, 'Failed to start capture on new agent track');
                 return false;
             }
 
-            console.log(`[RecordingManager] ✅ Agent track replaced for call ${callId} — recording continues`);
+            log.debug({ callId }, 'Agent track replaced — recording continues');
             return true;
 
         } catch (error) {
-            console.error(`[RecordingManager] ❌ replaceAgentTrack failed for call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'replaceAgentTrack failed');
             return false;
         }
     }
@@ -173,10 +176,10 @@ class RecordingManager {
     }
 
     async cleanup() {
-        console.log(`[RecordingManager] Cleaning up ${this.activeSessions.size} active recordings...`);
+        log.info(`Cleaning up ${this.activeSessions.size} active recordings...`);
         await Promise.allSettled([...this.activeSessions.keys()].map(id => this.stopRecording(id)));
         audioCaptureService.cleanup();
-        console.log('[RecordingManager] ✅ Cleanup complete');
+        log.info('Cleanup complete');
     }
 }
 

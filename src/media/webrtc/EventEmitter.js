@@ -1,4 +1,8 @@
 // src/media/webrtc/EventEmitter.js
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.webrtc.EventEmitter');
+
 export class EventEmitter {
     constructor() {
         this.events = new Map();
@@ -31,11 +35,11 @@ export class EventEmitter {
                 // crash the process or silently drop critical operations.
                 if (result && typeof result.catch === 'function') {
                     result.catch(err =>
-                        console.error(`[EventEmitter] Unhandled async error in '${event}' listener:`, err?.message ?? err)
+                        log.error({ err }, `Unhandled async error in '${event}' listener`)
                     );
                 }
             } catch (err) {
-                console.error(`[EventEmitter] Unhandled sync error in '${event}' listener:`, err?.message ?? err);
+                log.error({ err }, `Unhandled sync error in '${event}' listener`);
             }
         });
     }

@@ -13,6 +13,9 @@ import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
 import { sdpCoordinator } from '../../../media/webrtc/SDPCoordinator.js';
 import { ConnectionType, AssignmentType, AgentRole, InitiatorType } from '../../constants/CallConstants.js';
 import { IncomingCallPayload } from '../../calls/IncomingCallPayload.js';
+import { logger } from '../../../infra/logging/logger.js';
+
+const log = logger('core.events.TransferEventHandler');
 
 export class TransferEventHandler {
 
@@ -26,7 +29,7 @@ export class TransferEventHandler {
             targetQueueId = null,
         } = data;
 
-        console.log(`[TransferEventHandler] Transferring call ${callId} using targetType=${targetType}`);
+        log.info({ callId }, `Transferring call using targetType=${targetType}`);
 
         try {
             const call = await CallRepository.findById(callId);
@@ -118,9 +121,9 @@ export class TransferEventHandler {
             });
             await agentAssignmentCoordinator.emitQueueUpdate(tenantId);
 
-            console.log(`[TransferEventHandler] ✅ Call ${callId} transferred to agent ${resolved.newAgentId}`);
+            log.info({ callId }, `Call transferred to agent ${resolved.newAgentId}`);
         } catch (error) {
-            console.error(`[TransferEventHandler] Failed to transfer call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Failed to transfer call');
             throw error;
         }
     }

@@ -16,6 +16,9 @@ import { apnsVoipService } from './ApnsVoipService.js';
 import OneSignalService from './OneSignalService.js';
 import { NotificationPresets, NotificationIcons } from './notificationPresets.js';
 import { callUuid } from '../core/calls/CallView.js';
+import { logger } from '../infra/logging/logger.js';
+
+const log = logger('push.CallPushNotifier');
 
 const RING_TTL_SECONDS = 30;
 
@@ -91,7 +94,7 @@ class CallPushNotifier {
             }));
         }
         await Promise.all(sends.map((p) => p.catch((err) =>
-            console.error(`[CallPush] Incoming push failed for call ${data.callId}:`, err)
+            log.error({ callId: data.callId, err }, 'Incoming push failed')
         )));
     }
 
@@ -117,7 +120,7 @@ class CallPushNotifier {
             sends.push(apnsVoipService.sendVoipPush(iosVoip.map((t) => t.token), data));
         }
         await Promise.all(sends.map((p) => p.catch((err) =>
-            console.error(`[CallPush] Cancel push failed for call ${callId}:`, err)
+            log.error({ callId, err }, 'Cancel push failed')
         )));
     }
 

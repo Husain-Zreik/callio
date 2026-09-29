@@ -6,6 +6,9 @@
 //
 // AudioBridge (per-call relay logic) lives in AudioBridge.js.
 import { AudioBridge } from './AudioBridge.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.bridge.AudioBridgeCoordinator');
 
 export class AudioBridgeCoordinator {
     constructor() {
@@ -21,16 +24,16 @@ export class AudioBridgeCoordinator {
         const customerReady = customerConnection?.pc?.connectionState === 'connected';
 
         if (!frontendReady) {
-            console.log(`[AudioBridgeCoordinator] Frontend not ready for call ${callId}: ${frontendConnection?.pc?.connectionState ?? 'missing'}`);
+            log.info({ callId }, `Frontend not ready: ${frontendConnection?.pc?.connectionState ?? 'missing'}`);
             return false;
         }
 
         if (!customerReady) {
-            console.log(`[AudioBridgeCoordinator] Customer leg not ready for call ${callId}: ${customerConnection?.pc?.connectionState ?? 'missing'}`);
+            log.info({ callId }, `Customer leg not ready: ${customerConnection?.pc?.connectionState ?? 'missing'}`);
             return false;
         }
 
-        console.log(`[AudioBridgeCoordinator] Starting bridge for call ${callId}`);
+        log.info({ callId }, 'Starting bridge');
 
         let bridge = this.activeBridges.get(callId);
         if (!bridge) {
@@ -62,11 +65,11 @@ export class AudioBridgeCoordinator {
     addMonitorConnection(callId, monitorConnection) {
         const bridge = this.activeBridges.get(callId);
         if (!bridge) {
-            console.error(`[AudioBridgeCoordinator] No active bridge for call ${callId}`);
+            log.warn({ callId }, 'No active bridge');
             return false;
         }
 
-        console.log(`[AudioBridgeCoordinator] Adding monitor to call ${callId}`);
+        log.info({ callId }, 'Adding monitor');
         return bridge.addMonitor(monitorConnection);
     }
 
@@ -84,7 +87,7 @@ export class AudioBridgeCoordinator {
     setSupervisorTrack(callId, track) {
         const bridge = this.activeBridges.get(callId);
         if (!bridge) {
-            console.warn(`[AudioBridgeCoordinator] No active bridge for supervisor track on call ${callId}`);
+            log.warn({ callId }, 'No active bridge for supervisor track');
             return;
         }
         bridge.setSupervisorTrack(track);
@@ -93,7 +96,7 @@ export class AudioBridgeCoordinator {
     setSupervisorMode(callId, mode) {
         const bridge = this.activeBridges.get(callId);
         if (!bridge) {
-            console.warn(`[AudioBridgeCoordinator] No active bridge for supervisor mode change on call ${callId}`);
+            log.warn({ callId }, 'No active bridge for supervisor mode change');
             return;
         }
         bridge.setSupervisorMode(mode);
@@ -102,7 +105,7 @@ export class AudioBridgeCoordinator {
     setAgentPrivate(callId, active) {
         const bridge = this.activeBridges.get(callId);
         if (!bridge) {
-            console.warn(`[AudioBridgeCoordinator] No active bridge for agent-private change on call ${callId}`);
+            log.warn({ callId }, 'No active bridge for agent-private change');
             return;
         }
         bridge.setAgentPrivate(active);
@@ -115,7 +118,7 @@ export class AudioBridgeCoordinator {
     getTracksForRecording(callId) {
         const bridge = this.activeBridges.get(callId);
         if (!bridge?.isActive) {
-            console.error(`[AudioBridgeCoordinator] No active bridge for call ${callId}`);
+            log.warn({ callId }, 'No active bridge');
             return null;
         }
 
@@ -123,10 +126,8 @@ export class AudioBridgeCoordinator {
         const customerTrack = this._getTrackFromConnection(bridge.customerConnection, 'customer');
 
         if (!agentTrack || !customerTrack) {
-            console.error(`[AudioBridgeCoordinator] Missing tracks for call ${callId}`, {
-                hasAgent: !!agentTrack,
-                hasCustomer: !!customerTrack,
-            });
+            log.warn({ callId, hasAgent: !!agentTrack,
+                hasCustomer: !!customerTrack }, 'Missing tracks');
             return null;
         }
 
@@ -136,13 +137,13 @@ export class AudioBridgeCoordinator {
     getAgentTrackForRecording(callId) {
         const bridge = this.activeBridges.get(callId);
         if (!bridge?.isActive) {
-            console.error(`[AudioBridgeCoordinator] No active bridge for call ${callId}`);
+            log.warn({ callId }, 'No active bridge');
             return null;
         }
 
         const agentTrack = this._getTrackFromConnection(bridge.frontendConnection, 'agent');
         if (!agentTrack) {
-            console.warn(`[AudioBridgeCoordinator] No live agent track for call ${callId}`);
+            log.warn({ callId }, 'No live agent track');
         }
 
         return agentTrack;
@@ -151,13 +152,13 @@ export class AudioBridgeCoordinator {
     getCustomerTrackForDTMF(callId) {
         const bridge = this.activeBridges.get(callId);
         if (!bridge?.isActive) {
-            console.error(`[AudioBridgeCoordinator] No active bridge for call ${callId}`);
+            log.warn({ callId }, 'No active bridge');
             return null;
         }
 
         const customerTrack = this._getTrackFromConnection(bridge.customerConnection, 'customer');
         if (!customerTrack) {
-            console.warn(`[AudioBridgeCoordinator] No live customer track for call ${callId}`);
+            log.warn({ callId }, 'No live customer track');
         }
 
         return customerTrack;
@@ -177,7 +178,7 @@ export class AudioBridgeCoordinator {
 
     _getTrackFromConnection(connection, label) {
         if (!connection?.pc) {
-            console.error(`[AudioBridgeCoordinator] No connection for ${label}`);
+            log.error(`No connection for ${label}`);
             return null;
         }
 
@@ -185,7 +186,7 @@ export class AudioBridgeCoordinator {
         try {
             receivers = connection.pc.getReceivers();
         } catch (err) {
-            console.error(`[AudioBridgeCoordinator] getReceivers() threw for ${label}: ${err.message}`);
+            log.error({ err }, `getReceivers threw for ${label}`);
             return null;
         }
 
@@ -195,7 +196,7 @@ export class AudioBridgeCoordinator {
             }
         }
 
-        console.warn(`[AudioBridgeCoordinator] No live audio track for ${label}`);
+        log.warn(`No live audio track for ${label}`);
         return null;
     }
 }

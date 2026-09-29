@@ -43,7 +43,8 @@ docker compose -f deploy/sip-gateway/docker-compose.local.yml up -d   # SIP gate
 npm run test:e2e                  # end-to-end suites with real WebRTC media (test/e2e/README.md)
 npm run test:e2e -- routing       # one suite
 
-npm run logs / logs:follow / logs:errors
+npm run logs -- --call 42 --level warn --component channels.sip   # also --follow, --tenant, --grep, --since 15m, --json
+npm run log-level -- channels.sip=debug --for 30m                 # live, every worker; --reset to undo
 node --check <file>               # syntax-check a file (no build step)
 ```
 
@@ -80,7 +81,7 @@ Background loops (`CallCleanupService`, `QueueTimeoutService`, `RedisCleanupServ
 
 ### Entry point and lifecycle
 
-`index.js` is a thin orchestrator: logging (`AppLogService`) → `initRedis()` → `initOptionalServices()` → routes → Socket.IO + admission control → `startCoreServices()` → listen. `shutdown.js` runs a strictly ordered sequence (Socket.IO close → recording flush → worker threads → peers + DB finalization → S3 drain → background jobs → Redis → DB pool) with a 60s hard-kill fallback and a double-run guard — read its numbered comments before reordering.
+`index.js` is a thin orchestrator: logging (`infra/logging/serverLogging.js`, imported first) → `initRedis()` → `initOptionalServices()` → routes → Socket.IO + admission control → `startCoreServices()` → listen. `shutdown.js` runs a strictly ordered sequence (Socket.IO close → recording flush → worker threads → peers + DB finalization → S3 drain → background jobs → Redis → DB pool) with a 60s hard-kill fallback and a double-run guard — read its numbered comments before reordering.
 
 ### Patterns
 
@@ -89,11 +90,19 @@ Background loops (`CallCleanupService`, `QueueTimeoutService`, `RedisCleanupServ
 - **Race-safe SQL**: state transitions are guarded `UPDATE ... WHERE <expected state>` and callers act on `affectedRows` (see `finalizeFromWebhook`, `claimAgentAndAssignCall`, `markOnCall`, `withdrawOffer`). Keep that shape; many comments document real races these guards close.
 - **Time is UTC** end to end: the mysql2 pool and Knex use `timezone: 'Z'` and set each session's `time_zone` to `+00:00`, so JS-written and SQL-written (`NOW()`) timestamps agree on any host.
 
-### Validation, errors, logging
+### Validation and errors
 
 - Socket handlers check payload shape and authorization only; business rules belong in the core.
 - Call-domain socket errors go through `emitCallError()` (`core/events/CallErrorEmitter.js`) with a code from `CallErrorCodes`; HTTP errors through `http/errors.js`.
-- Logs: `console.log/warn/error` with a `[Module]` or `[Module:sub-concern]` prefix; pass the error object (not `.message`) so stacks survive.
+
+### Logging
+
+- **Never `console.*` in `src/`** (the e2e runner fails on it). Each module takes a component logger:
+  `import { logger } from '…/infra/logging/logger.js'; const log = logger('channels.sip.SipIngress');` — `<layer>.<area>.<File>`.
+- Call shape is pino's: `log.warn({ callId, err }, 'rtpengine offer failed')` — fields first, then a short message with no `[Prefix]` and no emojis. Errors go in as `err` (the object, never `.message`) so stacks survive. Ids that identify the record (`callId`, `tenantId`, `agentId`) are fields, not text.
+- Levels: `error` needs someone to look, `warn` is unexpected but handled, `info` is a lifecycle step (call created/answered/ended, agent connected, worker started), `debug` is per-step detail (SDP/ICE/tracks/relays/pub-sub), `trace` is per-packet/frame. Anything a scanner or a loop can trigger many times a second goes through `throttle()`.
+- Context: call events (`RedisPubSubService`), socket events (`connectionHandler`) and HTTP requests (`http/accessLog.js`) bind `callId` / `tenantId` / `agentId` / `requestId` with `runWithLogContext`, so records inside them carry those fields without naming them.
+- Records are JSON lines in `storage/logs/app/worker-N/YYYY-MM-DD.log` (+ `.error.log`); secrets are redacted by key name; `LOG_MASK_PII=true` masks phone numbers. Levels: `LOG_LEVEL`, `LOG_LEVELS=media=warn,channels.sip=debug` (longest prefix wins), or live with `npm run log-level`. CLI scripts that import `src/` log to stderr only and write no files.
 
 ### Config
 

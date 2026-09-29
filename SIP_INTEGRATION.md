@@ -186,7 +186,8 @@ A trunk without `--cidr` accepts INVITEs from any source — development only.
 `deploy/sip-gateway/.env`: the image applies it over `drachtio.conf.xml`'s
 `<admin secret>`. Callio's `.env` must hold the same value; after changing
 it, `docker compose up -d --force-recreate drachtio` and restart Callio. A
-mismatch logs `[SIP] … failed to authenticate to server`.
+mismatch logs `drachtio connection … failed: failed to authenticate to server`
+(component `channels.sip.SipGateway`).
 
 **Firewall:** SIP scanners probe every public port 5060 within minutes
 (INVITEs to numbers like `+3908…` from unknown IPs). Callio answers them 404

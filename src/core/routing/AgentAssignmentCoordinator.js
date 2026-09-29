@@ -17,6 +17,9 @@ import { IncomingCallPayload } from '../calls/IncomingCallPayload.js';
 import { presenceService } from '../agents/PresenceService.js';
 import { offerHistory } from './OfferHistory.js';
 import { autoOfflinePolicy } from './AutoOfflinePolicy.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.routing.AgentAssignmentCoordinator');
 
 class AgentAssignmentCoordinator {
     constructor() {
@@ -81,7 +84,7 @@ class AgentAssignmentCoordinator {
                 ...extra,
             });
         } catch (err) {
-            console.error(`[AgentAssignmentCoordinator] Failed to broadcast availability for agent ${agentId}:`, err);
+            log.error({ agentId, err }, 'Failed to broadcast availability');
         }
     }
 
@@ -98,7 +101,7 @@ class AgentAssignmentCoordinator {
         if (String(actorAgentId) !== String(targetAgentId)) {
             const actor = await AgentRepository.findById(actorAgentId);
             if (actor?.role !== AgentRole.SUPERVISOR || String(actor.tenant_id) !== String(tenantId)) {
-                console.warn(`[AgentAssignmentCoordinator] Agent ${actorAgentId} may not set availability for agent ${targetAgentId}`);
+                log.warn(`Agent ${actorAgentId} may not set availability for agent ${targetAgentId}`);
                 return null;
             }
         }
@@ -114,7 +117,7 @@ class AgentAssignmentCoordinator {
 
         if (availability === AgentAvailability.AVAILABLE) {
             await this.drainForTenant(tenantId).catch((err) =>
-                console.error(`[AgentAssignmentCoordinator] Drain after availability change failed for tenant ${tenantId}:`, err)
+                log.error({ tenantId, err }, 'Drain after availability change failed')
             );
         }
         await this.emitQueueUpdate(tenantId).catch(() => { });
@@ -140,7 +143,7 @@ class AgentAssignmentCoordinator {
             let availability = target.availability;
             if (availability === AgentAvailability.ON_CALL && String(actorAgentId) === String(targetAgentId)) {
                 if (await AgentRepository.setAgentOfflineIfNoActiveCalls(targetAgentId)) {
-                    console.log(`[AgentAssignmentCoordinator] Safety net: released stuck ON_CALL agent ${targetAgentId} to OFFLINE`);
+                    log.info(`Safety net: released stuck ON_CALL agent ${targetAgentId} to OFFLINE`);
                     availability = AgentAvailability.OFFLINE;
                 }
             }
@@ -157,7 +160,7 @@ class AgentAssignmentCoordinator {
                 if (!assigned) await this.emitQueueUpdate(tenantId);
             }
         } catch (error) {
-            console.error(`[AgentAssignmentCoordinator] Availability sync failed for tenant ${tenantId}, agent ${targetAgentId}:`, error);
+            log.error({ tenantId, err: error }, `Availability sync failed, agent ${targetAgentId}`);
         }
     }
 
@@ -244,13 +247,13 @@ class AgentAssignmentCoordinator {
             const call = await CallRepository.findById(callId);
             if (call) await this.#deliverAssignedCall(call, agent, AssignmentType.QUEUED);
             await this.emitQueueUpdate(tenantId, callRecord.queue_id);
-            console.log(`[AgentAssignment] Transferred call ${callId} assigned to agent ${agent.id}`);
+            log.info({ callId }, `Transferred call assigned to agent ${agent.id}`);
             return true;
         }
 
         await this.emitQueueUpdate(tenantId, callRecord.queue_id);
         EventBus.emit('call:waiting', { callId, tenantId, queueId: callRecord.queue_id });
-        console.log(`[AgentAssignment] Transferred call ${callId} waiting in queue (no available agent)`);
+        log.info({ callId }, 'Transferred call waiting in queue (no available agent)');
         return false;
     }
 
@@ -278,13 +281,13 @@ class AgentAssignmentCoordinator {
 
         if (kind === 'missed') {
             callLifecycleLogger.logOfferMissed(call.id, call.tenant_id, agentId, { queue_id: call.queue_id })
-                .catch((err) => console.error(`[AgentAssignment] Missed-offer log failed for call ${call.id}:`, err));
+                .catch((err) => log.error({ callId: call.id, err }, 'Missed-offer log failed'));
             await autoOfflinePolicy.recordMiss({ callId: call.id, tenantId: call.tenant_id, queueId: call.queue_id, agentId });
         } else {
             callLifecycleLogger.logRejected(call.id, call.tenant_id, agentId, { reason: 'agent_declined_offer', queue_id: call.queue_id })
-                .catch((err) => console.error(`[AgentAssignment] Decline log failed for call ${call.id}:`, err));
+                .catch((err) => log.error({ callId: call.id, err }, 'Decline log failed'));
         }
-        console.log(`[AgentAssignment] Offer of call ${call.id} to agent ${agentId} ${kind} — passing it on`);
+        log.debug({ callId: call.id, agentId }, `Offer ${kind} — passing it`);
 
         await this.routeWaitingCall({ ...call, agent_id: null });
         return true;
@@ -310,11 +313,11 @@ class AgentAssignmentCoordinator {
 
         callLifecycleLogger.logOverflowed(call.id, call.tenant_id, {
             from_queue_id: call.queue_id, to_queue_id: toQueue.id, waited_seconds: call.max_wait_seconds ?? null,
-        }).catch((err) => console.error(`[AgentAssignment] Overflow log failed for call ${call.id}:`, err));
+        }).catch((err) => log.error({ callId: call.id, err }, 'Overflow log failed'));
         EventBus.emit('call:overflowed', {
             callId: call.id, tenantId: call.tenant_id, fromQueueId: call.queue_id, toQueueId: toQueue.id,
         });
-        console.log(`[AgentAssignment] Call ${call.id} overflowed from queue ${call.queue_id} to ${toQueue.id}`);
+        log.info({ callId: call.id }, `Call overflowed from queue ${call.queue_id} to ${toQueue.id}`);
 
         await this.emitQueueUpdate(call.tenant_id, call.queue_id);
         await this.routeWaitingCall({ ...call, queue_id: toQueue.id, agent_id: null });

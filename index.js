@@ -3,10 +3,10 @@
 // Init sequences → src/server/bootstrap.js  |  Shutdown → src/server/shutdown.js
 // HTTP → src/http/  |  Agent sockets → src/realtime/  (layout: PLATFORM_ARCHITECTURE.md §7)
 
-// Logging must be the very first thing installed so no import-time
-// console.log slips through before the dated files are open.
-import { appLogService } from "./src/infra/logging/AppLogService.js";
-appLogService.install();
+// Logging first: the log files open and console.* (libraries) is bridged
+// into the logger before any other import can write a line.
+import "./src/infra/logging/serverLogging.js";
+import { logger, flushLogs } from "./src/infra/logging/logger.js";
 
 import { config } from "./config/envConfig.js";
 import { createWebSocketServer } from "./src/realtime/server.js";
@@ -16,16 +16,28 @@ import { initRedis, initOptionalServices, startCoreServices } from "./src/server
 import { shutdown } from "./src/server/shutdown.js";
 import registerRoutes from "./src/http/routes/index.js";
 import { registerChannels } from "./src/channels/index.js";
-import Fastify from "fastify";
+import { randomUUID } from "crypto";
+import Fastify, { LogController } from "fastify";
 import fastifyCors from "@fastify/cors";
+import { registerAccessLog } from "./src/http/accessLog.js";
 
-const fastify = Fastify({ bodyLimit: 10 * 1024 * 1024 });
+const log = logger('server');
+
+const fastify = Fastify({
+    bodyLimit: 10 * 1024 * 1024,
+    loggerInstance: logger('http'),
+    // http/accessLog.js writes one line per request instead of Fastify's two.
+    logController: new LogController({ disableRequestLogging: true, requestIdLogLabel: 'requestId' }),
+    requestIdHeader: 'x-request-id',
+    genReqId: () => randomUUID().slice(0, 12),
+});
+registerAccessLog(fastify);
 let server = null;
 let io = null;
 
 async function startServer() {
     try {
-        console.log("🚀 Starting server...");
+        log.info('Starting');
 
         await fastify.register(fastifyCors, { origin: config.node.corsAllowedOrigins });
 
@@ -46,7 +58,7 @@ async function startServer() {
         const MAX_CALLS_PER_WORKER = config.call.workers.maxCallsPerWorker;
         io.use((socket, next) => {
             if (peerRegistry.peerConnections.size >= MAX_CALLS_PER_WORKER) {
-                console.warn(`[AdmissionControl] Worker at capacity (${peerRegistry.peerConnections.size}/${MAX_CALLS_PER_WORKER}) — rejecting connection`);
+                log.warn(`Worker at capacity (${peerRegistry.peerConnections.size}/${MAX_CALLS_PER_WORKER}) — rejecting connection`);
                 return next(new Error('SERVER_AT_CAPACITY'));
             }
             next();
@@ -59,23 +71,24 @@ async function startServer() {
         workerStatsService.start();
 
         await fastify.listen({ port: config.node.port, host: config.node.host });
-        console.log(`🚀 Server running on ${config.node.host}:${config.node.port}`);
-        console.log(`📡 Agent gateway: ws://${config.node.host}:${config.node.port}/socket.io`);
-        console.log(`🌐 Management API: http://${config.node.host}:${config.node.port}/v1`);
+        log.info(`Server running on ${config.node.host}:${config.node.port}`);
+        log.info(`Agent gateway: ws://${config.node.host}:${config.node.port}/socket.io`);
+        log.info(`Management API: http://${config.node.host}:${config.node.port}/v1`);
     } catch (error) {
-        console.error("❌ Server startup failed:", error);
+        log.error({ err: error }, 'Server startup failed');
         process.exit(1);
     }
 }
 
 process.on("unhandledRejection", (reason) => {
-    console.error("❌ Unhandled Rejection:", reason);
+    log.error({ err: reason }, 'Unhandled rejection');
     workerStatsService.logSnapshot('unhandled_rejection');
 });
 
 process.on("uncaughtException", (err) => {
-    console.error("❌ Uncaught Exception:", err.message, err.stack);
+    log.fatal({ err }, 'Uncaught exception');
     workerStatsService.logSnapshot('uncaught_exception');
+    flushLogs();
     process.exit(1);
 });
 

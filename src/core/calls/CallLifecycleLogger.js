@@ -1,6 +1,9 @@
 // src/core/calls/CallLifecycleLogger.js
 import CallLifecycleEventRepository from '../../persistence/CallLifecycleEventRepository.js';
 import CallTransferLogRepository from '../../persistence/CallTransferLogRepository.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.calls.CallLifecycleLogger');
 
 class CallLifecycleLogger {
     static IVR_EVENT_TYPES = new Set([
@@ -121,7 +124,7 @@ class CallLifecycleLogger {
                 metadata?.to_queue_id ?? null
             );
         } catch (err) {
-            console.error('[CallLifecycleLogger] logTransferred failed:', err.message);
+            log.error({ err }, 'logTransferred failed');
         }
     }
 
@@ -160,7 +163,7 @@ class CallLifecycleLogger {
                 await CallTransferLogRepository.markAccepted(pending.id, now, acceptanceSecs);
             }
         } catch (err) {
-            console.error('[CallLifecycleLogger] logFollowUp failed:', err.message);
+            log.error({ err }, 'logFollowUp failed');
         }
     }
 
@@ -264,7 +267,7 @@ class CallLifecycleLogger {
         try {
             return await CallTransferLogRepository.hasPendingTransfer(callId, agentId);
         } catch (err) {
-            console.error('[CallLifecycleLogger] isFollowUp check failed:', err.message);
+            log.error({ err }, 'isFollowUp check failed');
             return false;
         }
     }
@@ -310,7 +313,7 @@ class CallLifecycleLogger {
 
             await CallLifecycleEventRepository.insert(callId, agentId, eventType, durationSeconds, metadata, occurredAt);
         } catch (err) {
-            console.error(`[CallLifecycleLogger] #insert(${eventType}) for call ${callId} failed:`, err.message);
+            log.error({ callId, err }, `#insert(${eventType}) failed`);
         }
     }
 }

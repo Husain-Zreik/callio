@@ -2,6 +2,9 @@
 import RecordingRepository from '../../persistence/RecordingRepository.js';
 import { streamUploader } from '../../infra/storage/StreamUploader.js';
 import { encodingWorkerBridge } from './encoding/EncodingWorkerBridge.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.recording.RecordingSession');
 
 /**
  * Manages recording state for a single call.
@@ -46,7 +49,7 @@ export class RecordingSession {
         this._frameCounts = { agent: 0, customer: 0 };
         this._firstWriteAt = { agent: null, customer: null };
 
-        console.log(`[RecordingSession] Created for call ${callId}`);
+        log.info({ callId }, 'Created');
     }
 
     // ── Public API ───────────────────────────────────────────────────────────
@@ -57,17 +60,17 @@ export class RecordingSession {
      */
     async start() {
         if (this.isRecording) {
-            console.warn(`[RecordingSession] Call ${this.callId} already recording`);
+            log.warn({ callId: this.callId }, 'Call already recording');
             return false;
         }
 
         if (!encodingWorkerBridge.opusAvailable) {
-            console.warn(`[RecordingSession] Opus unavailable — recording skipped for call ${this.callId}`);
+            log.warn({ callId: this.callId }, 'Opus unavailable — recording skipped');
             try {
                 const { id } = await RecordingRepository.create({ call_id: this.callId });
                 await RecordingRepository.markFailed(id, 'Recording skipped: Opus encoder not available');
             } catch (persistErr) {
-                console.error(`[RecordingSession] Failed to persist Opus-unavailable failure for call ${this.callId}:`, persistErr.message);
+                log.error({ callId: this.callId, err: persistErr }, 'Failed to persist Opus-unavailable failure');
             }
             return false;
         }
@@ -100,11 +103,11 @@ export class RecordingSession {
             this.isRecording = true;
             this.startedAt = new Date();
 
-            console.log(`[RecordingSession] ✅ Started recording for call ${this.callId} (DB ID: ${this.recordingId})`);
+            log.info({ callId: this.callId }, `Started recording (DB ID: ${this.recordingId})`);
             return true;
 
         } catch (error) {
-            console.error(`[RecordingSession] ❌ Failed to start recording for call ${this.callId}:`, error.message);
+            log.error({ callId: this.callId, err: error }, 'Failed to start recording');
             if (this.recordingId) {
                 await RecordingRepository.markFailed(this.recordingId, error.message);
             }
@@ -131,10 +134,7 @@ export class RecordingSession {
                 const lagMs = this.startedAt
                     ? this._firstWriteAt[trackType] - this.startedAt.getTime()
                     : '?';
-                console.log(
-                    `[RecordingSession] ✏️ First ${trackType} frame for call ${this.callId} ` +
-                    `(${lagMs}ms after session start)`
-                );
+                log.debug({ callId: this.callId }, `First ${trackType} frame (${lagMs}ms after session start)`);
             }
 
             // Copy into an owned ArrayBuffer — audioData.buffer may be the Node.js
@@ -144,7 +144,7 @@ export class RecordingSession {
             encodingWorkerBridge.sendFrame(this.callId, trackType, ab);
             this.bytesWritten += audioData.length;
         } catch (error) {
-            console.error(`[RecordingSession] writeAudioData error (${trackType}):`, error.message);
+            log.error({ err: error }, `writeAudioData error (${trackType})`);
         }
     }
 
@@ -155,7 +155,7 @@ export class RecordingSession {
      */
     resetAgentEncoder() {
         encodingWorkerBridge.resetEncoder(this.callId);
-        console.log(`[RecordingSession] Encoder reset for call ${this.callId}`);
+        log.info({ callId: this.callId }, 'Encoder reset');
     }
 
     /**
@@ -183,11 +183,11 @@ export class RecordingSession {
      */
     async stop() {
         if (!this.isRecording) {
-            console.warn(`[RecordingSession] Call ${this.callId} not recording`);
+            log.warn({ callId: this.callId }, 'Call not recording');
             return false;
         }
         if (this._stopping) {
-            console.warn(`[RecordingSession] stop() already in progress for call ${this.callId}`);
+            log.warn({ callId: this.callId }, 'stop already in progress');
             return false;
         }
 
@@ -200,7 +200,7 @@ export class RecordingSession {
         // between the DB await and the end() call at the final step.
         const uploadStream = this.uploadStream;
 
-        console.log(`[RecordingSession] Stopping recording for call ${this.callId} (${durationSeconds}s)`);
+        log.info({ callId: this.callId }, `Stopping recording (${durationSeconds}s)`);
 
         try {
             // Signal the worker to flush its mix buffer + encoder, write the OGG EOS
@@ -213,7 +213,7 @@ export class RecordingSession {
             // 1. Worker crashed while this session was active — the OGG stream is
             //    incomplete.  Abort the S3 upload instead of finalizing corrupt data.
             if (this._workerFailed) {
-                console.error(`[RecordingSession] ❌ Worker failed during call ${this.callId} — aborting upload`);
+                log.error({ callId: this.callId }, 'Worker failed during call — aborting upload');
                 await streamUploader.abortUploads(this.callId);
                 await RecordingRepository.markFailed(
                     this.recordingId,
@@ -236,16 +236,11 @@ export class RecordingSession {
             uploadStream?.end();
             this.uploadStream = null;
 
-            console.log(
-                `[RecordingSession] ✅ Stopped call ${this.callId} — ` +
-                `bytes=${this.bytesWritten}, ` +
-                `agent=${this._frameCounts.agent} frames, customer=${this._frameCounts.customer} frames, ` +
-                `duration=${durationSeconds}s`
-            );
+            log.info({ callId: this.callId }, `Stopped — bytes=${this.bytesWritten}, agent=${this._frameCounts.agent} frames, customer=${this._frameCounts.customer} frames, duration=${durationSeconds}s`);
             return true;
 
         } catch (error) {
-            console.error(`[RecordingSession] ❌ Failed to stop recording for call ${this.callId}:`, error.message);
+            log.error({ callId: this.callId, err: error }, 'Failed to stop recording');
             if (this.recordingId) {
                 await RecordingRepository.markFailed(this.recordingId, error.message);
             }
@@ -259,7 +254,7 @@ export class RecordingSession {
      * Abort recording without saving (called on startup failures or explicit abort).
      */
     async abort() {
-        console.log(`[RecordingSession] Aborting recording for call ${this.callId}`);
+        log.info({ callId: this.callId }, 'Aborting recording');
 
         try {
             // Tell the worker to free its encoder/muxer before aborting the upload,
@@ -276,11 +271,11 @@ export class RecordingSession {
             }
 
             this.isRecording = false;
-            console.log(`[RecordingSession] ✅ Aborted recording for call ${this.callId}`);
+            log.info({ callId: this.callId }, 'Aborted recording');
             return true;
 
         } catch (error) {
-            console.error(`[RecordingSession] ❌ Failed to abort recording for call ${this.callId}:`, error.message);
+            log.error({ callId: this.callId, err: error }, 'Failed to abort recording');
             return false;
         }
     }
@@ -295,7 +290,7 @@ export class RecordingSession {
             // stop() is mid-flight — cleanup() was called too early.
             // Log and proceed: nulling references is safe; stop()'s captured
             // local `uploadStream` reference keeps the stream alive.
-            console.warn(`[RecordingSession] cleanup() called while stop() in progress for call ${this.callId}`);
+            log.warn({ callId: this.callId }, 'cleanup called while stop in progress');
         }
 
         // Defensive: discard any lingering worker session (e.g. crash path where
@@ -308,7 +303,7 @@ export class RecordingSession {
         this._workerFailed = false;
         this.uploadStream = null; // null the ref; do NOT call destroy()
 
-        console.log(`[RecordingSession] Cleaned up for call ${this.callId}`);
+        log.info({ callId: this.callId }, 'Cleaned up');
     }
 
     /**
@@ -333,7 +328,7 @@ export class RecordingSession {
      * upload rather than finalizing an incomplete OGG file.
      */
     _onWorkerError(errMsg) {
-        console.error(`[RecordingSession] Worker error for call ${this.callId}:`, errMsg);
+        log.error({ callId: this.callId, errMsg }, 'Worker error');
         this._usingWorker = false;
         this._workerFailed = true;
         // Do not set isRecording = false here — stop() must still be called by the

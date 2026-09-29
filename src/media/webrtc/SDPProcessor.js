@@ -4,6 +4,9 @@
 // channel adapter as an `sdpProfile` ({ localOffer, remoteOffer, remoteAnswer },
 // see core/channels/CustomerChannels.js) — media knows no provider.
 import { ConnectionType } from "../../core/constants/CallConstants.js";
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.webrtc.SDPProcessor');
 
 function applyProfile(profile, hook, sdp, connectionType) {
     if (connectionType !== ConnectionType.CUSTOMER) return sdp;
@@ -34,7 +37,7 @@ export class SDPProcessor {
             await peerConnection.setRemoteDescription({ type: 'answer', sdp: processedSdp });
             return processedSdp;
         } catch (err) {
-            console.error(`Failed to process ${connectionType} SDP answer: ${err.message}`);
+            log.error({ err }, `Failed to process ${connectionType} SDP answer`);
             throw err;
         }
     }

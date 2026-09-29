@@ -1,5 +1,8 @@
 // src/persistence/RecordingRepository.js
 import connection from "../../config/dbConnection.js";
+import { logger } from '../infra/logging/logger.js';
+
+const log = logger('persistence.RecordingRepository');
 
 class RecordingRepository {
     async create(data) {
@@ -111,7 +114,7 @@ class RecordingRepository {
               AND COALESCE(c.ended_at, c.updated_at) < NOW() - INTERVAL 10 MINUTE
         `);
         if (result.affectedRows > 0) {
-            console.log(`[RecordingRepository] ⚠️ Marked ${result.affectedRows} stale recording(s) as failed`);
+            log.info(`Marked ${result.affectedRows} stale recording(s) as failed`);
         }
         return result.affectedRows;
     }

@@ -1,6 +1,9 @@
 import axios from 'axios';
 import pushTokenRepository from '../persistence/PushTokenRepository.js';
 import { config } from '../../config/envConfig.js';
+import { logger } from '../infra/logging/logger.js';
+
+const log = logger('push.OneSignalService');
 
 class OneSignalService {
     constructor() {
@@ -11,10 +14,9 @@ class OneSignalService {
         this.timeout = config.notifications.oneSignal.timeoutMs; // 10 seconds default
 
         if (!this.isConfigured) {
-            console.error('⚠️ OneSignal credentials not configured');
-            console.error('⚠️ Set ONESIGNAL_APP_ID and ONESIGNAL_REST_API_KEY in .env');
+            log.warn('OneSignal not configured (ONESIGNAL_APP_ID / ONESIGNAL_REST_API_KEY) — web push disabled');
         } else {
-            console.log('✅ OneSignal Service initialized');
+            log.info('OneSignal Service initialized');
         }
     }
 
@@ -38,7 +40,7 @@ class OneSignalService {
     async sendToSubscriptions(subscriptionIds, title, message, data = {}, options = {}) {
         try {
             if (!this.isConfigured) {
-                console.error('❌ OneSignal not configured');
+                log.warn('OneSignal not configured');
                 return { success: false, message: 'OneSignal not configured', recipients: 0 };
             }
 
@@ -73,14 +75,14 @@ class OneSignalService {
 
             // Prune dead subscriptions so we don't keep targeting them.
             if (invalidIds.length > 0) {
-                console.warn(`[OneSignal] ⚠️  Invalid subscription IDs:`, invalidIds);
+                log.warn({ invalidIds }, 'Invalid subscription IDs');
                 this._pruneInvalidSubscriptions(invalidIds);
             }
 
             if (!notificationId) {
                 // OneSignal may return a non-standard body when all targets are invalid or filtered.
                 // Treat this as a handled send failure instead of a transport exception.
-                console.warn('[OneSignal] ⚠️ OneSignal response missing notification id', responseBody);
+                log.warn({ responseBody }, 'OneSignal response missing notification id');
                 return {
                     success: false,
                     subscriptionIds: idsArray,
@@ -91,7 +93,7 @@ class OneSignalService {
                 };
             }
 
-            console.log(`[OneSignal] ✅ Sent to ${recipients}/${idsArray.length} subscription(s)`);
+            log.info(`Sent to ${recipients}/${idsArray.length} subscription(s)`);
 
             return {
                 success: true,
@@ -105,12 +107,12 @@ class OneSignalService {
         } catch (error) {
             // Handle specific error types
             if (error.code === 'ECONNABORTED') {
-                console.error('❌ OneSignal request timeout');
+                log.error('OneSignal request timeout');
             } else if (error.response) {
-                console.error('❌ OneSignal API Error:', error.response.status);
-                console.error('❌ Response Data:', error.response.data);
+                log.error({ status: error.response.status }, 'OneSignal API Error');
+                log.error({ data: error.response.data }, 'Response Data');
             } else {
-                console.error('❌ OneSignal Error:', error.message);
+                log.error({ err: error }, 'OneSignal Error');
             }
 
             return {
@@ -159,7 +161,7 @@ class OneSignalService {
             return await this.sendToSubscriptions(subscriptionIds, title, message, data, options);
 
         } catch (error) {
-            console.error(`❌ Error sending to users:`, error.message);
+            log.error({ err: error }, 'Error sending to users');
             return {
                 success: false,
                 userIds: Array.isArray(userIds) ? userIds : [userIds],
@@ -174,7 +176,7 @@ class OneSignalService {
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
             if (attempt > 0) {
                 await new Promise(r => setTimeout(r, 1000 * attempt));
-                console.warn(`[OneSignal] Retry attempt ${attempt}/${maxRetries}...`);
+                log.warn(`Retry attempt ${attempt}/${maxRetries}...`);
             }
             try {
                 return await axios.post(this.apiUrl, payload, {
@@ -188,7 +190,7 @@ class OneSignalService {
                 lastError = err;
                 const isRetryable = err.code === 'ECONNABORTED' || (err.response && err.response.status >= 500);
                 if (!isRetryable || attempt === maxRetries) throw err;
-                console.warn(`[OneSignal] Request failed (${err.code || err.response?.status}), retrying...`);
+                log.warn(`Request failed (${err.code || err.response?.status}), retrying...`);
             }
         }
         throw lastError;
@@ -246,11 +248,11 @@ class OneSignalService {
             .then((counts) => {
                 const deleted = counts.reduce((sum, n) => sum + n, 0);
                 if (deleted > 0) {
-                    console.log(`[OneSignal] 🧹 Pruned ${deleted} stale subscription(s)`);
+                    log.info(`Pruned ${deleted} stale subscription(s)`);
                 }
             })
             .catch((err) => {
-                console.error('[OneSignal] Stale subscription cleanup failed:', err.message);
+                log.error({ err }, 'Stale subscription cleanup failed');
             });
     }
 }

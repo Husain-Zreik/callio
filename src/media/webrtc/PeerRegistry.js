@@ -17,6 +17,9 @@ import { CallContext } from './CallContext.js';
 import { PeerConfig } from './PeerConfig.js';
 import { ConnectionType } from '../../core/constants/CallConstants.js';
 import { ivrCoordinator } from '../../core/ivr/IvrCoordinator.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.webrtc.PeerRegistry');
 
 const { RTCPeerConnection } = wrtc;
 
@@ -34,18 +37,18 @@ class PeerRegistry {
                 // Supervisor's microphone track — route to the bridge for optional mixing.
                 // In listen mode the capture is created but never consulted by any relay,
                 // so there is zero audio impact until the supervisor switches mode.
-                console.log(`📥 Supervisor mic track received for call ${callId}`);
+                log.debug({ callId }, 'Supervisor mic track received');
                 audioCoordinator.handleSupervisorTrack(callId, track);
                 return;
             }
-            console.log(`📥 Track received: callId=${callId}, type=${connectionType}, trackId=${track.id}`);
+            log.debug({ callId }, `Track received: type=${connectionType}, trackId=${track.id}`);
             audioCoordinator.handleTrackReceived(callId, connectionType, track, stream);
 
             // If a CUSTOMER audio track arrives after checkAndStartBridging already ran
             // (and returned early because customerTrack was null), retry now.
             if (connectionType === ConnectionType.CUSTOMER && track.kind === 'audio') {
                 this.checkAndStartBridging(callId).catch(err =>
-                    console.error(`[PeerRegistry] Bridge retry on trackReceived failed for call ${callId}:`, err.message)
+                    log.warn({ callId, err }, 'Bridge retry on trackReceived failed')
                 );
             }
         });
@@ -54,7 +57,7 @@ class PeerRegistry {
     // ── Connection lifecycle events ────────────────────────────────────────────
 
     _onConnectionReady({ callId, connectionType }) {
-        console.log(`Connection ready: ${connectionType} for call ${callId}`);
+        log.info({ callId }, `Connection ready: ${connectionType}`);
 
         const result = this.getConnectionData(callId, connectionType);
         if (!result.valid) return;
@@ -62,11 +65,11 @@ class PeerRegistry {
 
         if (connectionType === ConnectionType.MONITOR) {
             this._activateMonitor(callId).catch(err =>
-                console.error(`[PeerRegistry] Monitor activation failed for call ${callId}:`, err.message)
+                log.error({ callId, err }, 'Monitor activation failed')
             );
         } else {
             this.checkAndStartBridging(callId).catch(err =>
-                console.error(`[PeerRegistry] Bridge start failed for call ${callId}:`, err.message)
+                log.error({ callId, err }, 'Bridge start failed')
             );
         }
     }
@@ -93,13 +96,13 @@ class PeerRegistry {
             return;
         }
 
-        console.log(`[Monitor] Monitoring enabled for call ${callId}`);
+        log.info({ callId }, 'Monitoring enabled');
     }
 
     // ── Peer connection creation ───────────────────────────────────────────────
 
     createPeerConnection(callId, connectionType) {
-        console.log(`Creating ${connectionType} peer connection for call ${callId}`);
+        log.info({ callId }, `Creating ${connectionType} peer connection`);
         return new RTCPeerConnection(PeerConfig.getDefaultConfig());
     }
 
@@ -184,7 +187,7 @@ class PeerRegistry {
             // IVR mode: only the WhatsApp connection is needed
             const customerResult = this.getConnectionData(callId, ConnectionType.CUSTOMER, true);
             if (!customerResult.valid) {
-                console.log(`[PeerRegistry] ⏳ IVR waiting for CUSTOMER — call ${callId}`);
+                log.info({ callId }, 'IVR waiting for the CUSTOMER leg');
                 return;
             }
 
@@ -195,7 +198,7 @@ class PeerRegistry {
 
             if (!customerTrack) {
                 // Audio track not yet available — trackReceived will re-trigger bridging.
-                console.log(`[PeerRegistry] ⏳ IVR waiting for audio track (ontrack pending) — call ${callId}`);
+                log.debug({ callId }, 'IVR waiting for the audio track (ontrack pending)');
                 return;
             }
 
@@ -205,7 +208,7 @@ class PeerRegistry {
                 queueId: callRecord?.queue_id ?? null,
             };
 
-            console.log(`[PeerRegistry] 🔊 IVR mode — starting IVR session for call ${callId}, menu ${ivrFlowId}`);
+            log.info({ callId }, `IVR mode — starting IVR session, menu ${ivrFlowId}`);
             await ivrCoordinator.startSession(callId, ivrFlowId, customerPc, customerTrack, callMeta, customerPeer);
             return;
         }
@@ -215,7 +218,7 @@ class PeerRegistry {
         const customerResult = this.getConnectionData(callId, ConnectionType.CUSTOMER, true);
 
         if (!frontendResult.valid || !customerResult.valid) {
-            console.log(`[PeerRegistry] ⏳ Bridge not ready for call ${callId} — AGENT=${frontendResult.valid}, CUSTOMER=${customerResult.valid}`);
+            log.info({ callId }, `Bridge not ready — AGENT=${frontendResult.valid}, CUSTOMER=${customerResult.valid}`);
             this._scheduleIceStallWarning(callId, frontendResult.valid, customerResult.valid);
             return;
         }
@@ -232,7 +235,7 @@ class PeerRegistry {
             context.update({ tenantId: resolvedTenantId });
         }
 
-        console.log(`[PeerRegistry] 🚀 Both connections ready, starting bridge for call ${callId}`);
+        log.info({ callId }, 'Both connections ready, starting bridge');
         await audioCoordinator.checkAndStartBridging(
             callId,
             frontendResult.data,
@@ -248,13 +251,13 @@ class PeerRegistry {
 
         if (frontendReady && !customerReady && !timers.customer) {
             timers.customer = setTimeout(() => {
-                console.warn(`[PeerRegistry] ⚠️ ICE stall: call ${callId} — AGENT ready but CUSTOMER stuck in checking >8s, no media will flow`);
+                log.warn({ callId }, 'ICE stall: AGENT ready but CUSTOMER stuck in checking >8s, no media will flow');
             }, 8000);
         }
 
         if (customerReady && !frontendReady && !timers.frontend) {
             timers.frontend = setTimeout(() => {
-                console.warn(`[PeerRegistry] ⚠️ ICE stall: call ${callId} — CUSTOMER ready but AGENT stuck at new/checking >8s, no media will flow`);
+                log.warn({ callId }, 'ICE stall: CUSTOMER ready but AGENT stuck at new/checking >8s, no media will flow');
             }, 8000);
         }
 
@@ -272,11 +275,11 @@ class PeerRegistry {
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
     async closePeerConnection(callId, connectionType = null) {
-        console.log(`Closing connection for call ${callId} (type: ${connectionType || 'all'})`);
+        log.info({ callId }, `Closing connection (type: ${connectionType || 'all'})`);
 
         const callConnections = this.peerConnections.get(callId);
         if (!callConnections) {
-            console.log(`No connections found for call ${callId}`);
+            log.debug({ callId }, 'No connections found');
             return false;
         }
 
@@ -284,7 +287,7 @@ class PeerRegistry {
         const closingFrontend = connectionType === ConnectionType.AGENT;
 
         if (closingAll || connectionType === ConnectionType.CUSTOMER) {
-            console.log(`[PeerRegistry] 🛑 Stopping recording for call ${callId}`);
+            log.info({ callId }, 'Stopping recording');
             await audioCoordinator.stopRecording(callId);
         }
 
@@ -303,10 +306,10 @@ class PeerRegistry {
             try {
                 await connectionData.cleanup();
             } catch (err) {
-                console.error(`[PeerRegistry] Error during ${type} cleanup for call ${callId}:`, err.message);
+                log.error({ callId, err }, `Error during ${type} cleanup`);
             } finally {
                 delete callConnections[type];
-                console.log(`${type} connection closed`);
+                log.info(`${type} connection closed`);
             }
         }));
 
@@ -324,7 +327,7 @@ class PeerRegistry {
             this._clearIceStallTimers(callId);
 
             await redisPubSubService.unsubscribeFromCall(callId);
-            console.log(`[PeerRegistry] 🔕 Unsubscribed from events for call ${callId}`);
+            log.info({ callId }, 'Unsubscribed from events');
 
             this.peerConnections.delete(callId);
 
@@ -333,13 +336,13 @@ class PeerRegistry {
             peerEventManager.cleanup(callId);
 
             await CallConnectionRepository.terminateConnections(callId)
-                .catch(err => console.error('Failed to terminate connections in DB:', err));
+                .catch(err => log.error({ err }, 'Failed to terminate connections in DB'));
 
-            console.log(`🧹 Call ${callId} fully cleaned up`);
+            log.info({ callId }, 'Call fully cleaned up');
         } else if (connectionType === ConnectionType.MONITOR) {
-            console.log(`✅ Monitor disconnected, main call ${callId} continues`);
+            log.info({ callId }, 'Monitor disconnected, main call continues');
         } else {
-            console.log(`✅ ${connectionType} closed, call ${callId} continues`);
+            log.info({ callId }, `${connectionType} closed, call continues`);
         }
 
         return true;

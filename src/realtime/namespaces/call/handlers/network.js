@@ -5,6 +5,9 @@ import CallRepository from '../../../../persistence/CallRepository.js';
 import { callLifecycleLogger } from '../../../../core/calls/CallLifecycleLogger.js';
 import { redisPubSubService } from '../../../../infra/redis/RedisPubSubService.js';
 import { EventTypes } from '../../../../core/events/EventTypes.js';
+import { logger } from '../../../../infra/logging/logger.js';
+
+const log = logger('realtime.network');
 
 export function registerCallNetworkListeners(networkLossTimers) {
     EventBus.on('customer:media:state', async ({ callId, state }) => {
@@ -54,7 +57,7 @@ export function registerCallNetworkListeners(networkLossTimers) {
                             reason: 'customer_network_loss',
                         });
                     } catch (pubErr) {
-                        console.error(`[NetworkLoss] Failed to publish CALL_TERMINATED for call ${callId}:`, pubErr.message);
+                        log.error({ callId, err: pubErr }, 'Failed to publish CALL_TERMINATED');
                     }
                 }, 20_000);
 
@@ -74,7 +77,7 @@ export function registerCallNetworkListeners(networkLossTimers) {
                 });
             }
         } catch (err) {
-            console.error(`[EventBus] customer:media:state lifecycle log failed for call ${callId}:`, err.message);
+            log.error({ callId, err }, 'customer:media:state lifecycle log failed');
         }
     });
 }

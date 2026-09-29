@@ -6,6 +6,9 @@ import CallRepository from '../../persistence/CallRepository.js';
 import { ConnectionType } from '../../core/constants/CallConstants.js';
 import { AudioTrackState } from './AudioTrackState.js';
 import { placeholderTrackFactory } from '../bridge/PlaceholderTrackFactory.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.webrtc.Peer');
 
 export class Peer {
     constructor(pc, connectionType, callContext) {
@@ -25,7 +28,7 @@ export class Peer {
         this.localSdp = null;
         this.remoteSdp = null;
 
-        console.log(`${connectionType} connection created for call ${callContext.callId}`);
+        log.info({ callId: callContext.callId }, `${connectionType} connection created`);
     }
 
     // ── Convenience getters ────────────────────────────────────────────────────
@@ -78,7 +81,7 @@ export class Peer {
                 activeSender.replaceTrack(track);
             }
         } catch (error) {
-            console.error(`[Peer] deliverTrack failed for call ${this.context.callId}: ${error.message}`);
+            log.error({ callId: this.context.callId, err: error }, 'deliverTrack failed');
         }
     }
 
@@ -96,7 +99,7 @@ export class Peer {
                 this.pc.addTrack(track);
             }
         } catch (error) {
-            console.error(`[Peer] deliverMonitorTrack failed for call ${this.context.callId}: ${error.message}`);
+            log.error({ callId: this.context.callId, err: error }, 'deliverMonitorTrack failed');
         }
     }
 
@@ -142,7 +145,7 @@ export class Peer {
 
             if (existing) {
                 this.connectionId = existing.id;
-                console.log(`Existing connection record used: ${this.connectionId}`);
+                log.debug(`Existing connection record used: ${this.connectionId}`);
                 return;
             }
 
@@ -159,10 +162,10 @@ export class Peer {
             });
 
             this.connectionId = id;
-            console.log(`Connection record created: ${this.connectionId}`);
+            log.debug(`Connection record created: ${this.connectionId}`);
 
         } catch (error) {
-            console.error(`Connection record insert failed: ${error.message}`);
+            log.error({ err: error }, 'Connection record insert failed');
         }
     }
 
@@ -188,7 +191,7 @@ export class Peer {
 
         if (this.isMonitor) {
             await CallConnectionRepository.cleanupConnection(this.context.callId, this.connectionType)
-                .catch(err => console.error('Failed to delete connection in DB:', err));
+                .catch(err => log.error({ err }, 'Failed to delete connection in DB'));
         } else {
             // terminateConnection takes this row's own id (connectionId), not
             // the call's id — unlike cleanupConnection above, which is
@@ -198,9 +201,9 @@ export class Peer {
             // overwrite an unrelated older call's row that happened to share
             // that numeric id.
             await CallConnectionRepository.terminateConnection(this.connectionId, this.connectionType)
-                .catch(err => console.error('Failed to terminate connection in DB:', err));
+                .catch(err => log.error({ err }, 'Failed to terminate connection in DB'));
         }
 
-        console.log(`Peer cleanup done for call ${this.context.callId}`);
+        log.info({ callId: this.context.callId }, 'Peer cleanup done');
     }
 }

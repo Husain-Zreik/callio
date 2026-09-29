@@ -1,5 +1,8 @@
 // src/http/errors.js
 // One error shape for every HTTP response: { error: { code, message } }.
+import { logger } from '../infra/logging/logger.js';
+
+const log = logger('http.errors');
 
 export class HttpError extends Error {
     constructor(status, code, message) {
@@ -28,6 +31,6 @@ export function httpErrorHandler(error, request, reply) {
     if (error.statusCode && error.statusCode < 500) {
         return sendError(reply, error.statusCode, 'invalid_request', error.message);
     }
-    console.error(`[HTTP] ${request.method} ${request.url} failed:`, error);
+    log.error({ err: error }, `${request.method} ${request.url} failed`);
     return sendError(reply, 500, 'internal_error', 'Internal error');
 }

@@ -20,6 +20,9 @@ import { finishLeg } from './sipLegs.js';
 import { handleInvite } from './SipIngress.js';
 import { sipSdpProfile } from './sipSdp.js';
 import { toE164, userPart } from './sipAddress.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('channels.sip.SipChannel');
 
 // A carrier's final response to our INVITE, as the core sees it.
 const REJECTED_STATUSES = new Set([486, 600, 603]);
@@ -33,7 +36,7 @@ async function acceptLeg(leg, sdpAnswer) {
     leg.dialog = await srf.createUAS(req, res, { localSdp: carrierSdp });
     leg.answeredAt = new Date();
     leg.dialog.on('destroy', () => finishLeg(leg, { providerStatus: 'COMPLETED' })
-        .catch((err) => console.error(`[SIP] Ending call ${leg.providerCallId} after BYE failed:`, err)));
+        .catch((err) => log.error({ err }, `Ending call ${leg.providerCallId} after BYE failed`)));
 }
 
 // Ends a leg from our side, whatever state it is in.
@@ -59,7 +62,7 @@ async function runOnOwner(call, action, local) {
     const leg = sipDialogs.get(call.provider_call_id);
     if (leg) return local(leg);
     if (!call.provider_call_id || !await sipDialogs.sendToOwner(call.provider_call_id, action)) {
-        console.warn(`[SIP] No worker holds SIP call ${call.provider_call_id} — ${action} skipped`);
+        log.warn(`No worker holds SIP call ${call.provider_call_id} — ${action} skipped`);
     }
 }
 
@@ -67,7 +70,7 @@ async function runOnOwner(call, action, local) {
 async function onCommand({ action, providerCallId }) {
     const leg = sipDialogs.get(providerCallId);
     if (!leg) return;
-    console.log(`[SIP] Routed ${action} for ${providerCallId}`);
+    log.info(`Routed ${action} for ${providerCallId}`);
     await endLeg(leg);
 }
 
@@ -102,14 +105,14 @@ async function initiate(call, sdpOffer) {
             cbProvisional: (provisional) => {
                 if (!leg || ![180, 183].includes(provisional.status)) return;
                 channelIngress.statusChanged(channel, { providerCallId: leg.providerCallId, status: 'RINGING', at: new Date() })
-                    .catch((err) => console.error(`[SIP:outbound] RINGING for ${leg.providerCallId} failed:`, err));
+                    .catch((err) => log.error({ err }, `RINGING for ${leg.providerCallId} failed`));
             },
         }).then(async (dialog) => {
             leg.uacRequest = null;
             leg.dialog = dialog;
             leg.answeredAt = new Date();
             dialog.on('destroy', () => finishLeg(leg, { providerStatus: 'COMPLETED' })
-                .catch((err) => console.error(`[SIP:outbound] Ending call ${leg.providerCallId} after BYE failed:`, err)));
+                .catch((err) => log.error({ err }, `Ending call ${leg.providerCallId} after BYE failed`)));
             const sdpAnswer = await rtpengine.carrierAnswerToWebrtc({ callId: rtpKey, sdp: dialog.remote.sdp });
             await channelIngress.outboundAnswered(channel, { providerCallId: leg.providerCallId, sdpAnswer });
             await channelIngress.statusChanged(channel, { providerCallId: leg.providerCallId, status: 'ACCEPTED', at: leg.answeredAt });
@@ -118,7 +121,7 @@ async function initiate(call, sdpOffer) {
             leg.uacRequest = null;
             if (leg.cancelled || leg.finished) return;   // we ended it ourselves
             const status = Number(err.status) || null;
-            console.log(`[SIP:outbound] ${leg.providerCallId} not answered: ${status ?? err.message}`);
+            log.info({ err }, `${leg.providerCallId} not answered`);
             if (status && REJECTED_STATUSES.has(status)) {
                 await sipGateway.rtpengine?.delete(rtpKey);
                 await sipDialogs.remove(leg.providerCallId);
@@ -173,12 +176,12 @@ export const sipChannel = Object.freeze({
 
     async start() {
         if (!sipGateway.enabled) {
-            console.log('[SIP] DRACHTIO_HOST not set — SIP channel disabled on this worker');
+            log.info('DRACHTIO_HOST not set — SIP channel disabled on this worker');
             return;
         }
         await sipDialogs.start(onCommand);
         sipGateway.start((req, res) => handleInvite(req, res).catch((err) => {
-            console.error(`[SIP:inbound] INVITE ${req.get('Call-ID')} failed:`, err);
+            log.error({ err }, `INVITE ${req.get('Call-ID')} failed`);
             try { res.send(500); } catch { /* already answered */ }
         }));
     },

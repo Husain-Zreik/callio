@@ -1,5 +1,8 @@
 // src/core/routing/AgentMissedCallTracker.js
 import { redisBaseService } from '../../infra/redis/RedisBaseService.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.routing.AgentMissedCallTracker');
 
 /**
  * Per-agent counter of consecutive missed (NO_ANSWER) inbound calls.
@@ -36,7 +39,7 @@ class AgentMissedCallTracker {
             if (err) throw err;
             return Number(count) || 0;
         } catch (err) {
-            console.error(`[AgentMissedTracker] increment(${userId}) failed:`, err.message);
+            log.error({ agentId: userId, err }, 'increment failed');
             return 0;
         }
     }
@@ -47,7 +50,7 @@ class AgentMissedCallTracker {
             await redisBaseService.del(this._key(userId));
             return true;
         } catch (err) {
-            console.error(`[AgentMissedTracker] reset(${userId}) failed:`, err.message);
+            log.error({ agentId: userId, err }, 'reset failed');
             return false;
         }
     }
@@ -59,7 +62,7 @@ class AgentMissedCallTracker {
             const n = Number(v);
             return Number.isFinite(n) && n > 0 ? n : 0;
         } catch (err) {
-            console.error(`[AgentMissedTracker] getCount(${userId}) failed:`, err.message);
+            log.error({ agentId: userId, err }, 'getCount failed');
             return 0;
         }
     }

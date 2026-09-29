@@ -4,6 +4,9 @@
 //   remoteOffer   Meta's offer, sanitized before libwebrtc sees it
 //   localOffer    our outbound offer, tuned for Meta (FEC, DTMF payload type)
 //   remoteAnswer  Meta's answer to our outbound offer
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('channels.whatsapp.whatsappSdp');
 
 function audioTelLines(lines) {
     return lines.filter((l) => /telephone-event|^m=audio/i.test(l));
@@ -57,10 +60,10 @@ function processWhatsAppSDP(sdp, { optimize = false, sanitize = false } = {}) {
                 }
                 fixed.push('a=rtpmap:126 telephone-event/8000');
                 fixed.push('a=fmtp:126 0-16');
-                console.log('[WhatsApp:sdp] Injected telephone-event/8000 (PT 126) into outbound offer');
+                log.debug('Injected telephone-event/8000 (PT 126) into outbound offer');
             }
         }
-        console.log(`[WhatsApp:sdp] Outbound offer audio/tel lines:\n  ${audioTelLines(fixed).join('\n  ')}`);
+        log.debug(`Outbound offer audio/tel lines:\n ${audioTelLines(fixed).join('\n  ')}`);
     }
 
     return fixed.join('\r\n') + '\r\n';
@@ -68,9 +71,9 @@ function processWhatsAppSDP(sdp, { optimize = false, sanitize = false } = {}) {
 
 export const whatsappSdpProfile = Object.freeze({
     remoteOffer(sdp) {
-        console.log(`[WhatsApp:sdp] Offer audio/tel lines:\n  ${audioTelLines(sdp.split(/\r?\n/)).join('\n  ')}`);
+        log.debug(`Offer audio/tel lines:\n ${audioTelLines(sdp.split(/\r?\n/)).join('\n  ')}`);
         const sanitized = processWhatsAppSDP(sdp, { sanitize: true });
-        console.log(`[WhatsApp:sdp] After sanitizing:\n  ${audioTelLines(sanitized.split(/\r?\n/)).join('\n  ')}`);
+        log.debug(`After sanitizing:\n ${audioTelLines(sanitized.split(/\r?\n/)).join('\n  ')}`);
         return sanitized;
     },
     localOffer(sdp) {

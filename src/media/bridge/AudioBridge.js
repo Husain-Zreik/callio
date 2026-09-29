@@ -13,6 +13,9 @@ import { placeholderTrackFactory } from './PlaceholderTrackFactory.js';
 import { CustomerSilenceWatchdog } from './CustomerSilenceWatchdog.js';
 import { CustomerNetworkMonitor } from './CustomerNetworkMonitor.js';
 import EventBus from '../../core/EventBus.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.bridge.AudioBridge');
 
 export class AudioBridge {
     constructor(callId) {
@@ -46,7 +49,7 @@ export class AudioBridge {
         this._silenceWatchdog = null;
         this._networkMonitor = null;
 
-        console.log(`[AudioBridge] Created for call ${this.callId}`);
+        log.info({ callId: this.callId }, 'Created');
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -55,19 +58,19 @@ export class AudioBridge {
 
     setConnections(customerConn, frontendConn) {
         if (!frontendConn || frontendConn.pc.connectionState === 'closed') {
-            console.error(`[AudioBridge] Cannot set closed frontend connection for call ${this.callId}`);
+            log.error({ callId: this.callId }, 'Cannot set closed frontend connection');
             return false;
         }
 
         if (!customerConn || customerConn.pc.connectionState === 'closed') {
-            console.error(`[AudioBridge] Cannot set closed customer connection for call ${this.callId}`);
+            log.error({ callId: this.callId }, 'Cannot set closed customer connection');
             return false;
         }
 
         this.customerConnection = customerConn;
         this.frontendConnection = frontendConn;
 
-        console.log(`[AudioBridge] Connections set for call ${this.callId} — frontend: ${frontendConn.pc.connectionState}, customer: ${customerConn.pc.connectionState}`);
+        log.debug({ callId: this.callId }, `Connections set — frontend: ${frontendConn.pc.connectionState}, customer: ${customerConn.pc.connectionState}`);
 
         // Re-relay any live WhatsApp track to the (possibly new) frontend connection.
         this._relayCustomerTrackToFrontend();
@@ -80,17 +83,17 @@ export class AudioBridge {
 
     addMonitor(monitorConnection) {
         if (!monitorConnection || monitorConnection.pc.connectionState === 'closed') {
-            console.error(`[AudioBridge] Cannot add closed monitor for call ${this.callId}`);
+            log.error({ callId: this.callId }, 'Cannot add closed monitor');
             return false;
         }
 
         this.monitorConnection = monitorConnection;
-        console.log(`[AudioBridge] Monitor added to call ${this.callId}`);
+        log.info({ callId: this.callId }, 'Monitor added');
 
         // Stop placeholder tone intervals on the monitor; real tracks will replace them.
         let monitorSenders = [];
         try { monitorSenders = monitorConnection.pc.getSenders(); } catch (err) {
-            console.warn(`[AudioBridge] getSenders in addMonitor failed for call ${this.callId}: ${err.message}`);
+            log.warn({ callId: this.callId, err }, 'getSenders in addMonitor failed');
         }
         monitorSenders.forEach(sender => {
             if (sender.track?._placeholderInterval) {
@@ -106,7 +109,7 @@ export class AudioBridge {
 
     removeMonitor() {
         if (this.monitorConnection) {
-            console.log(`[AudioBridge] Monitor removed from call ${this.callId}`);
+            log.info({ callId: this.callId }, 'Monitor removed from call');
             this.monitorConnection = null;
             // Tear down any active mixing relays and supervisor capture.
             this._teardownSupervisor();
@@ -121,7 +124,7 @@ export class AudioBridge {
 
     handleIncomingTrack(track, stream, connectionType) {
         if (!this.isActive) {
-            console.log(`[AudioBridge] Bridge not active, discarding ${connectionType} track`);
+            log.debug(`Bridge not active, discarding ${connectionType} track`);
             return;
         }
 
@@ -138,7 +141,7 @@ export class AudioBridge {
             : this.customerConnection;
 
         if (!targetConnection) {
-            console.warn(`[AudioBridge] Target connection missing for ${fromType} → ${toType}`);
+            log.warn(`Target connection missing for ${fromType} → ${toType}`);
             return;
         }
 
@@ -169,7 +172,7 @@ export class AudioBridge {
                         EventBus.emit('customer:media:state', { callId, state });
                     });
                 } catch (err) {
-                    console.error(`[AudioBridge] CustomerSilenceWatchdog failed for call ${this.callId}: ${err.message}`);
+                    log.error({ callId: this.callId, err }, 'CustomerSilenceWatchdog failed');
                 }
             }
             if (!this._networkMonitor && this.customerConnection?.pc) {
@@ -182,7 +185,7 @@ export class AudioBridge {
             }
         }
 
-        console.log(`[AudioBridge] Relay ${fromType} → ${toType}, track=${track.id}`);
+        log.debug(`Relay ${fromType} → ${toType}, track=${track.id}`);
         targetConnection.deliverTrack(track, stream);
         this.stats.tracksRelayed++;
 
@@ -209,11 +212,7 @@ export class AudioBridge {
 
         // Log both peer connection states at bridge activation — if either leg is not
         // truly 'connected' here, media will not flow even though the bridge is "active".
-        console.log(
-            `[AudioBridge] Active for call ${this.callId}: ` +
-            `frontend=${fPC?.connectionState}(ice=${fPC?.iceConnectionState}), ` +
-            `customer=${wPC?.connectionState}(ice=${wPC?.iceConnectionState})`
-        );
+        log.debug({ callId: this.callId }, `Active: frontend=${fPC?.connectionState}(ice=${fPC?.iceConnectionState}), customer=${wPC?.connectionState}(ice=${wPC?.iceConnectionState})`);
 
         // Inspect WhatsApp receivers at bridge start. A 'live' track here means the
         // RTP stream from Meta is already flowing; 'ended' or absent means it never
@@ -223,15 +222,15 @@ export class AudioBridge {
         try {
             const waReceivers = (wPC?.getReceivers() ?? []).filter(r => r.track?.kind === 'audio');
             if (waReceivers.length === 0) {
-                console.warn(`[AudioBridge] ⚠️ No WA audio receivers at bridge start for call ${this.callId}`);
+                log.warn({ callId: this.callId }, 'No customer audio receivers at bridge start');
             } else {
                 const detail = waReceivers.map(r =>
                     `${r.track.id}(${r.track.readyState},muted=${r.track.muted})`
                 ).join(', ');
-                console.log(`[AudioBridge] WA audio receivers at bridge start for call ${this.callId}: ${detail}`);
+                log.debug({ callId: this.callId }, `Customer audio receivers at bridge start: ${detail}`);
             }
         } catch (err) {
-            console.warn(`[AudioBridge] getReceivers diagnostic skipped for call ${this.callId}: ${err.message}`);
+            log.warn({ callId: this.callId, err }, 'getReceivers diagnostic skipped');
         }
     }
 
@@ -241,10 +240,7 @@ export class AudioBridge {
         const durationSec = this.stats.bridgeStartTime
             ? Math.round((Date.now() - this.stats.bridgeStartTime.getTime()) / 1000)
             : '?';
-        console.log(
-            `[AudioBridge] Stopped for call ${this.callId} — ` +
-            `bridge_duration=${durationSec}s, tracks_relayed=${this.stats.tracksRelayed}`
-        );
+        log.info({ callId: this.callId }, `Stopped — bridge_duration=${durationSec}s, tracks_relayed=${this.stats.tracksRelayed}`);
 
         this.isActive = false;
         this.monitorConnection = null;
@@ -282,13 +278,13 @@ export class AudioBridge {
         try {
             this._supervisorCapture = new SupervisorCapture(track);
         } catch (err) {
-            console.error(`[AudioBridge] SupervisorCapture failed for call ${this.callId}: ${err.message}`);
+            log.error({ callId: this.callId, err }, 'SupervisorCapture failed');
             return;
         }
         // Link capture to any mixing relays that were already activated.
         if (this._frontendMixingRelay) this._frontendMixingRelay.setSupervisorCapture(this._supervisorCapture);
         if (this._customerMixingRelay) this._customerMixingRelay.setSupervisorCapture(this._supervisorCapture);
-        console.log(`[AudioBridge] Supervisor audio capture started for call ${this.callId}`);
+        log.info({ callId: this.callId }, 'Supervisor audio capture started');
     }
 
     /**
@@ -304,7 +300,7 @@ export class AudioBridge {
 
         const prev = this.supervisorMode;
         this.supervisorMode = mode;
-        console.log(`[AudioBridge] Supervisor mode: ${prev} → ${mode} for call ${this.callId}`);
+        log.info({ callId: this.callId }, `Supervisor mode: ${prev} → ${mode}`);
 
         // Agent whisper-back only makes sense during whisper; restore the
         // agent→customer wire when leaving whisper so the customer hears the agent.
@@ -340,13 +336,13 @@ export class AudioBridge {
         if (this._agentPrivate === active) return;
 
         if (active && this.supervisorMode !== 'whisper') {
-            console.log(`[AudioBridge] Ignoring agent-private (supervisorMode=${this.supervisorMode}) for call ${this.callId}`);
+            log.debug({ callId: this.callId }, `Ignoring agent-private (supervisorMode=${this.supervisorMode})`);
             return;
         }
 
         const sender = this.customerConnection?.audio.getActivePlaceholderSender();
         if (!sender) {
-            console.warn(`[AudioBridge] No customer sender for agent-private on call ${this.callId}`);
+            log.warn({ callId: this.callId }, 'No customer sender for agent-private');
             return;
         }
 
@@ -356,12 +352,12 @@ export class AudioBridge {
                 this._agentPrivateSilenceTrack = await placeholderTrackFactory.createTrack('silence');
                 if (this._agentPrivateSilenceTrack) sender.replaceTrack(this._agentPrivateSilenceTrack);
             } catch (err) {
-                console.error(`[AudioBridge] agent-private mute failed for call ${this.callId}: ${err.message}`);
+                log.error({ callId: this.callId, err }, 'agent-private mute failed');
             }
-            console.log(`[AudioBridge] Agent private to supervisor (customer muted) for call ${this.callId}`);
+            log.info({ callId: this.callId }, 'Agent private to supervisor (customer muted)');
         } else {
             this._resetAgentPrivate();
-            console.log(`[AudioBridge] Agent-private off (customer hears agent again) for call ${this.callId}`);
+            log.info({ callId: this.callId }, 'Agent-private off (customer hears agent again)');
         }
     }
 
@@ -376,7 +372,7 @@ export class AudioBridge {
         const sender = this.customerConnection?.audio.getActivePlaceholderSender();
         if (sender && this._agentTrack) {
             try { sender.replaceTrack(this._agentTrack); } catch (err) {
-                console.error(`[AudioBridge] agent-private restore failed for call ${this.callId}: ${err.message}`);
+                log.error({ callId: this.callId, err }, 'agent-private restore failed');
             }
         }
         if (this._agentPrivateSilenceTrack) {
@@ -387,13 +383,13 @@ export class AudioBridge {
 
     _activateFrontendRelay() {
         if (!this._customerTrack || !this.frontendConnection) {
-            console.warn(`[AudioBridge] Cannot activate frontend relay — no customer track yet for call ${this.callId}`);
+            log.warn({ callId: this.callId }, 'Cannot activate frontend relay — no customer track yet');
             return;
         }
         try {
             this._frontendMixingRelay = new MixingRelay(this._customerTrack, 'customer→agent');
         } catch (err) {
-            console.error(`[AudioBridge] MixingRelay (frontend) creation failed for call ${this.callId}: ${err.message}`);
+            log.error({ callId: this.callId, err }, 'MixingRelay (frontend) creation failed');
             return;
         }
         if (this._supervisorCapture) {
@@ -402,10 +398,10 @@ export class AudioBridge {
         const sender = this.frontendConnection.audio.getActivePlaceholderSender();
         if (sender) {
             try { sender.replaceTrack(this._frontendMixingRelay.outputTrack); } catch (err) {
-                console.error(`[AudioBridge] replaceTrack (frontend relay on) failed for call ${this.callId}: ${err.message}`);
+                log.error({ callId: this.callId, err }, 'replaceTrack (frontend relay on) failed');
             }
         }
-        console.log(`[AudioBridge] Frontend mixing relay activated for call ${this.callId}`);
+        log.debug({ callId: this.callId }, 'Frontend mixing relay activated');
     }
 
     _deactivateFrontendRelay() {
@@ -415,23 +411,23 @@ export class AudioBridge {
             const sender = this.frontendConnection?.audio.getActivePlaceholderSender();
             if (sender && this._customerTrack) {
                 try { sender.replaceTrack(this._customerTrack); } catch (err) {
-                    console.error(`[AudioBridge] replaceTrack (frontend relay off) failed for call ${this.callId}: ${err.message}`);
+                    log.error({ callId: this.callId, err }, 'replaceTrack (frontend relay off) failed');
                 }
             }
             relay.destroy();
         }
-        console.log(`[AudioBridge] Frontend mixing relay deactivated for call ${this.callId}`);
+        log.debug({ callId: this.callId }, 'Frontend mixing relay deactivated');
     }
 
     _activateCustomerRelay() {
         if (!this._agentTrack || !this.customerConnection) {
-            console.warn(`[AudioBridge] Cannot activate customer relay — no agent track yet for call ${this.callId}`);
+            log.warn({ callId: this.callId }, 'Cannot activate customer relay — no agent track yet');
             return;
         }
         try {
             this._customerMixingRelay = new MixingRelay(this._agentTrack, 'agent→customer');
         } catch (err) {
-            console.error(`[AudioBridge] MixingRelay (customer) creation failed for call ${this.callId}: ${err.message}`);
+            log.error({ callId: this.callId, err }, 'MixingRelay (customer) creation failed');
             return;
         }
         if (this._supervisorCapture) {
@@ -440,10 +436,10 @@ export class AudioBridge {
         const sender = this.customerConnection.audio.getActivePlaceholderSender();
         if (sender) {
             try { sender.replaceTrack(this._customerMixingRelay.outputTrack); } catch (err) {
-                console.error(`[AudioBridge] replaceTrack (customer relay on) failed for call ${this.callId}: ${err.message}`);
+                log.error({ callId: this.callId, err }, 'replaceTrack (customer relay on) failed');
             }
         }
-        console.log(`[AudioBridge] Customer mixing relay activated for call ${this.callId}`);
+        log.debug({ callId: this.callId }, 'Customer mixing relay activated');
     }
 
     _deactivateCustomerRelay() {
@@ -453,12 +449,12 @@ export class AudioBridge {
             const sender = this.customerConnection?.audio.getActivePlaceholderSender();
             if (sender && this._agentTrack) {
                 try { sender.replaceTrack(this._agentTrack); } catch (err) {
-                    console.error(`[AudioBridge] replaceTrack (customer relay off) failed for call ${this.callId}: ${err.message}`);
+                    log.error({ callId: this.callId, err }, 'replaceTrack (customer relay off) failed');
                 }
             }
             relay.destroy();
         }
-        console.log(`[AudioBridge] Customer mixing relay deactivated for call ${this.callId}`);
+        log.debug({ callId: this.callId }, 'Customer mixing relay deactivated');
     }
 
     _teardownSupervisor() {
@@ -481,7 +477,7 @@ export class AudioBridge {
         this._customerTrack = null;
 
         if (prev !== 'listen') {
-            console.log(`[AudioBridge] Supervisor teardown complete for call ${this.callId} (was ${prev})`);
+            log.info({ callId: this.callId }, `Supervisor teardown complete (was ${prev})`);
         }
     }
 
@@ -494,7 +490,7 @@ export class AudioBridge {
 
         let receivers = [];
         try { receivers = this.customerConnection.pc.getReceivers(); } catch (err) {
-            console.warn(`[AudioBridge] getReceivers in _relayCustomerTrackToFrontend failed for call ${this.callId}: ${err.message}`);
+            log.warn({ callId: this.callId, err }, 'getReceivers in _relayCustomerTrackToFrontend failed');
         }
 
         for (const receiver of receivers) {
@@ -506,14 +502,14 @@ export class AudioBridge {
                     // Whisper/barge mode: rebuild the relay targeting the new AGENT sender.
                     this._rebuildFrontendRelay(track);
                 } else {
-                    console.log(`[AudioBridge] Re-relaying customer track to new frontend for call ${this.callId}: ${track.id}`);
+                    log.debug({ callId: this.callId }, `Re-relaying customer track to new frontend: ${track.id}`);
                     this.relayTrack(track, null, ConnectionType.CUSTOMER, ConnectionType.AGENT);
                 }
                 return;
             }
         }
 
-        console.warn(`[AudioBridge] No live customer track to relay to new frontend for call ${this.callId}`);
+        log.warn({ callId: this.callId }, 'No live customer track to relay to new frontend');
     }
 
     _processBufferedTracks() {
@@ -521,7 +517,7 @@ export class AudioBridge {
         const customerBuffer = this.customerConnection?.audio?.trackBuffer ?? [];
 
         if (frontendBuffer.length > 0) {
-            console.log(`[AudioBridge] Flushing ${frontendBuffer.length} buffered frontend tracks for call ${this.callId}`);
+            log.info({ callId: this.callId }, `Flushing ${frontendBuffer.length} buffered frontend tracks`);
             frontendBuffer.forEach(({ track, stream }) => {
                 this.relayTrack(track, stream, ConnectionType.AGENT, ConnectionType.CUSTOMER);
             });
@@ -533,7 +529,7 @@ export class AudioBridge {
         }
 
         if (customerBuffer.length > 0) {
-            console.log(`[AudioBridge] Flushing ${customerBuffer.length} buffered customer tracks for call ${this.callId}`);
+            log.info({ callId: this.callId }, `Flushing ${customerBuffer.length} buffered customer tracks`);
             customerBuffer.forEach(({ track, stream }) => {
                 this.relayTrack(track, stream, ConnectionType.CUSTOMER, ConnectionType.AGENT);
             });
@@ -548,13 +544,13 @@ export class AudioBridge {
     _relayExistingTracksToMonitor() {
         if (!this.monitorConnection) return;
 
-        console.log(`[AudioBridge] Relaying existing tracks to monitor for call ${this.callId}`);
+        log.info({ callId: this.callId }, 'Relaying existing tracks to monitor');
 
         // Agent audio first (track index 0), then customer (track index 1).
         if (this.frontendConnection?.pc) {
             let fReceivers = [];
             try { fReceivers = this.frontendConnection.pc.getReceivers(); } catch (err) {
-                console.warn(`[AudioBridge] frontend getReceivers in _relayExistingTracksToMonitor failed: ${err.message}`);
+                log.warn({ err }, 'frontend getReceivers in _relayExistingTracksToMonitor failed');
             }
             fReceivers.forEach(receiver => {
                 if (receiver.track?.kind === 'audio' && receiver.track.readyState === 'live') {
@@ -566,7 +562,7 @@ export class AudioBridge {
         if (this.customerConnection?.pc) {
             let customerReceivers = [];
             try { customerReceivers = this.customerConnection.pc.getReceivers(); } catch (err) {
-                console.warn(`[AudioBridge] customer getReceivers in _relayExistingTracksToMonitor failed: ${err.message}`);
+                log.warn({ err }, 'customer getReceivers in _relayExistingTracksToMonitor failed');
             }
             customerReceivers.forEach(receiver => {
                 if (receiver.track?.kind === 'audio' && receiver.track.readyState === 'live') {
@@ -583,17 +579,17 @@ export class AudioBridge {
         try {
             alreadySending = this.monitorConnection.pc.getSenders().some(s => s.track?.id === track.id);
         } catch (err) {
-            console.warn(`[AudioBridge] getSenders in _relayTrackToMonitor failed for call ${this.callId}: ${err.message}`);
+            log.warn({ callId: this.callId, err }, 'getSenders in _relayTrackToMonitor failed');
         }
 
         if (alreadySending) {
-            console.log(`[AudioBridge] Monitor track ${track.id} already sending, skipping`);
+            log.debug(`Monitor track ${track.id} already sending, skipping`);
             return;
         }
 
         this.monitorConnection.deliverMonitorTrack(track);
         this.stats.tracksRelayed++;
-        console.log(`[AudioBridge] Monitor track relayed: ${label.toUpperCase()} (${track.id})`);
+        log.debug(`Monitor track relayed: ${label.toUpperCase()} (${track.id})`);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -608,7 +604,7 @@ export class AudioBridge {
 
         let senders;
         try { senders = this.monitorConnection.pc.getSenders(); } catch (err) {
-            console.warn(`[AudioBridge] getSenders failed in _refreshAgentTrackInMonitor for call ${this.callId}: ${err.message}`);
+            log.warn({ callId: this.callId, err }, 'getSenders failed in _refreshAgentTrackInMonitor');
             return;
         }
 
@@ -616,7 +612,7 @@ export class AudioBridge {
         // (_relayExistingTracksToMonitor relays AGENT first, then CUSTOMER).
         const agentSender = senders.find(s => s.track !== null);
         if (!agentSender) {
-            console.warn(`[AudioBridge] No active monitor sender to refresh agent track — call ${this.callId}`);
+            log.warn({ callId: this.callId }, 'No active monitor sender to refresh the agent track');
             return;
         }
 
@@ -629,9 +625,9 @@ export class AudioBridge {
                 supervisorMode: this.supervisorMode,
                 agentPrivate: this._agentPrivate,
             });
-            console.log(`[AudioBridge] ✓ Monitor agent track refreshed for call ${this.callId}: ${agentTrack.id}`);
+            log.debug({ callId: this.callId }, `✓ Monitor agent track refreshed: ${agentTrack.id}`);
         } catch (err) {
-            console.error(`[AudioBridge] Monitor agent track refresh failed for call ${this.callId}: ${err.message}`);
+            log.error({ callId: this.callId, err }, 'Monitor agent track refresh failed');
         }
     }
 
@@ -653,9 +649,9 @@ export class AudioBridge {
             this._agentPrivateSilenceTrack = silenceTrack;
             const currentSender = this.customerConnection?.audio.getActivePlaceholderSender();
             if (currentSender) currentSender.replaceTrack(silenceTrack);
-            console.log(`[AudioBridge] Agent-private mute re-applied after reconnect for call ${this.callId}`);
+            log.info({ callId: this.callId }, 'Agent-private mute re-applied after reconnect');
         } catch (err) {
-            console.error(`[AudioBridge] _reapplyAgentPrivate failed for call ${this.callId}: ${err.message}`);
+            log.error({ callId: this.callId, err }, '_reapplyAgentPrivate failed');
         }
     }
 
@@ -671,9 +667,9 @@ export class AudioBridge {
                 this.frontendConnection.deliverTrack(newRelay.outputTrack, null);
             }
             this._frontendMixingRelay = newRelay;
-            console.log(`[AudioBridge] Frontend mixing relay rebuilt after AGENT reconnect for call ${this.callId}`);
+            log.debug({ callId: this.callId }, 'Frontend mixing relay rebuilt after AGENT reconnect');
         } catch (err) {
-            console.error(`[AudioBridge] Frontend relay rebuild failed for call ${this.callId}: ${err.message}`);
+            log.error({ callId: this.callId, err }, 'Frontend relay rebuild failed');
             if (this.frontendConnection) this.frontendConnection.deliverTrack(customerTrack, null);
         } finally {
             if (oldRelay) oldRelay.destroy();
@@ -693,9 +689,9 @@ export class AudioBridge {
                 sender.replaceTrack(newRelay.outputTrack);
             }
             this._customerMixingRelay = newRelay;
-            console.log(`[AudioBridge] Customer mixing relay rebuilt after AGENT reconnect for call ${this.callId}`);
+            log.debug({ callId: this.callId }, 'Customer mixing relay rebuilt after AGENT reconnect');
         } catch (err) {
-            console.error(`[AudioBridge] Customer relay rebuild failed for call ${this.callId}: ${err.message}`);
+            log.error({ callId: this.callId, err }, 'Customer relay rebuild failed');
             if (this.customerConnection) this.customerConnection.deliverTrack(agentTrack, null);
         } finally {
             if (oldRelay) oldRelay.destroy();

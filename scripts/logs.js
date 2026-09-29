@@ -1,194 +1,163 @@
 // scripts/logs.js
 //
-// Merges the per-worker log files written by AppLogService
-// (storage/logs/app/worker-{id}/YYYY-MM-DD.log.log + .error.log) into a single,
-// timestamp-ordered stream so you don't have to open N files by hand to see
-// what happened across all workers.
+// Reads the per-worker JSON log files (storage/logs/app/worker-{id}/YYYY-MM-DD.log
+// and .error.log), merges them in time order, filters, and prints them as
+// readable lines (or raw JSON with --json).
 //
-// Usage:
-//   node scripts/logs.js                    combined log for today, all workers
-//   node scripts/logs.js 2026-08-19         combined log for a specific date
-//   node scripts/logs.js --errors           errors-only file instead of all-levels
-//   node scripts/logs.js --worker=1,3       limit to specific worker ids
-//   node scripts/logs.js --tail=200         only the last 200 merged lines
-//   node scripts/logs.js --follow           live tail, combined, across workers —
-//                                            starts empty, only shows lines written
-//                                            AFTER the command starts (no backlog dump,
-//                                            important with many workers)
-//   node scripts/logs.js --follow --tail=50 same, but also prints the last 50 merged
-//                                            lines as backdrop before going live
-//   node scripts/logs.js --follow --errors  live tail of errors only
+// Usage (npm run logs -- <options>):
+//   (no options)             today, all workers
+//   2026-09-28               another day
+//   --follow, -f             live: only records written from now on (add --tail N for a backdrop)
+//   --tail N, -n N           the last N matching records
+//   --errors, -e             the error files only (error + fatal)
+//   --level warn             this level and above (trace|debug|info|warn|error|fatal)
+//   --component channels.sip records whose component starts with this (comma-separate several)
+//   --call 42                one call (callId, or callUuid / provider call id)
+//   --tenant 103 / --agent 110 / --worker 1,2
+//   --grep "rtpengine"       case-insensitive regex over the message and fields
+//   --since 15m              only the last 15m / 2h / 1d
+//   --json                   print the matching records as JSON lines (for jq)
 //
-// npm shortcuts (see package.json): npm run logs / logs:follow / logs:errors
-
-import fs   from 'fs';
+// npm shortcuts: npm run logs / logs:follow / logs:errors
+import fs from 'fs';
 import path from 'path';
+import { formatRecord } from '../src/infra/logging/prettyFormat.js';
 
-const LOG_BASE = path.resolve(new URL('../storage/logs/app', import.meta.url).pathname
-    .replace(/^\/([A-Z]:)/, '$1'));
-
-const TS_RE = /^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\]/;
-
-const WORKER_COLORS = [36, 35, 33, 32, 34, 91, 92, 93]; // cyan, magenta, yellow, green, blue, ...
-const color = (code, text) => `\x1b[${code}m${text}\x1b[0m`;
+const LOG_BASE = path.resolve(new URL('../storage/logs/app', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'));
+const LEVEL_VALUES = { trace: 10, debug: 20, info: 30, warn: 40, error: 50, fatal: 60 };
+const LEGACY_LINE = /^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\] \[(\w+)\s*\]\s{1,2}(.*)$/;
 
 function parseArgs(argv) {
-    const opts = { errors: false, follow: false, workers: null, date: null, tail: null };
+    const o = { errors: false, follow: false, json: false, workers: null, date: null, tail: null, minLevel: 0,
+        components: null, call: null, tenant: null, agent: null, grep: null, since: null };
+    const value = (i, arg) => (arg.includes('=') ? [arg.slice(arg.indexOf('=') + 1), i] : [argv[i + 1], i + 1]);
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
-        if (arg === '--errors' || arg === '-e') opts.errors = true;
-        else if (arg === '--follow' || arg === '-f') opts.follow = true;
-        else if (arg.startsWith('--worker=')) {
-            opts.workers = new Set(arg.slice('--worker='.length).split(',').map(s => s.trim()));
-        } else if (arg.startsWith('--tail=')) {
-            opts.tail = parseInt(arg.slice('--tail='.length), 10);
-        } else if (arg === '--tail' || arg === '-n') {
-            opts.tail = parseInt(argv[++i], 10);
-        } else if (/^\d{4}-\d{2}-\d{2}$/.test(arg)) {
-            opts.date = arg;
+        const name = arg.split('=')[0];
+        let v;
+        switch (name) {
+            case '--errors': case '-e': o.errors = true; break;
+            case '--follow': case '-f': o.follow = true; break;
+            case '--json': o.json = true; break;
+            case '--worker': [v, i] = value(i, arg); o.workers = new Set(String(v).split(',').map((s) => s.trim())); break;
+            case '--tail': case '-n': [v, i] = value(i, arg); o.tail = parseInt(v, 10); break;
+            case '--level': [v, i] = value(i, arg); o.minLevel = LEVEL_VALUES[String(v).toLowerCase()] ?? 0; break;
+            case '--component': case '-c': [v, i] = value(i, arg); o.components = String(v).split(',').map((s) => s.trim()).filter(Boolean); break;
+            case '--call': [v, i] = value(i, arg); o.call = String(v); break;
+            case '--tenant': [v, i] = value(i, arg); o.tenant = String(v); break;
+            case '--agent': [v, i] = value(i, arg); o.agent = String(v); break;
+            case '--grep': case '-g': [v, i] = value(i, arg); o.grep = new RegExp(v, 'i'); break;
+            case '--since': [v, i] = value(i, arg); o.since = parseSince(v); break;
+            default:
+                if (/^\d{4}-\d{2}-\d{2}$/.test(arg)) o.date = arg;
+                else { console.error(`Unknown option: ${arg}`); process.exit(2); }
         }
     }
-    if (!opts.date) opts.date = new Date().toISOString().slice(0, 10);
-    if (!Number.isFinite(opts.tail) || opts.tail < 0) opts.tail = null;
-    return opts;
+    if (!o.date) o.date = new Date().toISOString().slice(0, 10);
+    if (!Number.isFinite(o.tail) || o.tail < 0) o.tail = null;
+    return o;
+}
+
+function parseSince(v) {
+    const m = /^(\d+)([smhd])$/.exec(String(v));
+    if (!m) { console.error(`--since takes e.g. 30s, 15m, 2h, 1d (got ${v})`); process.exit(2); }
+    return Date.now() - Number(m[1]) * { s: 1e3, m: 6e4, h: 36e5, d: 864e5 }[m[2]];
 }
 
 function discoverWorkers(filter) {
     if (!fs.existsSync(LOG_BASE)) return [];
     return fs.readdirSync(LOG_BASE)
-        .map(name => /^worker-(\d+)$/.exec(name))
+        .map((name) => /^worker-(.+)$/.exec(name))
         .filter(Boolean)
-        .map(m => ({ id: m[1], dir: path.join(LOG_BASE, `worker-${m[1]}`) }))
-        .filter(w => !filter || filter.has(w.id))
-        .sort((a, b) => Number(a.id) - Number(b.id));
+        .map((m) => ({ id: m[1], dir: path.join(LOG_BASE, `worker-${m[1]}`) }))
+        .filter((w) => !filter || filter.has(w.id))
+        .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
 }
 
-// The all-levels file is written as "{date}.log.log" (AppLogService names the
-// stream "log", then appends ".log" itself). Fall back to "{date}.log" so this
-// keeps working if that gets tidied up later.
 function resolveFile(dir, date, errors) {
     if (errors) return path.join(dir, `${date}.error.log`);
-    const doubled = path.join(dir, `${date}.log.log`);
-    if (fs.existsSync(doubled)) return doubled;
-    return path.join(dir, `${date}.log`);
+    const legacy = path.join(dir, `${date}.log.log`);   // the old text logger's name
+    const current = path.join(dir, `${date}.log`);
+    return fs.existsSync(current) || !fs.existsSync(legacy) ? current : legacy;
 }
 
-// Reads a log file and groups it into timestamped records — a line without
-// a leading timestamp (e.g. a stack trace continuation) is folded into the
-// previous record rather than treated as its own out-of-order entry.
+// A JSON record, or a line from the old text format read as one.
+function parseLine(line, workerId) {
+    if (line.startsWith('{')) {
+        try { return JSON.parse(line); } catch { /* fall through */ }
+    }
+    const m = LEGACY_LINE.exec(line);
+    if (m) return { time: `${m[1].replace(' ', 'T')}Z`, level: LEVEL_VALUES[m[2].toLowerCase()] ?? 30, worker: workerId, msg: m[3] };
+    return null;
+}
+
+// Lines that are neither JSON nor a legacy record (old stack traces) join the record before them.
 function readRecords(file, workerId) {
     if (!fs.existsSync(file)) return [];
-    const lines = fs.readFileSync(file, 'utf8').split('\n');
-    const records = [];
-    let current = null;
-    for (const line of lines) {
-        const m = TS_RE.exec(line);
-        if (m) {
-            current = { ts: m[1], workerId, text: line };
-            records.push(current);
-        } else if (current && line.length) {
-            current.text += `\n${line}`;
-        }
+    const out = [];
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+        if (!line) continue;
+        const rec = parseLine(line, workerId);
+        if (rec) out.push(rec);
+        else if (out.length) out[out.length - 1].msg += `\n${line}`;
     }
-    return records;
+    return out;
 }
 
-function sortRecords(records) {
-    return records.sort((a, b) => a.ts.localeCompare(b.ts) || Number(a.workerId) - Number(b.workerId));
+function matches(rec, o) {
+    const lvl = typeof rec.level === 'number' ? rec.level : LEVEL_VALUES[String(rec.level).toLowerCase()] ?? 30;
+    if (lvl < o.minLevel) return false;
+    if (o.since && Date.parse(rec.time) < o.since) return false;
+    if (o.components && !o.components.some((c) => rec.component === c || String(rec.component ?? '').startsWith(`${c}.`))) return false;
+    if (o.call && ![rec.callId, rec.callUuid, rec.providerCallId].some((v) => v != null && String(v) === o.call)) return false;
+    if (o.tenant && String(rec.tenantId) !== o.tenant) return false;
+    if (o.agent && String(rec.agentId) !== o.agent) return false;
+    if (o.grep && !o.grep.test(JSON.stringify(rec))) return false;
+    return true;
 }
 
-// ── Historical merge ─────────────────────────────────────────────────────────
+const colors = Boolean(process.stdout.isTTY);
+const print = (rec, o) => console.log(o.json ? JSON.stringify(rec) : formatRecord(rec, { colors }));
+const byTime = (a, b) => String(a.time).localeCompare(String(b.time));
 
-function printMerged(opts) {
-    const workers = discoverWorkers(opts.workers);
-    if (!workers.length) {
-        console.error(`No worker log directories found under ${LOG_BASE}`);
-        process.exit(1);
-    }
+function printMerged(o) {
+    const workers = discoverWorkers(o.workers);
+    if (!workers.length) { console.error(`No worker log directories under ${LOG_BASE}`); process.exit(1); }
 
     let records = [];
     for (const w of workers) {
-        const file = resolveFile(w.dir, opts.date, opts.errors);
-        // Bound per-worker before the global sort so a huge single-worker
-        // file can't force reading everything into a giant merge just to
-        // throw most of it away — only relevant once --tail is set.
-        // concat, not push(...array) — a day's file can hold 100k+ lines,
-        // which blows the call stack when spread as individual arguments.
-        const workerRecords = readRecords(file, w.id);
-        records = records.concat(opts.tail ? workerRecords.slice(-opts.tail) : workerRecords);
+        // concat, not push(...): a day's file can hold 100k+ records.
+        records = records.concat(readRecords(resolveFile(w.dir, o.date, o.errors), w.id).filter((r) => matches(r, o)));
     }
-
-    if (!records.length) {
-        console.log(`No log entries found for ${opts.date}${opts.errors ? ' (errors)' : ''}.`);
-        return;
-    }
-
-    sortRecords(records);
-    if (opts.tail) records = records.slice(-opts.tail);
-    for (const r of records) {
-        console.log(formatLine(r.workerId, r.text));
-    }
+    if (!records.length) { console.log(`No matching log records for ${o.date}${o.errors ? ' (errors)' : ''}.`); return; }
+    records.sort(byTime);
+    for (const r of o.tail ? records.slice(-o.tail) : records) print(r, o);
 }
 
-function formatLine(workerId, text) {
-    const c = WORKER_COLORS[(Number(workerId) - 1) % WORKER_COLORS.length];
-    const tag = color(c, `[worker-${workerId}]`);
-    return `${tag} ${text}`;
-}
+function followMerged(o) {
+    const workers = discoverWorkers(o.workers);
+    if (!workers.length) { console.error(`No worker log directories under ${LOG_BASE}`); process.exit(1); }
+    console.error(`Following ${o.errors ? 'error' : 'all'} logs for worker(s) ${workers.map((w) => w.id).join(', ')} (ctrl-c to stop)`);
 
-// ── Live follow ──────────────────────────────────────────────────────────────
-
-function followMerged(opts) {
-    const workers = discoverWorkers(opts.workers);
-    if (!workers.length) {
-        console.error(`No worker log directories found under ${LOG_BASE}`);
-        process.exit(1);
+    const state = new Map();   // workerId -> { file, offset, partial }
+    const day = new Date().toISOString().slice(0, 10);
+    let backlog = [];
+    for (const w of workers) {
+        const file = resolveFile(w.dir, day, o.errors);
+        state.set(w.id, { file, offset: fs.existsSync(file) ? fs.statSync(file).size : 0, partial: '' });
+        if (o.tail) backlog = backlog.concat(readRecords(file, w.id).filter((r) => matches(r, o)));
     }
+    if (o.tail) for (const r of backlog.sort(byTime).slice(-o.tail)) print(r, o);
 
-    console.log(`Following combined ${opts.errors ? 'error' : 'app'} logs for worker(s): ${workers.map(w => w.id).join(', ')} (ctrl-c to stop)\n`);
-
-    const state = new Map(); // workerId -> { file, offset, partial }
-    const bootDay = new Date().toISOString().slice(0, 10);
-
-    // Prime every worker's read offset to end-of-file *before* the interval
-    // starts, so by default nothing already in the file gets printed — only
-    // lines written from this point on. With --tail=N, print the last N
-    // merged lines as backdrop first, but the offset still lands at EOF
-    // either way so nothing is double-printed once the live loop takes over.
-    if (opts.tail) {
-        let backlog = [];
-        for (const w of workers) {
-            const file = resolveFile(w.dir, bootDay, opts.errors);
-            const size = fs.existsSync(file) ? fs.statSync(file).size : 0;
-            state.set(w.id, { file, offset: size, partial: '' });
-            backlog = backlog.concat(readRecords(file, w.id).slice(-opts.tail));
-        }
-        sortRecords(backlog);
-        for (const r of backlog.slice(-opts.tail)) {
-            console.log(formatLine(r.workerId, r.text));
-        }
-    } else {
-        for (const w of workers) {
-            const file = resolveFile(w.dir, bootDay, opts.errors);
-            const size = fs.existsSync(file) ? fs.statSync(file).size : 0;
-            state.set(w.id, { file, offset: size, partial: '' });
-        }
-    }
-
-    const tick = () => {
+    setInterval(() => {
         const today = new Date().toISOString().slice(0, 10);
         for (const w of workers) {
-            const file = resolveFile(w.dir, today, opts.errors);
+            const file = resolveFile(w.dir, today, o.errors);
             let s = state.get(w.id);
-
-            if (!s || s.file !== file) {
-                s = { file, offset: 0, partial: '' };
-                state.set(w.id, s);
-            }
+            if (s.file !== file) { s = { file, offset: 0, partial: '' }; state.set(w.id, s); }
             if (!fs.existsSync(file)) continue;
-
             const size = fs.statSync(file).size;
-            if (size < s.offset) s.offset = 0; // file truncated/rotated
+            if (size < s.offset) s.offset = 0;
             if (size === s.offset) continue;
 
             const fd = fs.openSync(file, 'r');
@@ -197,20 +166,15 @@ function followMerged(opts) {
             fs.closeSync(fd);
             s.offset = size;
 
-            const chunk = s.partial + buf.toString('utf8');
-            const lines = chunk.split('\n');
-            s.partial = lines.pop(); // last piece may be incomplete
-
+            const lines = (s.partial + buf.toString('utf8')).split('\n');
+            s.partial = lines.pop();
             for (const line of lines) {
-                if (line.length) console.log(formatLine(w.id, line));
+                const rec = line && parseLine(line, w.id);
+                if (rec && matches(rec, o)) print(rec, o);
             }
         }
-    };
-
-    setInterval(tick, 500);
+    }, 500);
 }
-
-// ── Entry ─────────────────────────────────────────────────────────────────────
 
 const opts = parseArgs(process.argv.slice(2));
 if (opts.follow) followMerged(opts);

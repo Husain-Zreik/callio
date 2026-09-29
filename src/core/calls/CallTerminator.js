@@ -24,6 +24,9 @@ import { peerRegistry } from '../../media/webrtc/PeerRegistry.js';
 import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
 import { EventTypes } from '../events/EventTypes.js';
 import { CallDirection } from '../constants/CallConstants.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.calls.CallTerminator');
 
 class CallTerminator {
     /**
@@ -63,7 +66,7 @@ class CallTerminator {
 
     // Steps 2–6 for a call whose final state is already committed.
     async settle(callOrId, {
-        reason, terminatedBy, provider = 'none', media = 'broadcast', source = null, log = {}, agentAfter = 'auto',
+        reason, terminatedBy, provider = 'none', media = 'broadcast', source = null, log: lifecycleFields = {}, agentAfter = 'auto',
     }) {
         const call = await this.#load(callOrId);
         if (!call) return;
@@ -87,7 +90,7 @@ class CallTerminator {
                     await agentAssignmentCoordinator.assignOldestUnassignedCall(call.tenant_id);
                 }
             } catch (err) {
-                console.error(`[CallTerminator] AGENT STUCK: failed to release agent ${call.agent_id} after call ${callId}:`, err);
+                log.error({ agentId: call.agent_id, callId, err }, 'AGENT STUCK: failed to release agent after call');
             }
         }
 
@@ -98,7 +101,7 @@ class CallTerminator {
             try {
                 await (action === 'reject' ? customerChannels.reject(call) : customerChannels.terminate(call));
             } catch (err) {
-                console.warn(`[CallTerminator] Provider ${action} failed for call ${callId}: ${err.message}`);
+                log.warn({ callId, err }, `Provider ${action} failed`);
             }
         }
 
@@ -109,13 +112,13 @@ class CallTerminator {
             terminated_by: terminatedBy,
             direction: call.direction,
             ...(source ? { source } : {}),
-            ...log,
-        }).catch((err) => console.error(`[CallTerminator] Lifecycle log failed for call ${callId}:`, err));
+            ...lifecycleFields,
+        }).catch((err) => log.error({ callId, err }, 'Lifecycle log failed'));
 
         agentAssignmentCoordinator.emitQueueUpdate(call.tenant_id, call.queue_id ?? null)
-            .catch((err) => console.error(`[CallTerminator] Queue update failed for call ${callId}:`, err));
+            .catch((err) => log.error({ callId, err }, 'Queue update failed'));
 
-        console.log(`[CallTerminator] Call ${callId} ended — ${reason}/${terminatedBy}${source ? ` (${source})` : ''}`);
+        log.info({ callId }, `Call ended — ${reason}/${terminatedBy}${source ? ` (${source})` : ''}`);
     }
 
     // A call's media lives on one worker. 'local' closes this worker's peers —
@@ -124,11 +127,11 @@ class CallTerminator {
     // sees the call is over and closes its peers.
     async #closeMedia(callId, media) {
         await peerRegistry.closePeerConnection(callId).catch((err) =>
-            console.error(`[CallTerminator] Closing local media failed for call ${callId}:`, err)
+            log.error({ callId, err }, 'Closing local media failed')
         );
         if (media !== 'broadcast') return;
         await redisPubSubService.publishCallEvent(callId, EventTypes.CALL_TERMINATED, { callId, reason: 'ended' })
-            .catch((err) => console.error(`[CallTerminator] Media close broadcast failed for call ${callId}:`, err));
+            .catch((err) => log.error({ callId, err }, 'Media close broadcast failed'));
     }
 
     async #load(callOrId) {

@@ -530,21 +530,8 @@ emitCallError({ callId: null, code: CallErrorCodes.MISSING_BUSINESS_CONTEXT, mes
 
 ## Logging Convention
 
-Format: `[Module:sub-concern] Description`
-
-```js
-console.log('[Webhook:incoming] Handling call wacid=...');
-console.error('[Webhook:terminate] Agent release error for call ...');
-console.warn('[Socket] Agent availability sync error:', error);
-```
-
-Rules:
-- All logs in the call domain use `console.log` / `console.warn` / `console.error` — no
-  emojis, no custom logger.
-- Error logs always pass the `error` object as the second argument (not just
-  `error.message`) so the full stack trace is preserved.
-- Socket-layer logs use prefix `[Socket]`. EventBus-relay logs use `[EventBus]`. Webhook
-  logs use `[Webhook:*]`. WebSocket infrastructure uses `[WS]`.
+Superseded: logging now goes through `src/infra/logging/logger.js` (component
+loggers, JSON records, levels per component). See "Logging" in `CLAUDE.md`.
 
 ---
 

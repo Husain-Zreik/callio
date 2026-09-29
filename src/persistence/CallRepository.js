@@ -1,5 +1,8 @@
 // src/persistence/CallRepository.js
 import connection from '../../config/dbConnection.js';
+import { logger } from '../infra/logging/logger.js';
+
+const log = logger('persistence.CallRepository');
 
 // A call is "active" for an agent while it is in any of these statuses.
 const ACTIVE_STATUSES = "('INITIATED', 'RINGING', 'IN_PROGRESS')";
@@ -409,7 +412,7 @@ class CallRepository {
         // important logic right after this without their own try/catch.
         if (field === 'answered_at') {
             await this.correctNoAnswerIfAnswered(callId).catch((err) =>
-                console.error(`[CallRepository] correctNoAnswerIfAnswered failed for call ${callId}:`, err)
+                log.error({ callId, err }, 'correctNoAnswerIfAnswered failed')
             );
         }
     }
@@ -712,7 +715,7 @@ class CallRepository {
         // Phase 1 may have just written answered_at onto a row a local path already
         // finalized as NO_ANSWER — correct that contradiction. Best-effort.
         await this.correctNoAnswerIfAnswered(callId).catch((err) =>
-            console.error(`[CallRepository] correctNoAnswerIfAnswered failed for call ${callId}:`, err)
+            log.error({ callId, err }, 'correctNoAnswerIfAnswered failed')
         );
 
         return result.affectedRows > 0;

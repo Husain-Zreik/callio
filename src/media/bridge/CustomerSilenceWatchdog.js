@@ -24,6 +24,9 @@
 //   drop   → active on the first non-zero frame (instant)
 import wrtc from '@roamhq/wrtc';
 import { leakMetrics } from '../../infra/monitoring/leakMetrics.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.bridge.CustomerSilenceWatchdog');
 
 const DROP_FRAMES = 300;   // 3s × 100fps — avoids false positives from codec transitions
 
@@ -61,7 +64,7 @@ export class CustomerSilenceWatchdog {
                 // All-zero: PLC frames from the local jitter buffer (network gone).
                 if (++this._zeroFrames === DROP_FRAMES && this._state !== 'drop') {
                     this._state = 'drop';
-                    console.log(`[CustomerSilenceWatchdog] ⚠ DROP call=${callId}`);
+                    log.warn({ callId }, 'Customer audio dropped (silence)');
                     onStateChange(callId, 'drop');
                 }
             } else {
@@ -70,13 +73,13 @@ export class CustomerSilenceWatchdog {
                 if (this._state !== 'active') {
                     const prev = this._state;
                     this._state = 'active';
-                    console.log(`[CustomerSilenceWatchdog] ✓ ACTIVE call=${callId} (was ${prev})`);
+                    log.info({ callId }, `Customer audio active again (was ${prev})`);
                     onStateChange(callId, 'active');
                 }
             }
         };
 
-        console.log(`[CustomerSilenceWatchdog] Attached call=${callId} track=${track.id}`);
+        log.debug({ callId }, `Attached track=${track.id}`);
     }
 
     get state() { return this._state; }
@@ -85,6 +88,6 @@ export class CustomerSilenceWatchdog {
         this._active = false;
         try { this._sink.stop(); } catch { /* best effort */ }
         leakMetrics.audioSinkStopped++;
-        console.log(`[CustomerSilenceWatchdog] Detached call=${this._callId}`);
+        log.info({ callId: this._callId }, 'Detached');
     }
 }

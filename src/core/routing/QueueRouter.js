@@ -8,6 +8,9 @@ import QueueRepository from '../../persistence/QueueRepository.js';
 import IvrRepository from '../../persistence/IvrRepository.js';
 import { callAgentAssignmentService } from './CallAgentAssignmentService.js';
 import { AgentAvailability, QueueStrategy } from '../constants/CallConstants.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.routing.QueueRouter');
 
 class QueueRouter {
     async getQueue(queueId) {
@@ -42,7 +45,7 @@ class QueueRouter {
         try {
             if (await CallRepository.hasUnassignedCalls(queue.id)) return null;
         } catch (err) {
-            console.error(`[QueueRouter] FIFO guard failed for queue ${queue.id} — skipping sync claim:`, err);
+            log.warn({ err }, `FIFO guard failed for queue ${queue.id} — skipping sync claim`);
             return null;
         }
         const members = await this.getMembers(queue);

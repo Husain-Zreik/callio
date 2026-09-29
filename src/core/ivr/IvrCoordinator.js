@@ -17,6 +17,9 @@ import { resolveStoragePath } from '../../infra/storage/StorageResolver.js';
 import { storageClient } from '../../infra/storage/StorageClient.js';
 import { leakMetrics } from '../../infra/monitoring/leakMetrics.js';
 import { placeholderTrackFactory } from '../../media/bridge/PlaceholderTrackFactory.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.ivr.IvrCoordinator');
 
 class IvrCoordinator {
     constructor() {
@@ -69,11 +72,11 @@ class IvrCoordinator {
      */
     async startSession(callId, ivrFlowId, customerPc, customerTrack, callMeta = {}, customerPeer = null) {
         if (this._sessions.has(callId)) {
-            console.warn(`[IvrCoordinator] Session already active for call ${callId}`);
+            log.warn({ callId }, 'Session already active');
             return;
         }
         if (this._completedCallIds.has(callId)) {
-            console.warn(`[IvrCoordinator] IVR already completed for call ${callId} — refusing to restart`);
+            log.warn({ callId }, 'IVR already completed — refusing to restart');
             return;
         }
 
@@ -92,7 +95,7 @@ class IvrCoordinator {
         this._sessions.set(callId, { _pending: true });
         let sessionEstablished = false;
 
-        console.log(`[IvrCoordinator] Starting session for call ${callId}, menu ${ivrFlowId}`);
+        log.info({ callId }, `Starting session, menu ${ivrFlowId}`);
 
         // Guard against call:terminated firing during the async setup window (menu fetch,
         // audio path resolution / S3 downloads / ffmpeg decode, DB session creation).
@@ -111,7 +114,7 @@ class IvrCoordinator {
             // 1. Fetch menu structure + audio file metadata
             const menu = await IvrRepository.findFlow(ivrFlowId, callMeta.tenantId ?? null);
             if (!menu) {
-                console.error(`[IvrCoordinator] IVR menu ${ivrFlowId} not found for call ${callId}`);
+                log.warn({ callId }, `IVR menu ${ivrFlowId} not found`);
                 return;
             }
             const menuMeta = {
@@ -127,7 +130,7 @@ class IvrCoordinator {
             // 3. Create RTCAudioSource → track
             const { nonstandard } = wrtc;
             if (!nonstandard?.RTCAudioSource) {
-                console.error('[IvrCoordinator] RTCAudioSource unavailable');
+                log.error('RTCAudioSource unavailable');
                 return;
             }
 
@@ -145,7 +148,7 @@ class IvrCoordinator {
                 if (placeholderSender) {
                     await placeholderSender.replaceTrack(ivrTrack);
                     sender = placeholderSender;
-                    console.log(`[IvrCoordinator] Replaced placeholder track with IVR track for call ${callId}`);
+                    log.debug({ callId }, 'Replaced placeholder track with IVR track');
                 }
             }
             if (!sender) {
@@ -160,7 +163,7 @@ class IvrCoordinator {
                 dtmfCaptureService.pauseCapture(callId);
                 dtmfStarted = true;
             } else {
-                console.error(`[IvrCoordinator] No customer track for call ${callId} — DTMF detection disabled`);
+                log.warn({ callId }, 'No customer track — DTMF detection disabled');
             }
 
             // 5. Persist session
@@ -248,7 +251,7 @@ class IvrCoordinator {
                 if (cid !== callId) return;
                 EventBus.off('call:ivr_complete', completeHandler);
                 this._onComplete(callId, action, callMeta, transferData ?? {}).catch((err) =>
-                    console.error(`[IvrCoordinator] Completion error for call ${callId}:`, err.message)
+                    log.error({ callId, err }, 'Completion error')
                 );
             };
 
@@ -257,13 +260,13 @@ class IvrCoordinator {
                 if (cid !== callId) return;
                 EventBus.off('call:terminated', terminationHandler);
                 EventBus.off('call:ivr_complete', completeHandler);
-                console.log(`[IvrCoordinator] Call ${callId} terminated externally — stopping IVR session`);
+                log.info({ callId }, 'Call terminated externally — stopping IVR session');
                 // Capture tenantId before stopSession removes the session entry.
                 const tenantId = this._sessions.get(callId)?.tenantId ?? null;
                 try {
                     await this.stopSession(callId, 'hung_up');
                 } catch (err) {
-                    console.error(`[IvrCoordinator] stopSession error for call ${callId}:`, err.message);
+                    log.error({ callId, err }, 'stopSession error');
                 }
                 // Trigger peer connection cleanup. The call:ivr_terminated handler in
                 // serverListeners calls peerRegistry.closePeerConnection(callId), which
@@ -277,7 +280,7 @@ class IvrCoordinator {
             // Final guard: if the call terminated during the async menu fetch / audio
             // decode / DB session creation, abort now and release allocated resources.
             if (terminated) {
-                console.log(`[IvrCoordinator] Call ${callId} terminated during IVR setup — aborting`);
+                log.info({ callId }, 'Call terminated during IVR setup — aborting');
                 engine.stop();
                 if (sessionId) {
                     IvrRepository.closeSession(sessionId, 'hung_up', new Date(), 0).catch(() => { });
@@ -309,10 +312,10 @@ class IvrCoordinator {
             EventBus.on('call:terminated', terminationHandler);
 
             engine.start();
-            console.log(`[IvrCoordinator] Session started for call ${callId}`);
+            log.info({ callId }, 'Session started');
 
         } catch (err) {
-            console.error(`[IvrCoordinator] Failed to start session for call ${callId}:`, err.message);
+            log.error({ callId, err }, 'Failed to start session');
         } finally {
             EventBus.off('call:terminated', earlyGuard);
             // Setup aborted or failed before the real session replaced the reservation
@@ -379,9 +382,9 @@ class IvrCoordinator {
                 // Stash a stable reference so that replaceTrack (Peer.deliverTrack) or
                 // final teardown (clearPlaceholderSenders) releases its RTCAudioSource.
                 sender._placeholderTrack = session.senderTrack ?? null;
-                console.log(`[IvrCoordinator] IVR sender returned to placeholder pool for call ${callId}`);
+                log.info({ callId }, 'IVR sender returned to placeholder pool');
             } catch (err) {
-                console.warn(`[IvrCoordinator] addPlaceholderSender failed for call ${callId}:`, err.message);
+                log.warn({ callId, err }, 'addPlaceholderSender failed');
             }
         } else {
             try {
@@ -389,7 +392,7 @@ class IvrCoordinator {
                     customerPc.removeTrack(sender);
                 }
             } catch (err) {
-                console.warn(`[IvrCoordinator] removeTrack failed for call ${callId}:`, err.message);
+                log.warn({ callId, err }, 'removeTrack failed');
             }
             // Not reused — release the IVR RTCAudioSource native buffer now.
             placeholderTrackFactory.releaseGeneratedTrack(session.senderTrack);
@@ -443,9 +446,7 @@ class IvrCoordinator {
         });
 
         this._sessions.delete(callId);
-        console.log(
-            `[IvrCoordinator] Session stopped for call ${callId} (outcome: ${outcome}, duration=${durationSeconds ?? 'n/a'}s)`
-        );
+        log.info({ callId }, `Session stopped (outcome: ${outcome}, duration=${durationSeconds ?? 'n/a'}s)`);
     }
 
     // ── Internals ─────────────────────────────────────────────────────────────
@@ -456,7 +457,7 @@ class IvrCoordinator {
 
         EventBus.on('call:ivr_complete', session.completeHandler);
         session.engine.restart();
-        console.log(`[IvrCoordinator] Replaying IVR for call ${callId}`);
+        log.info({ callId }, 'Replaying IVR');
     }
 
     /**
@@ -479,7 +480,7 @@ class IvrCoordinator {
 
             const audioFile = audioFilesById[audioFileId];
             if (!audioFile?.storage_key) {
-                console.warn(`[IvrCoordinator] No storage record for audioFileId=${audioFileId} on node ${node.id}`);
+                log.warn(`No storage record for audioFileId=${audioFileId} on node ${node.id}`);
                 continue;
             }
 
@@ -494,10 +495,10 @@ class IvrCoordinator {
                 // Decode to PCM once at IVR session start — IvrEngine calls player.play(pcm)
                 // which hits the Int16Array fast-path and skips all per-play ffmpeg spawns.
                 const pcm = await IvrAudioPlayer.decode(rawInput);
-                console.log(`[IvrCoordinator] Pre-decoded audio for node ${node.id}: ${pcm.length} samples`);
+                log.info(`Pre-decoded audio for node ${node.id}: ${pcm.length} samples`);
                 map.set(node.id, pcm);
             } catch (err) {
-                console.warn(`[IvrCoordinator] Could not resolve/decode audio for node ${node.id}:`, err.message);
+                log.warn({ err }, `Could not resolve/decode audio for node ${node.id}`);
             }
         }
 
@@ -505,7 +506,7 @@ class IvrCoordinator {
     }
 
     async _onComplete(callId, action, callMeta, transferData = {}) {
-        console.log(`[IvrCoordinator] Call ${callId} IVR complete — action=${action}`);
+        log.info({ callId }, `Call IVR complete — action=${action}`);
         const endedAt = new Date();
         const startedAtMs = this._sessions.get(callId)?.startedAtMs;
         const durationSeconds = Number.isFinite(Number(startedAtMs))

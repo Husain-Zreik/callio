@@ -1,6 +1,9 @@
 // src/infra/redis/RedisClient.js
 import Redis from "ioredis";
 import { config } from "../../../config/envConfig.js";
+import { logger } from '../logging/logger.js';
+
+const log = logger('infra.redis.RedisClient');
 
 /**
  * Singleton Redis client manager.
@@ -42,7 +45,7 @@ class RedisClient {
 
         // Track created client
         this.createdClients.push({ name, client });
-        console.log(`[Redis] Created client "${name}" (Total tracked: ${this.createdClients.length})`);
+        log.debug(`Created client "${name}" (Total tracked: ${this.createdClients.length})`);
 
         return client;
     }
@@ -51,30 +54,30 @@ class RedisClient {
     setupClientEvents(client, clientName) {
         client.on("connect", () => {
             if (this._closing) return;
-            console.log(`[Redis] ${clientName} connected`);
+            log.debug(`${clientName} connected`);
             if (clientName === 'Main') this.isConnected = true;
         });
 
         client.on("ready", () => {
             if (this._closing) return;
-            console.log(`[Redis] ${clientName} ready`);
+            log.debug(`${clientName} ready`);
         });
 
         client.on("error", (err) => {
             if (this._closing) return;
-            console.error(`[Redis] ${clientName} error:`, err.message);
+            log.error({ err }, `${clientName} error`);
             if (clientName === 'Main') this.isConnected = false;
         });
 
         client.on("close", () => {
             if (clientName === 'Main') this.isConnected = false;
             if (this._closing) return;
-            console.log(`[Redis] ${clientName} closed`);
+            log.info(`${clientName} closed`);
         });
 
         client.on("reconnecting", () => {
             if (this._closing) return;
-            console.log(`[Redis] ${clientName} reconnecting...`);
+            log.info(`${clientName} reconnecting...`);
         });
     }
 
@@ -106,9 +109,9 @@ class RedisClient {
                 if (this.mainClient.status !== 'end' && this.mainClient.status !== 'close') {
                     await this.mainClient.quit();
                 }
-                console.log('[Redis] Main client closed gracefully');
+                log.info('Main client closed gracefully');
             } catch (error) {
-                console.error('[Redis] Error during quit, forcing disconnect:', error.message);
+                log.error({ err: error }, 'Error during quit, forcing disconnect');
                 try { this.mainClient.disconnect(); } catch { }
             } finally {
                 this.mainClient = null;
@@ -120,7 +123,7 @@ class RedisClient {
     // Close all tracked clients (call during graceful shutdown)
     async closeAll() {
         this._closing = true;
-        console.log(`[Redis] Closing all clients (${this.createdClients.length} tracked)...`);
+        log.info(`Closing all clients (${this.createdClients.length} tracked)...`);
 
         for (const { name, client } of this.createdClients) {
             try {
@@ -131,9 +134,9 @@ class RedisClient {
                 } else {
                     await client.quit();
                 }
-                console.log(`[Redis] Closed client "${name}"`);
+                log.info(`Closed client "${name}"`);
             } catch (error) {
-                console.error(`[Redis] Error closing client "${name}":`, error.message);
+                log.error({ err: error }, `Error closing client "${name}"`);
                 try { client.disconnect(); } catch { }
             }
         }
@@ -143,7 +146,7 @@ class RedisClient {
         // Close main client
         await this.close();
 
-        console.log('[Redis] All clients closed');
+        log.info('All clients closed');
     }
 }
 

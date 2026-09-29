@@ -9,6 +9,9 @@
 // call-id; each side by a tag. rtpengine never parses SIP, so the tags are
 // just labels for the two sides — not the SIP From/To tags.
 import dgram from 'dgram';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('channels.sip.RtpEngineClient');
 
 function bencode(value) {
     if (typeof value === 'number' && Number.isInteger(value)) return `i${value}e`;
@@ -105,7 +108,7 @@ export class RtpEngineClient {
                 pending.reject(err);
             }
         });
-        this.socket.on('error', (err) => console.error('[RtpEngine] Socket error:', err));
+        this.socket.on('error', (err) => log.error({ err }, 'Socket error'));
         this.socket.unref();
         return this.socket;
     }
@@ -160,7 +163,7 @@ export class RtpEngineClient {
     // Always on hang-up, or rtpengine keeps the ports allocated.
     async delete(callId) {
         return this.send({ command: 'delete', 'call-id': callId }).catch((err) => {
-            console.warn(`[RtpEngine] delete failed for ${callId}: ${err.message}`);
+            log.warn({ callId, err }, 'delete failed');
             return null;
         });
     }

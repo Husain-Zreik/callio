@@ -21,6 +21,9 @@ import { IncomingCallPayload } from '../../calls/IncomingCallPayload.js';
 import { toCallView } from '../../calls/CallView.js';
 import { callTerminator } from '../../calls/CallTerminator.js';
 import { AssignmentType, AgentAvailability } from '../../constants/CallConstants.js';
+import { logger } from '../../../infra/logging/logger.js';
+
+const log = logger('core.events.AgentEventHandler');
 
 // Max wait for the agent's inbound audio track to arrive on the AGENT peer
 // before we tell Meta "accepted". Empirically the ontrack dispatch lands within
@@ -34,12 +37,12 @@ export class AgentEventHandler {
     async handleAgentJoined(data) {
         const { callId, userId, tenantId, sdpAnswer, socketId, deviceId } = data;
 
-        console.log(`[AgentEventHandler] Agent ${userId} joined call ${callId}`, { socketId });
+        log.info({ agentId: userId, callId, socketId }, 'Agent joined call');
 
         // Guard: only the worker owning the in-memory peer connection should handle this.
         const ownsConnection = peerRegistry.getConnectionData(callId, ConnectionType.AGENT).valid;
         if (!ownsConnection) {
-            console.log(`[AgentEventHandler] Worker does not own peer connection for call ${callId} — skipping`);
+            log.debug({ callId }, 'Worker does not own peer connection — skipping');
             return;
         }
 
@@ -66,10 +69,7 @@ export class AgentEventHandler {
             // for IN_PROGRESS, so WhatsApp is not re-accepted and the status is not re-set.
             const preGateStatus = await CallRepository.getStatus(callId);
             if (preGateStatus !== CallStatus.RINGING && preGateStatus !== CallStatus.IN_PROGRESS) {
-                console.log(
-                    `[AgentEventHandler] Call ${callId} no longer RINGING (now=${preGateStatus}) — ` +
-                    `skipping accept flow`
-                );
+                log.debug({ callId }, `Call no longer RINGING (now=${preGateStatus}) — skipping accept flow`);
                 return;
             }
 
@@ -107,7 +107,7 @@ export class AgentEventHandler {
             // after accept can never read a call still carrying a stale/absent
             // device_id.
             await CallConnectionRepository.updateDeviceId(callId, ConnectionType.AGENT, deviceId ?? null)
-                .catch((err) => console.error(`[AgentEventHandler] Failed to persist deviceId for call ${callId}:`, err.message));
+                .catch((err) => log.error({ callId, err }, 'Failed to persist deviceId'));
             await sdpCoordinator.processSDPAnswer(callId, sdpAnswer, ConnectionType.AGENT);
             iceCoordinator.markClientReady(callId);
 
@@ -158,10 +158,10 @@ export class AgentEventHandler {
                             throw new Error(`Call already ${postAcceptStatus.toLowerCase()}, cannot accept`);
                         }
                     } else {
-                        console.log(`[AgentEventHandler] Customer peer already connected for call ${callId} — skipping re-accept`);
+                        log.debug({ callId }, 'Customer peer already connected — skipping re-accept');
                     }
                 } else {
-                    console.log(`[AgentEventHandler] IVR-transferred call ${callId} — customer already answered, skipping re-accept`);
+                    log.debug({ callId }, 'IVR-transferred call — customer already answered, skipping re-accept');
                 }
 
                 const assigned = await CallRepository.assignCallToAgentIfEligible(callId, userId);
@@ -183,7 +183,7 @@ export class AgentEventHandler {
 
             // Who is on the AGENT leg now.
             CallConnectionRepository.updateAgentId(callId, ConnectionType.AGENT, userId)
-                .catch((err) => console.error(`[AgentEventHandler] Failed to persist agent for call ${callId}:`, err));
+                .catch((err) => log.error({ callId, err }, 'Failed to persist agent'));
 
             const agentName = await AgentRepository.getNameById(userId);
 
@@ -198,7 +198,7 @@ export class AgentEventHandler {
             // auto-offline policy doesn't carry a stale count into their next
             // shift. No-op when the policy is disabled or the key doesn't exist.
             agentMissedCallTracker.reset(userId).catch((err) =>
-                console.error(`[AutoOffline] reset streak for agent ${userId} failed:`, err.message)
+                log.error({ agentId: userId, err }, 'reset streak failed')
             );
 
             EventBus.emit('call:success', { callId, message: 'Call accepted successfully', code: 'CALL_ACCEPTED' });
@@ -219,13 +219,13 @@ export class AgentEventHandler {
                 tenantId,
                 excludeDeviceId: deviceId ?? null,
             }).catch((err) =>
-                console.error(`[AgentEventHandler] notifyCallResolved failed for call ${callId}:`, err)
+                log.error({ callId, err }, 'notifyCallResolved failed')
             );
 
-            console.log(`[AgentEventHandler] ✅ Agent ${userId} successfully joined call ${callId}`);
+            log.info({ agentId: userId, callId }, 'Agent successfully joined call');
         } catch (error) {
             const isKnownRace = error.message.includes('already terminated') || error.message.includes('already failed');
-            console[isKnownRace ? 'warn' : 'error'](`[AgentEventHandler] Failed to handle agent join for call ${callId}:`, error.message);
+            log[isKnownRace ? 'warn' : 'error']({ callId, err: error }, 'Failed to handle agent join');
 
             // Agent is already on another call — notify the socket directly so the UI
             // doesn't stay stuck on the ringing screen waiting for an accept that cannot happen.
@@ -271,7 +271,7 @@ export class AgentEventHandler {
                         await agentAssignmentCoordinator.releaseAgentIfIdle(userId);
                         await agentAssignmentCoordinator.assignOldestUnassignedCall(call.tenant_id);
                     }
-                    console.log(`[AgentEventHandler] Released agent ${userId} after failed accept for terminated call ${callId}`);
+                    log.info({ agentId: userId, callId }, 'Released agent after failed accept for terminated call');
 
                     // Notify the agent's UI so it doesn't stay stuck on the ringing screen.
                     // Returns instead of falling through to the raw re-throw below —
@@ -286,7 +286,7 @@ export class AgentEventHandler {
                     return;
                 }
             } catch (releaseErr) {
-                console.error(`[AgentEventHandler] Failed to release agent ${userId} after error:`, releaseErr.message);
+                log.error({ agentId: userId, err: releaseErr }, 'Failed to release agent after error');
             }
 
             throw error;
@@ -305,7 +305,7 @@ export class AgentEventHandler {
      */
     async handleRingingAgentReconnect({ callId, socketId, userId, tenantId }) {
         if (!peerRegistry.getConnectionData(callId, ConnectionType.CUSTOMER).valid) {
-            console.log(`[AgentEventHandler] RINGING_AGENT_RECONNECT: no CUSTOMER peer for call ${callId} on this worker — skipping`);
+            log.debug({ callId }, 'RINGING_AGENT_RECONNECT: no CUSTOMER peer on this worker — skipping');
             return;
         }
 
@@ -340,9 +340,9 @@ export class AgentEventHandler {
                 transport: 'websocket',
             });
 
-            console.log(`[AgentEventHandler] RINGING_AGENT_RECONNECT: refreshed AGENT for call ${callId}, delivering to socket ${socketId}`);
+            log.info({ callId }, `RINGING_AGENT_RECONNECT: refreshed AGENT, delivering to socket ${socketId}`);
         } catch (err) {
-            console.error(`[AgentEventHandler] RINGING_AGENT_RECONNECT failed for call ${callId}:`, err.message);
+            log.error({ callId, err }, 'RINGING_AGENT_RECONNECT failed');
         }
     }
 
@@ -350,7 +350,7 @@ export class AgentEventHandler {
         const { callId, userId, tenantId, sdpOffer, socketId, deviceId, reconnectTrigger } = data;
 
         const isIceTrigger = reconnectTrigger === 'ice_failure';
-        console.log(`[AgentEventHandler] Agent ${userId} reconnecting to call ${callId}${isIceTrigger ? ' [triggered by ICE failure]' : ''}`);
+        log.info({ agentId: userId, callId }, `Agent reconnecting${isIceTrigger ? ' [triggered by ICE failure]' : ''}`);
 
         try {
             const call = await CallRepository.getUserActiveCall(tenantId, callId, userId);
@@ -363,7 +363,7 @@ export class AgentEventHandler {
                 callLifecycleLogger.logDisconnected(callId, tenantId, userId, {
                     reason: 'ice_failure',
                     auto_reconnect: true,
-                }).catch(err => console.error(`[AgentEventHandler] logDisconnected(ice_failure) failed for call ${callId}:`, err.message));
+                }).catch(err => log.error({ callId, err }, 'logDisconnected(ice_failure) failed'));
             }
 
             // Captured BEFORE teardown — setConnectionInfo further down overwrites
@@ -411,13 +411,13 @@ export class AgentEventHandler {
             // customer and for anyone else watching, e.g. a manager dashboard;
             // only this one connection's binding changed).
             if (previousSocketStillLive) {
-                console.log(`[AgentEventHandler] Call ${callId} taken over from still-live socket ${previousConnectionInfo.socketId} — notifying it`);
+                log.info({ callId }, `Call taken over from still-live socket ${previousConnectionInfo.socketId} — notifying it`);
                 roomManager.emitToSocket(previousConnectionInfo.socketId, 'call:connection_superseded', {
                     callId,
                     reason: 'switched_device',
                 });
             } else {
-                console.log(`[AgentEventHandler] Call ${callId} reconnect — no supersede notification needed (previousSocketId=${previousConnectionInfo?.socketId ?? 'none'}, sameSocket=${!isDifferentSocket})`);
+                log.info({ callId }, `Call reconnect — no supersede notification needed (previousSocketId=${previousConnectionInfo?.socketId ?? 'none'}, sameSocket=${!isDifferentSocket})`);
             }
 
             const sdpAnswer = await sdpCoordinator.createSDPAnswer(callId, sdpOffer, ConnectionType.AGENT);
@@ -429,12 +429,12 @@ export class AgentEventHandler {
             // device_id was persisted at the *original* accept, never updating it,
             // making all subsequent resyncs/handoffs reason about a stale device.
             CallConnectionRepository.updateDeviceId(callId, ConnectionType.AGENT, deviceId ?? null)
-                .catch((err) => console.error(`[AgentEventHandler] Failed to persist deviceId for call ${callId}:`, err.message));
+                .catch((err) => log.error({ callId, err }, 'Failed to persist deviceId'));
             iceCoordinator.markClientReady(callId);
             await peerRegistry.checkAndStartBridging(callId);
 
             CallConnectionRepository.updateAgentId(callId, ConnectionType.AGENT, userId)
-                .catch((err) => console.error(`[AgentEventHandler] Failed to persist agent for call ${callId}:`, err));
+                .catch((err) => log.error({ callId, err }, 'Failed to persist agent'));
             const agentName = await AgentRepository.getNameById(userId);
 
             await callLifecycleLogger.logReconnected(callId, tenantId, userId, {
@@ -444,11 +444,11 @@ export class AgentEventHandler {
             // The answer is for the one socket that sent call:reconnect.
             EventBus.emit('call:reconnected', { callId, userId, tenantId, sdpAnswer, socketId, deviceId: deviceId ?? null });
 
-            console.log(`[AgentEventHandler] ✅ Agent ${userId} reconnected to call ${callId}${isIceTrigger ? ' (ICE failure recovered)' : ''}`);
+            log.info({ agentId: userId, callId }, `Agent reconnected${isIceTrigger ? ' (ICE failure recovered)' : ''}`);
 
             return { ...toCallView(call, { agentName, deviceId: deviceId ?? null }), sdpAnswer };
         } catch (error) {
-            console.error(`[AgentEventHandler] Failed to handle agent reconnect for call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Failed to handle agent reconnect');
             throw error;
         }
     }
@@ -473,13 +473,13 @@ export class AgentEventHandler {
                 track = existing.data.pc.getReceivers()
                     .find(r => r.track?.kind === 'audio' && r.track.readyState === 'live')?.track;
             } catch (err) {
-                console.warn(`[AgentEventHandler] getReceivers failed for call ${callId}: ${err.message} — checking trackBuffer`);
+                log.warn({ callId, err }, 'getReceivers failed — checking trackBuffer');
                 const buffered = existing.data.audio?.trackBuffer;
                 if (buffered?.length > 0) {
                     track = buffered.find(t => t.track?.kind === 'audio' && t.track.readyState === 'live')?.track ?? null;
                 }
                 if (!track) {
-                    console.warn(`[AgentEventHandler] No buffered track for call ${callId} — waiting for trackReceived event`);
+                    log.warn({ callId }, 'No buffered track — waiting for trackReceived event');
                 }
             }
             if (track) {
@@ -526,7 +526,7 @@ export class AgentEventHandler {
         // `reason` is a technical string kept for server logs / debugging.
         // Agents never see it — user-facing copy lives in the DB title and the
         // emitCallError message below.
-        console.error(`[AgentEventHandler] Aborting accept for call ${callId} — ${reason}`);
+        log.error({ callId }, `Aborting accept — ${reason}`);
 
         try {
             const call = await CallRepository.findById(callId);
@@ -541,7 +541,7 @@ export class AgentEventHandler {
                 });
             }
         } catch (err) {
-            console.error(`[AgentEventHandler] Ending call ${callId} after media-not-ready abort failed:`, err);
+            log.error({ callId, err }, 'Ending call after media-not-ready abort failed');
         }
 
         emitCallError({

@@ -12,6 +12,9 @@ import AgentRepository from "../../persistence/AgentRepository.js";
 import ConsumerRepository from "../../persistence/ConsumerRepository.js";
 import TenantRepository from "../../persistence/TenantRepository.js";
 import { AgentRole } from "../../core/constants/CallConstants.js";
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('realtime.authMiddleware');
 
 export const AGENT_PROTOCOL_VERSION = 1;
 
@@ -101,7 +104,7 @@ export async function authMiddleware(socket, next) {
 
         next();
     } catch (err) {
-        if (!(err instanceof AgentAuthError)) console.error("[Auth] Socket authentication error:", err);
+        if (!(err instanceof AgentAuthError)) log.error({ err }, 'Socket authentication error');
         next(new Error(`Authentication failed: ${err instanceof AgentAuthError ? err.message : "internal error"}`));
     }
 }

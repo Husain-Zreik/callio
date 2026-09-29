@@ -14,6 +14,9 @@ import ConsumerRepository from '../persistence/ConsumerRepository.js';
 import { redisBaseService } from '../infra/redis/RedisBaseService.js';
 import { signPayload } from './signing.js';
 import { config } from '../../config/envConfig.js';
+import { logger } from '../infra/logging/logger.js';
+
+const log = logger('outbox.OutboxDispatcher');
 
 const POLL_INTERVAL_MS = 2000;
 const LEASE_KEY = 'callio:outbox:dispatcher';
@@ -76,7 +79,7 @@ class OutboxDispatcher {
                 await this.#deliver(delivery, configs.get(delivery.consumer_id));
             }
         } catch (err) {
-            console.error('[Outbox] Dispatch cycle failed:', err);
+            log.error({ err }, 'Dispatch cycle failed');
         } finally {
             this._running = false;
         }
@@ -122,8 +125,8 @@ class OutboxDispatcher {
             nextAttemptInSeconds: giveUp ? null : BACKOFF_SECONDS[attemptsMade - 1],
         });
         const msg = `[Outbox] ${delivery.event_type} ${delivery.event_id} to consumer ${delivery.consumer_id}: ${error}`;
-        if (giveUp) console.error(`${msg} — giving up after ${attemptsMade} attempts`);
-        else console.warn(`${msg} — retry #${attemptsMade + 1} in ${BACKOFF_SECONDS[attemptsMade - 1]}s`);
+        if (giveUp) log.error(`${msg} — giving up after ${attemptsMade} attempts`);
+        else log.warn(`${msg} — retry #${attemptsMade + 1} in ${BACKOFF_SECONDS[attemptsMade - 1]}s`);
     }
 }
 

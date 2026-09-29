@@ -12,6 +12,9 @@ import TenantRepository from '../../persistence/TenantRepository.js';
 import { config } from '../../../config/envConfig.js';
 import CallRepository from '../../persistence/CallRepository.js';
 import RecordingRepository from '../../persistence/RecordingRepository.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.recording.RecordingCoordinator');
 
 class RecordingCoordinator {
 
@@ -30,7 +33,7 @@ class RecordingCoordinator {
      */
     async checkAndStartRecording(callId, tenantId, trackAccessors) {
         if (!tenantId) {
-            console.error(`[RecordingCoordinator] Missing tenantId for call ${callId} — skipping recording`);
+            log.warn({ callId }, 'Missing tenantId — skipping recording');
             await this._recordFailedAttempt(callId, null, 'Recording skipped: missing tenant context');
             return;
         }
@@ -75,7 +78,7 @@ class RecordingCoordinator {
         try {
             await recordingManager.stopRecording(callId);
         } catch (error) {
-            console.error(`[RecordingCoordinator] Failed to stop recording for call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Failed to stop recording');
         }
     }
 
@@ -90,14 +93,14 @@ class RecordingCoordinator {
     async _startFreshRecording(callId, tenantId, getTracks, isBridgeActive) {
         const recordingEnabled = await this._isRecordingEnabled(tenantId, callId);
         if (!recordingEnabled) {
-            console.log(`[RecordingCoordinator] Recording disabled for call ${callId}`);
+            log.info({ callId }, 'Recording disabled');
             await this._recordFailedAttempt(callId, tenantId, 'Recording disabled in business number settings');
             return;
         }
 
         const quotaExceeded = await this._isStorageQuotaExceeded(tenantId);
         if (quotaExceeded) {
-            console.warn(`[RecordingCoordinator] Storage quota exceeded for business ${tenantId} — skipping recording for call ${callId}`);
+            log.warn({ tenantId, callId }, 'Storage quota exceeded for tenant — skipping recording');
             await this._recordFailedAttempt(callId, tenantId, 'Recording skipped: storage quota exceeded');
             return;
         }
@@ -111,17 +114,17 @@ class RecordingCoordinator {
             // that's already gone just wastes 1.5s and logs a second, misleading error.
             // Bail immediately in that case; this is expected behavior, not a failure.
             if (!isBridgeActive()) {
-                console.log(`[RecordingCoordinator] Call ${callId} ended before recording could attach — skipping`);
+                log.debug({ callId }, 'Call ended before recording could attach — skipping');
                 await this._recordFailedAttempt(callId, tenantId, 'Recording skipped: call ended before tracks became live');
                 return;
             }
-            console.warn(`[RecordingCoordinator] Tracks not live yet for call ${callId} — retrying in 1.5s`);
+            log.warn({ callId }, 'Tracks not live yet — retrying in 1.5s');
             await new Promise(r => setTimeout(r, 1500));
             tracks = getTracks();
         }
 
         if (!tracks) {
-            console.error(`[RecordingCoordinator] No live tracks after retry for call ${callId} — recording skipped`);
+            log.warn({ callId }, 'No live tracks after retry — recording skipped');
             await this._recordFailedAttempt(callId, tenantId, 'Recording skipped: media tracks were not live');
             return;
         }
@@ -130,14 +133,10 @@ class RecordingCoordinator {
         // If customer track is 'ended' or muted=true here, the RTCAudioSink ondata
         // will never fire — conclusive evidence of 138021 "no media from Meta".
         const { agentTrack, customerTrack } = tracks;
-        console.log(
-            `[RecordingCoordinator] Track state for call ${callId}: ` +
-            `agent=${agentTrack?.readyState}(muted=${agentTrack?.muted},enabled=${agentTrack?.enabled}), ` +
-            `customer=${customerTrack?.readyState}(muted=${customerTrack?.muted},enabled=${customerTrack?.enabled})`
-        );
+        log.debug({ callId }, `Track state: agent=${agentTrack?.readyState}(muted=${agentTrack?.muted},enabled=${agentTrack?.enabled}), customer=${customerTrack?.readyState}(muted=${customerTrack?.muted},enabled=${customerTrack?.enabled})`);
 
         const result = await recordingManager.startRecording(callId, tenantId, tracks);
-        console.log(`[RecordingCoordinator] Recording started for call ${callId}:`, result);
+        log.info({ callId, result }, 'Recording started');
         if (!result?.success) {
             await this._recordFailedAttempt(
                 callId,
@@ -150,10 +149,10 @@ class RecordingCoordinator {
     async _replaceAgentTrack(callId, getAgentTrack) {
         const agentTrack = getAgentTrack();
         if (agentTrack) {
-            console.log(`[RecordingCoordinator] Replacing agent track for call ${callId}: ${agentTrack.id}`);
+            log.debug({ callId }, `Replacing agent track: ${agentTrack.id}`);
             recordingManager.replaceAgentTrack(callId, agentTrack);
         } else {
-            console.warn(`[RecordingCoordinator] No agent track available to replace for call ${callId}`);
+            log.warn({ callId }, 'No agent track available to replace');
         }
     }
 
@@ -164,7 +163,7 @@ class RecordingCoordinator {
             const channel = call?.channel_id ? await ChannelRepository.findById(call.channel_id) : null;
             return Boolean(channel?.recording_enabled);
         } catch (error) {
-            console.error(`[RecordingCoordinator] Failed to check recording config for call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Failed to check recording config');
             return false;
         }
     }
@@ -181,7 +180,7 @@ class RecordingCoordinator {
             const used = await RecordingRepository.getTenantStorageUsageBytes(tenantId);
             return used >= limit;
         } catch (error) {
-            console.warn(`[RecordingCoordinator] Could not check storage quota for tenant ${tenantId} — proceeding:`, error.message);
+            log.warn({ tenantId, err: error }, 'Could not check storage quota — proceeding');
             return false;
         }
     }
@@ -209,12 +208,12 @@ class RecordingCoordinator {
             }
             if (!resolvedTenantId) {
                 // Still persist the failure so the call history shows the reason.
-                console.error(`[RecordingCoordinator] Cannot resolve tenant for call ${callId} — persisting failure anyway`);
+                log.error({ callId }, 'Cannot resolve tenant — persisting failure anyway');
                 try {
                     const { id } = await RecordingRepository.create({ call_id: callId });
                     await RecordingRepository.markFailed(id, reason);
                 } catch (persistErr) {
-                    console.error(`[RecordingCoordinator] Even null-business persist failed for call ${callId}:`, persistErr.message);
+                    log.error({ callId, err: persistErr }, 'Persisting the failure without a tenant failed too');
                 }
                 return;
             }
@@ -222,7 +221,7 @@ class RecordingCoordinator {
             const { id } = await RecordingRepository.create({ call_id: callId });
             await RecordingRepository.markFailed(id, reason);
         } catch (error) {
-            console.error(`[RecordingCoordinator] Failed to persist recording failure for call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Failed to persist recording failure');
         }
     }
 }

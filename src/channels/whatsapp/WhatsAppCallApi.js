@@ -7,6 +7,9 @@ import https from 'https';
 import ChannelRepository from '../../persistence/ChannelRepository.js';
 import { config } from '../../../config/envConfig.js';
 import axios from 'axios';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('channels.whatsapp.WhatsAppCallApi');
 
 const _WHATSAPP_API_URL = config.whatsapp.apiUrl;
 
@@ -28,7 +31,7 @@ const formatApiError = (error, context = '') => {
         data: error.response?.data?.error || null,
         message: error.response?.data?.error?.message || error.message,
     };
-    console.error(`[WhatsApp] ❌ ${context} failed:`, apiError);
+    log.error({ err: apiError }, `${context} failed`);
     return new Error(`${context} failed: ${apiError.message}`);
 };
 
@@ -45,7 +48,7 @@ async function _metaPost(url, payload, axiosConfig, label) {
         } catch (err) {
             lastErr = err;
             if (attempt === 1 && !err.response && _RETRYABLE.has(err.code)) {
-                console.warn(`[WhatsApp] ${label} ${err.code} — retrying (attempt 2)`);
+                log.warn(`${label} ${err.code} — retrying (attempt 2)`);
                 await new Promise(r => setTimeout(r, 500));
                 continue;
             }
@@ -88,7 +91,7 @@ export const initiateCall = async (call, sdpOffer) => {
         if (call.customer_address_type === 'WHATSAPP_USER') payload.recipient = address;
         else payload.to = String(address).replace(/[^\d]/g, '');
 
-        console.log(`[WhatsApp] Initiating call to=${payload.to ?? 'none'} recipient=${payload.recipient ?? 'none'}`);
+        log.info(`Initiating call to=${payload.to ?? 'none'} recipient=${payload.recipient ?? 'none'}`);
 
         const response = await metaAxios.post(`${graphUrl()}/${phoneNumberId}/calls`, payload, { headers: authHeaders(token) });
 
@@ -138,7 +141,7 @@ export const rejectCall = async (call) => {
 // ── Terminate call ────────────────────────────────────────────────────────────
 
 export const terminateCall = async (call) => {
-    console.log('[WhatsApp] Terminating call:', call.id);
+    log.info({ callId: call.id }, 'Terminating call');
     const { phoneNumberId, token } = await channelAuth(call.channel_id);
     if (!call.provider_call_id) throw new Error('Call has no provider call id');
     await _metaPost(
@@ -147,5 +150,5 @@ export const terminateCall = async (call) => {
         { headers: authHeaders(token), timeout: 12000 },
         `Terminate call ${call.id}`,
     );
-    console.log(`[WhatsApp] Call ${call.id} terminated`);
+    log.info({ callId: call.id }, 'Call terminated');
 };

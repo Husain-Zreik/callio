@@ -14,6 +14,9 @@ import { queueRouter } from './QueueRouter.js';
 import { callTerminator } from '../calls/CallTerminator.js';
 import { TerminationReason, TerminatedBy, CallStatus } from '../constants/CallConstants.js';
 import { config } from '../../../config/envConfig.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.routing.QueueTimeoutService');
 
 const TICK_MS = 2000;
 const LOCK_KEY = 'callio:queue-timeouts:lock';
@@ -50,7 +53,7 @@ class QueueTimeoutService {
             await this.#expireOffers();
             await this.#expireWaits();
         } catch (err) {
-            console.error('[QueueTimeouts] Scan failed:', err);
+            log.error({ err }, 'Scan failed');
         } finally {
             if (locked) {
                 await redisBaseService.getClient().eval(
@@ -69,7 +72,7 @@ class QueueTimeoutService {
                 // again since (to the same agent, a new round) isn't withdrawn.
                 await agentAssignmentCoordinator.passOffer(call, call.agent_id, 'missed', { expiredBefore: call.offered_at });
             } catch (err) {
-                console.error(`[QueueTimeouts] Passing on the offer of call ${call.id} failed:`, err);
+                log.error({ callId: call.id, err }, 'Passing on the offer failed');
             }
         }
     }
@@ -79,7 +82,7 @@ class QueueTimeoutService {
             try {
                 await this.#waitExpired(call);
             } catch (err) {
-                console.error(`[QueueTimeouts] Max-wait handling failed for call ${call.id}:`, err);
+                log.error({ callId: call.id, err }, 'Max-wait handling failed');
             }
         }
     }

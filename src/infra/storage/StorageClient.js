@@ -2,6 +2,9 @@
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { config } from '../../../config/envConfig.js';
+import { logger } from '../logging/logger.js';
+
+const log = logger('infra.storage.StorageClient');
 
 class StorageClient {
     constructor() {
@@ -16,7 +19,7 @@ class StorageClient {
      */
     async init() {
         if (this.isInitialized) {
-            console.log('[StorageClient] Already initialized');
+            log.debug('Already initialized');
             return;
         }
 
@@ -42,7 +45,7 @@ class StorageClient {
         await this.testConnection();
 
         this.isInitialized = true;
-        console.log(`[StorageClient] ✅ Initialized - Bucket: ${this.bucket}, Region: ${this.region}`);
+        log.info(`Initialized - Bucket: ${this.bucket}, Region: ${this.region}`);
     }
 
     /**
@@ -52,9 +55,9 @@ class StorageClient {
         try {
             const command = new HeadBucketCommand({ Bucket: this.bucket });
             await this.client.send(command);
-            console.log(`[StorageClient] ✅ Bucket "${this.bucket}" is accessible`);
+            log.info(`Bucket "${this.bucket}" is accessible`);
         } catch (error) {
-            console.error(`[StorageClient] ❌ Bucket access failed:`, error.message);
+            log.error({ err: error }, 'Bucket access failed');
             throw new Error(`S3 bucket "${this.bucket}" is not accessible. Check credentials and bucket name.`);
         }
     }
@@ -79,11 +82,11 @@ class StorageClient {
             await this.client.send(command);
 
             const fileUrl = `https://${this.bucket}.s3.${this.region}.amazonaws.com/${key}`;
-            console.log(`[StorageClient] ✅ Uploaded: ${key}`);
+            log.info(`Uploaded: ${key}`);
 
             return fileUrl;
         } catch (error) {
-            console.error(`[StorageClient] ❌ Upload failed for ${key}:`, error.message);
+            log.error({ err: error }, `Upload failed for ${key}`);
             throw error;
         }
     }
@@ -102,10 +105,10 @@ class StorageClient {
             });
 
             await this.client.send(command);
-            console.log(`[StorageClient] ✅ Deleted: ${key}`);
+            log.info(`Deleted: ${key}`);
             return true;
         } catch (error) {
-            console.error(`[StorageClient] ❌ Delete failed for ${key}:`, error.message);
+            log.error({ err: error }, `Delete failed for ${key}`);
             return false;
         }
     }
@@ -125,10 +128,10 @@ class StorageClient {
             });
 
             const signedUrl = await getSignedUrl(this.client, command, { expiresIn });
-            console.log(`[StorageClient] Generated signed URL for: ${key}`);
+            log.debug(`Generated signed URL for: ${key}`);
             return signedUrl;
         } catch (error) {
-            console.error(`[StorageClient] ❌ Signed URL generation failed for ${key}:`, error.message);
+            log.error({ err: error }, `Signed URL generation failed for ${key}`);
             throw error;
         }
     }
@@ -153,10 +156,10 @@ class StorageClient {
                 chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
             }
             const buf = Buffer.concat(chunks);
-            console.log(`[StorageClient] ✅ Downloaded ${buf.length} bytes for: ${fullKey}`);
+            log.debug(`Downloaded ${buf.length} bytes for: ${fullKey}`);
             return buf;
         } catch (error) {
-            console.error(`[StorageClient] ❌ Download failed for ${key}:`, error.message);
+            log.error({ err: error }, `Download failed for ${key}`);
             throw error;
         }
     }
@@ -206,7 +209,7 @@ class StorageClient {
             this.client.destroy();
             this.client = null;
             this.isInitialized = false;
-            console.log('[StorageClient] ✅ Closed');
+            log.info('Closed');
         }
     }
 }

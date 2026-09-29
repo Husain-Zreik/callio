@@ -21,6 +21,9 @@
 import wrtc from '@roamhq/wrtc';
 import { placeholderTrackFactory } from './PlaceholderTrackFactory.js';
 import { leakMetrics } from '../../infra/monitoring/leakMetrics.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.bridge.MixingRelay');
 
 const LOG_EVERY = 100; // log cadence in frames (~1s at 10ms/frame)
 const INT16_MAX = 32767;
@@ -151,10 +154,7 @@ export class MixingRelay {
     _maybeLog() {
         const d = this._diag;
         if (d.frames % LOG_EVERY !== 0) return;
-        console.log(
-            `[MixingRelay:${this._label}] src=${this._sourceTrackId} frames=${d.frames} mix=${d.mixFrames} ` +
-            `srcPeak=${d.srcPeak} supPeak=${d.supPeak} outPeak=${d.outPeak} srcRate=${d.srcRate} supLen=${d.supLen}`
-        );
+        log.debug(`src=${this._sourceTrackId} frames=${d.frames} mix=${d.mixFrames} srcPeak=${d.srcPeak} supPeak=${d.supPeak} outPeak=${d.outPeak} srcRate=${d.srcRate} supLen=${d.supLen}`);
         d.srcPeak = 0; d.supPeak = 0; d.outPeak = 0;
     }
 }

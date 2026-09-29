@@ -1,6 +1,9 @@
 // src/infra/redis/RedisBaseService.js
 import { redisClient } from './RedisClient.js';
 import { config } from '../../../config/envConfig.js';
+import { logger } from '../logging/logger.js';
+
+const log = logger('infra.redis.RedisBaseService');
 
 /**
  * Base Redis service providing low-level Redis operations.
@@ -20,9 +23,9 @@ class RedisBaseService {
         try {
             this.client = redisClient.getClient();
             this.isInitialized = true;
-            console.log(`[RedisBase] Worker ${this.workerId} initialized`);
+            log.debug(`Worker ${this.workerId} initialized`);
         } catch (error) {
-            console.error('[RedisBase] Initialization failed:', error.message);
+            log.error({ err: error }, 'Initialization failed');
             throw error;
         }
     }
@@ -40,7 +43,7 @@ class RedisBaseService {
         try {
             return await this.client.get(key);
         } catch (error) {
-            console.error(`[RedisBase] Error getting key ${key}:`, error.message);
+            log.error({ err: error }, `Error getting key ${key}`);
             return null;
         }
     }
@@ -56,7 +59,7 @@ class RedisBaseService {
             }
             return true;
         } catch (error) {
-            console.error(`[RedisBase] Error setting key ${key}:`, error.message);
+            log.error({ err: error }, `Error setting key ${key}`);
             return false;
         }
     }
@@ -73,7 +76,7 @@ class RedisBaseService {
                 return result === 1;
             }
         } catch (error) {
-            console.error(`[RedisBase] Error setnx key ${key}:`, error.message);
+            log.error({ err: error }, `Error setnx key ${key}`);
             return false;
         }
     }
@@ -84,7 +87,7 @@ class RedisBaseService {
         try {
             return await this.client.getdel(key);
         } catch (error) {
-            console.error(`[RedisBase] Error getdel key ${key}:`, error.message);
+            log.error({ err: error }, `Error getdel key ${key}`);
             return null;
         }
     }
@@ -96,7 +99,7 @@ class RedisBaseService {
             if (keys.length === 0) return 0;
             return await this.client.del(...keys);
         } catch (error) {
-            console.error(`[RedisBase] Error deleting keys:`, error.message);
+            log.error({ err: error }, 'Error deleting keys');
             return 0;
         }
     }
@@ -108,7 +111,7 @@ class RedisBaseService {
             const result = await this.client.exists(key);
             return result === 1;
         } catch (error) {
-            console.error(`[RedisBase] Error checking existence of key ${key}:`, error.message);
+            log.error({ err: error }, `Error checking existence of key ${key}`);
             return false;
         }
     }
@@ -120,7 +123,7 @@ class RedisBaseService {
             const result = await this.client.expire(key, ttl);
             return result === 1;
         } catch (error) {
-            console.error(`[RedisBase] Error setting TTL on key ${key}:`, error.message);
+            log.error({ err: error }, `Error setting TTL on key ${key}`);
             return false;
         }
     }
@@ -132,7 +135,7 @@ class RedisBaseService {
             const result = await this.client.persist(key);
             return result === 1;
         } catch (error) {
-            console.error(`[RedisBase] Error persisting key ${key}:`, error.message);
+            log.error({ err: error }, `Error persisting key ${key}`);
             return false;
         }
     }
@@ -143,7 +146,7 @@ class RedisBaseService {
         try {
             return await this.client.incr(key);
         } catch (error) {
-            console.error(`[RedisBase] Error incrementing key ${key}:`, error.message);
+            log.error({ err: error }, `Error incrementing key ${key}`);
             return null;
         }
     }
@@ -154,7 +157,7 @@ class RedisBaseService {
         try {
             return await this.client.decr(key);
         } catch (error) {
-            console.error(`[RedisBase] Error decrementing key ${key}:`, error.message);
+            log.error({ err: error }, `Error decrementing key ${key}`);
             return null;
         }
     }
@@ -166,7 +169,7 @@ class RedisBaseService {
             if (members.length === 0) return 0;
             return await this.client.sadd(key, ...members);
         } catch (error) {
-            console.error(`[RedisBase] Error adding to set ${key}:`, error.message);
+            log.error({ err: error }, `Error adding to set ${key}`);
             return 0;
         }
     }
@@ -178,7 +181,7 @@ class RedisBaseService {
             if (members.length === 0) return 0;
             return await this.client.srem(key, ...members);
         } catch (error) {
-            console.error(`[RedisBase] Error removing from set ${key}:`, error.message);
+            log.error({ err: error }, `Error removing from set ${key}`);
             return 0;
         }
     }
@@ -189,7 +192,7 @@ class RedisBaseService {
         try {
             return await this.client.smembers(key);
         } catch (error) {
-            console.error(`[RedisBase] Error getting set members ${key}:`, error.message);
+            log.error({ err: error }, `Error getting set members ${key}`);
             return [];
         }
     }
@@ -200,7 +203,7 @@ class RedisBaseService {
         try {
             return await this.client.scard(key);
         } catch (error) {
-            console.error(`[RedisBase] Error getting set size ${key}:`, error.message);
+            log.error({ err: error }, `Error getting set size ${key}`);
             return 0;
         }
     }
@@ -217,7 +220,7 @@ class RedisBaseService {
                 for (const key of keys) yield key;
             } while (cursor !== '0');
         } catch (error) {
-            console.error(`[RedisBase] Error scanning keys with pattern ${pattern}:`, error.message);
+            log.error({ err: error }, `Error scanning keys with pattern ${pattern}`);
         }
     }
 
@@ -230,7 +233,7 @@ class RedisBaseService {
             }
             return keys;
         } catch (error) {
-            console.error(`[RedisBase] Error collecting keys with pattern ${pattern}:`, error.message);
+            log.error({ err: error }, `Error collecting keys with pattern ${pattern}`);
             return [];
         }
     }
@@ -243,7 +246,7 @@ class RedisBaseService {
         try {
             return await this.client.hset(key, ...args);
         } catch (error) {
-            console.error(`[RedisBase] Error hset ${key}:`, error.message);
+            log.error({ err: error }, `Error hset ${key}`);
             return 0;
         }
     }
@@ -254,7 +257,7 @@ class RedisBaseService {
         try {
             return await this.client.hget(key, field);
         } catch (error) {
-            console.error(`[RedisBase] Error hget ${key}[${field}]:`, error.message);
+            log.error({ err: error }, `Error hget ${key}[${field}]`);
             return null;
         }
     }
@@ -265,7 +268,7 @@ class RedisBaseService {
         try {
             return await this.client.hgetall(key);
         } catch (error) {
-            console.error(`[RedisBase] Error hgetall ${key}:`, error.message);
+            log.error({ err: error }, `Error hgetall ${key}`);
             return null;
         }
     }
@@ -277,7 +280,7 @@ class RedisBaseService {
             if (fields.length === 0) return 0;
             return await this.client.hdel(key, ...fields);
         } catch (error) {
-            console.error(`[RedisBase] Error hdel ${key}:`, error.message);
+            log.error({ err: error }, `Error hdel ${key}`);
             return 0;
         }
     }
@@ -288,7 +291,7 @@ class RedisBaseService {
         try {
             return await this.client.hvals(key);
         } catch (error) {
-            console.error(`[RedisBase] Error hvals ${key}:`, error.message);
+            log.error({ err: error }, `Error hvals ${key}`);
             return [];
         }
     }
@@ -307,7 +310,7 @@ class RedisBaseService {
         try {
             return await pipeline.exec();
         } catch (error) {
-            console.error('[RedisBase] Error executing pipeline:', error.message);
+            log.error({ err: error }, 'Error executing pipeline');
             throw error;
         }
     }
@@ -318,7 +321,7 @@ class RedisBaseService {
         try {
             return await this.client.publish(channel, message);
         } catch (error) {
-            console.error(`[RedisBase] Error publishing to channel ${channel}:`, error.message);
+            log.error({ err: error }, `Error publishing to channel ${channel}`);
             return 0;
         }
     }
@@ -342,7 +345,7 @@ class RedisBaseService {
     async close() {
         this.client = null;
         this.isInitialized = false;
-        console.log(`[RedisBase] Worker ${this.workerId} closed`);
+        log.info(`Worker ${this.workerId} closed`);
     }
 }
 

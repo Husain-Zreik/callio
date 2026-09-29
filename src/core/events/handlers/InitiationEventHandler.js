@@ -23,6 +23,9 @@ import { callTerminator } from '../../calls/CallTerminator.js';
 import {
     ConnectionType, CallDirection, CallStatus, AgentAvailability, TerminationReason, TerminatedBy,
 } from '../../constants/CallConstants.js';
+import { logger } from '../../../infra/logging/logger.js';
+
+const log = logger('core.events.InitiationEventHandler');
 
 export class OutboundCallError extends Error {
     constructor(code, message) {
@@ -106,9 +109,9 @@ export class InitiationEventHandler {
         // Durable device bookkeeping, same as the inbound accept path: a reload
         // resync must see which device this call is bound to.
         CallConnectionRepository.updateDeviceId(callId, ConnectionType.AGENT, deviceId ?? null)
-            .catch((err) => console.error(`[InitiationEventHandler] Failed to persist deviceId for call ${callId}:`, err));
+            .catch((err) => log.error({ callId, err }, 'Failed to persist deviceId'));
         CallConnectionRepository.updateAgentId(callId, ConnectionType.AGENT, userId)
-            .catch((err) => console.error(`[InitiationEventHandler] Failed to persist agent for call ${callId}:`, err));
+            .catch((err) => log.error({ callId, err }, 'Failed to persist agent'));
 
         await AgentRepository.updateAgentAvailability(userId, AgentAvailability.ON_CALL);
         EventBus.emit('call:agent_availability', {
@@ -147,7 +150,7 @@ export class InitiationEventHandler {
     async triggerCustomerConnection(callId) {
         const agentResult = peerRegistry.getConnectionData(callId, ConnectionType.AGENT);
         if (!agentResult.valid) {
-            console.error(`[InitiationEventHandler] Cannot dial customer for call ${callId}: no AGENT connection`);
+            log.error({ callId }, 'Cannot dial customer: no AGENT connection');
             return;
         }
         const agentConn = agentResult.data;
@@ -163,9 +166,9 @@ export class InitiationEventHandler {
             agentConn.context.setProviderCallId(providerCallId);
             await CallRepository.updateProviderCallId(callId, providerCallId);
 
-            console.log(`[InitiationEventHandler] Customer dialed for call ${callId} (providerCallId=${providerCallId})`);
+            log.info({ callId }, `Customer dialed (providerCallId=${providerCallId})`);
         } catch (error) {
-            console.error(`[InitiationEventHandler] Dialing the customer failed for call ${callId}:`, error);
+            log.error({ callId, err: error }, 'Dialing the customer failed');
             const tenantId = agentConn.context.tenantId;
 
             callLifecycleLogger.logOutboundFailed(callId, tenantId, agentId, {

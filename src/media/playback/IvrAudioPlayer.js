@@ -13,14 +13,17 @@ import fs from 'fs';
 import { spawn } from 'child_process';
 import https from 'https';
 import http from 'http';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.playback.IvrAudioPlayer');
 
 let ffmpegPath = null;
 try {
     const { default: fp } = await import('ffmpeg-static');
     ffmpegPath = fp;
-    console.log('[IvrAudioPlayer] ffmpeg available at:', ffmpegPath);
+    log.debug({ ffmpegPath }, 'ffmpeg available');
 } catch {
-    console.warn('[IvrAudioPlayer] ffmpeg-static not found — only WAV will play correctly');
+    log.warn('ffmpeg-static not found — only WAV will play correctly');
 }
 
 const SAMPLE_RATE = 48000;
@@ -55,7 +58,7 @@ class IvrAudioPlayer {
         const label = (input instanceof Int16Array)
             ? `<pcm ${input.length} samples>`
             : Buffer.isBuffer(input) ? `<buffer ${input.length}b>` : input;
-        console.log(`[IvrAudioPlayer] play() → ${label}`);
+        log.debug(`play → ${label}`);
         return new Promise((resolve, reject) => {
             this._resolve = resolve;
             this._reject = reject;
@@ -72,11 +75,11 @@ class IvrAudioPlayer {
 
             loadPromise
                 .then((samples) => {
-                    console.log(`[IvrAudioPlayer] loaded ${samples.length} samples for ${label}`);
+                    log.debug(`loaded ${samples.length} samples for ${label}`);
                     this._startPlayback(samples);
                 })
                 .catch((err) => {
-                    console.error('[IvrAudioPlayer] Load failed:', err.message, '| file:', label);
+                    log.error({ err, label }, 'Load failed');
                     // On load failure, resolve after a brief silence (don't crash the flow)
                     this._playSilence(resolve);
                 });
@@ -230,7 +233,7 @@ class IvrAudioPlayer {
         }
 
         // Fallback: no ffmpeg, non-WAV — read as raw bytes (will sound garbled)
-        console.warn('[IvrAudioPlayer] ffmpeg not available — audio may be garbled for non-WAV files');
+        log.warn('ffmpeg not available — audio may be garbled for non-WAV files');
         const buf = src.startsWith('http://') || src.startsWith('https://')
             ? await this._fetchUrl(src)
             : await fs.promises.readFile(src);
@@ -253,7 +256,7 @@ class IvrAudioPlayer {
                 'pipe:1',            // output to stdout
             ];
 
-            console.log(`[IvrAudioPlayer] ffmpeg spawn: ${ffmpegPath} ${args.join(' ')}`);
+            log.debug(`ffmpeg spawn: ${ffmpegPath} ${args.join(' ')}`);
             const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
             this._ffmpeg = proc;
 
@@ -266,22 +269,22 @@ class IvrAudioPlayer {
                 const buf = Buffer.concat(chunks);
                 if (buf.length === 0) {
                     const errMsg = Buffer.concat(errChunks).toString().slice(-300);
-                    console.error('[IvrAudioPlayer] ffmpeg produced no output. stderr:', errMsg);
+                    log.error({ stderr: errMsg }, 'ffmpeg produced no output');
                     reject(new Error('ffmpeg produced no output'));
                     return;
                 }
-                console.log(`[IvrAudioPlayer] ffmpeg decoded ${buf.length} bytes (${Math.floor(buf.length / 2)} samples)`);
+                log.debug(`ffmpeg decoded ${buf.length} bytes (${Math.floor(buf.length / 2)} samples)`);
                 resolve(new Int16Array(buf.buffer, buf.byteOffset, Math.floor(buf.length / 2)));
             });
             proc.on('error', (err) => {
-                console.error('[IvrAudioPlayer] ffmpeg process error:', err.message);
+                log.error({ err }, 'ffmpeg process error');
                 this._ffmpeg = null;
                 reject(err);
             });
             proc.on('close', (code) => {
                 if (code !== 0) {
                     const errMsg = Buffer.concat(errChunks).toString().slice(-200);
-                    console.warn(`[IvrAudioPlayer] ffmpeg exited code=${code}, stderr tail: ${errMsg}`);
+                    log.warn(`ffmpeg exited code=${code}, stderr tail: ${errMsg}`);
                 }
             });
         });
@@ -307,7 +310,7 @@ class IvrAudioPlayer {
                 'pipe:1',
             ];
 
-            console.log(`[IvrAudioPlayer] ffmpeg stdin-decode: ${buf.length} bytes from ${label}`);
+            log.debug(`ffmpeg stdin-decode: ${buf.length} bytes from ${label}`);
             const proc = spawn(ffmpegPath, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
             this._ffmpeg = proc;
 
@@ -320,22 +323,22 @@ class IvrAudioPlayer {
                 const outBuf = Buffer.concat(chunks);
                 if (outBuf.length === 0) {
                     const errMsg = Buffer.concat(errChunks).toString().slice(-300);
-                    console.error('[IvrAudioPlayer] ffmpeg (stdin) produced no output. stderr:', errMsg);
+                    log.error({ stderr: errMsg }, 'ffmpeg (stdin) produced no output');
                     reject(new Error('ffmpeg produced no output'));
                     return;
                 }
-                console.log(`[IvrAudioPlayer] ffmpeg (stdin) decoded ${outBuf.length} bytes (${Math.floor(outBuf.length / 2)} samples)`);
+                log.debug(`ffmpeg (stdin) decoded ${outBuf.length} bytes (${Math.floor(outBuf.length / 2)} samples)`);
                 resolve(new Int16Array(outBuf.buffer, outBuf.byteOffset, Math.floor(outBuf.length / 2)));
             });
             proc.on('error', (err) => {
-                console.error('[IvrAudioPlayer] ffmpeg (stdin) process error:', err.message);
+                log.error({ err }, 'ffmpeg (stdin) process error');
                 this._ffmpeg = null;
                 reject(err);
             });
             proc.on('close', (code) => {
                 if (code !== 0) {
                     const errMsg = Buffer.concat(errChunks).toString().slice(-200);
-                    console.warn(`[IvrAudioPlayer] ffmpeg (stdin) exited code=${code}, stderr tail: ${errMsg}`);
+                    log.warn(`ffmpeg (stdin) exited code=${code}, stderr tail: ${errMsg}`);
                 }
             });
 
@@ -367,7 +370,7 @@ class IvrAudioPlayer {
                     const buf = Buffer.concat(chunks);
                     if (statusCode < 200 || statusCode >= 300) {
                         const body = buf.toString('utf8').slice(0, 400);
-                        console.error(`[IvrAudioPlayer] HTTP ${statusCode} fetching audio. Body: ${body}`);
+                        log.error(`HTTP ${statusCode} fetching audio. Body: ${body}`);
                         return reject(new Error(`HTTP ${statusCode} fetching audio`));
                     }
                     resolve(buf);

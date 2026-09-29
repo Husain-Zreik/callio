@@ -6,6 +6,9 @@ import CallRepository from '../../../persistence/CallRepository.js';
 import { callTerminator } from '../../calls/CallTerminator.js';
 import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
 import { TerminationReason, TerminatedBy, InternalErrorCodes, CallStatus } from '../../constants/CallConstants.js';
+import { logger } from '../../../infra/logging/logger.js';
+
+const log = logger('core.events.TerminationEventHandler');
 
 export class TerminationEventHandler {
 
@@ -16,7 +19,7 @@ export class TerminationEventHandler {
 
         try {
             const call = await CallRepository.findById(callId);
-            if (!call) { console.warn(`[TerminationEventHandler] Call ${callId} not found`); return; }
+            if (!call) { log.warn({ callId }, 'Call not found'); return; }
 
             if (call.status === CallStatus.TERMINATED || call.status === CallStatus.FAILED) {
                 await peerRegistry.closePeerConnection(callId);
@@ -26,7 +29,7 @@ export class TerminationEventHandler {
             const label = isSystemFailed ? 'ICE reconnect exhausted'
                 : isCustomerNetworkLoss ? 'Customer network loss'
                     : 'Hang-up';
-            console.log(`[TerminationEventHandler] ${label} for call ${callId}${userId ? ` from user ${userId}` : ''}`);
+            log.info({ callId }, `${label}${userId ? ` from user ${userId}` : ''}`);
 
             if (isSystemFailed || isCustomerNetworkLoss) {
                 // System-detected failure — FAILED, not TERMINATED, so history
@@ -63,11 +66,11 @@ export class TerminationEventHandler {
         } catch (error) {
             const isDeadlock = error.code === 'ER_LOCK_DEADLOCK' || error.errno === 1213;
             if (isDeadlock && _attempt < 2) {
-                console.warn(`[TerminationEventHandler] Deadlock on call ${callId}, retrying (attempt ${_attempt + 1})...`);
+                log.warn({ callId }, `Deadlock, retrying (attempt ${_attempt + 1})...`);
                 await new Promise(r => setTimeout(r, 50 * (_attempt + 1)));
                 return this.handleCallTerminated(data, _attempt + 1);
             }
-            console.error(`[TerminationEventHandler] Failed to handle termination for call ${callId}:`, error);
+            log.error({ callId, err: error }, 'Failed to handle termination');
         }
     }
 }

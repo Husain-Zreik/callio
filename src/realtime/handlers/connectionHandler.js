@@ -8,6 +8,9 @@ import { registerAllSocketListeners } from "../namespaces/index.js";
 import { agentAssignmentCoordinator } from "../../core/routing/AgentAssignmentCoordinator.js";
 import { iceServersFor } from "../../media/webrtc/IceServers.js";
 import { AGENT_PROTOCOL_VERSION } from "../middleware/authMiddleware.js";
+import { logger, runWithLogContext } from '../../infra/logging/logger.js';
+
+const log = logger('realtime.connectionHandler');
 
 // What a client needs before it can take calls: who it is, and the ICE
 // servers (with TURN credentials minted for this agent) for its peer
@@ -41,11 +44,14 @@ export async function handleConnection(socket) {
     // note on connectionPurpose.
     const isSessionConnection = (socket.connectionPurpose || 'session') === 'session';
 
-    console.log(
-        `[WS] Agent connected - Name: ${userName}, AgentID: ${userId}, TenantID: ${tenantId}, SocketID: ${socket.id}, Purpose: ${socket.connectionPurpose || 'session'}, Worker: ${redisPubSubService.workerId}`,
-    );
+    log.info({ agentId: userId, tenantId }, `Agent connected (${userName}, socket=${socket.id}, purpose=${socket.connectionPurpose || 'session'})`);
 
     const tracksPresence = userId !== "Unknown" && tenantId !== "Unknown" && isSessionConnection;
+
+    // Records logged while handling this socket's events carry who sent them
+    // (and the call, when the payload names one).
+    socket.use(([, payload], next) => runWithLogContext(
+        { tenantId: socket.tenant?.id, agentId: socket.user?.id, callId: payload?.callId ?? payload?.call_id }, next));
 
     // Listeners first, then session:ready — clients answer it at once (calls:sync),
     // and an event that arrives before its listener exists is silently dropped.
@@ -61,27 +67,25 @@ export async function handleConnection(socket) {
             const socketCount = await presenceService.getUserSocketCount(userId);
             isFirstSocket = socketCount === 1;
         } catch (error) {
-            console.error(`[WS] Failed to handle presence for user ${userId}:`, error.message);
+            log.error({ agentId: userId, err: error }, 'Failed to handle presence');
         }
 
         await _handlePendingCallRedelivery(socket, userId, tenantId);
         agentAssignmentCoordinator.assignOldestUnassignedCall(tenantId).catch((err) =>
-            console.error(`[WS] Queue assignment trigger failed on connect for user ${userId}:`, err.message)
+            log.error({ agentId: userId, err }, 'Queue assignment trigger failed on connect')
         );
 
         // Notify managers that this agent just came online (first socket only —
         // opening a second tab should not re-broadcast).
         if (isFirstSocket) {
             agentAssignmentCoordinator.emitQueueUpdate(tenantId).catch((err) =>
-                console.error(`[WS] Queue update failed on agent connect for user ${userId}:`, err.message)
+                log.error({ agentId: userId, err }, 'Queue update failed on agent connect')
             );
         }
     }
 
     socket.on("disconnect", async (reason) => {
-        console.log(
-            `[WS] User disconnected - Name: ${userName}, UserID: ${userId}, SocketID: ${socket.id}, Reason: ${reason}, Purpose: ${socket.connectionPurpose || 'session'}`,
-        );
+        log.info({ agentId: userId }, `Agent disconnected (${userName}, socket=${socket.id}, reason=${reason}, purpose=${socket.connectionPurpose || 'session'})`);
         if (tracksPresence) {
             await presenceService.trackDisconnection(userId, socket.id);
 
@@ -90,14 +94,14 @@ export async function handleConnection(socket) {
             const remainingSockets = await presenceService.getUserSocketCount(userId).catch(() => -1);
             if (remainingSockets === 0) {
                 agentAssignmentCoordinator.emitQueueUpdate(tenantId).catch((err) =>
-                    console.error(`[WS] Queue update failed on agent disconnect for user ${userId}:`, err.message)
+                    log.error({ agentId: userId, err }, 'Queue update failed on agent disconnect')
                 );
             }
         }
     });
 
     socket.on("error", (error) => {
-        console.error(`[WS] Socket error - User: ${userName} (ID: ${userId}), Socket: ${socket.id}`, error);
+        log.error({ agentId: userId, err: error }, `Socket error (${userName}, socket=${socket.id})`);
     });
 }
 
@@ -141,10 +145,7 @@ async function _handlePendingCallRedelivery(socket, userId, tenantId) {
         }
 
         if (alreadyAccepted) {
-            console.log(
-                `[WS] Agent ${userId} connected (socket=${socket.id}) but call ` +
-                `${pendingCall.id} was already accepted — lifecycle logged, no re-delivery needed`
-            );
+            log.debug({ agentId: userId }, `Agent connected (socket=${socket.id}) but call ${pendingCall.id} was already accepted — lifecycle logged, no re-delivery needed`);
         } else if (isFirstSocket) {
             // Route the AGENT reset through Redis to the SUBSCRIBED WORKER —
             // the same worker that owns the CUSTOMER peer. Creating the AGENT
@@ -159,17 +160,11 @@ async function _handlePendingCallRedelivery(socket, userId, tenantId) {
                 { callId: pendingCall.id, socketId: socket.id, userId, tenantId },
             );
 
-            console.log(
-                `[WS] Re-delivered pending call ${pendingCall.id} to agent ${userId} ` +
-                `on late connect (socket=${socket.id})`
-            );
+            log.info({ agentId: userId }, `Re-delivered pending call ${pendingCall.id} on late connect (socket=${socket.id})`);
         } else {
-            console.log(
-                `[WS] Agent ${userId} reconnected (socket=${socket.id}) but already had ` +
-                `${previousSockets - 1} live socket(s) — lifecycle logged, re-delivery skipped`
-            );
+            log.debug({ agentId: userId }, `Agent reconnected (socket=${socket.id}) but already had ${previousSockets - 1} live socket(s) — lifecycle logged, re-delivery skipped`);
         }
     } catch (err) {
-        console.error(`[WS] Pending call re-delivery check failed for user ${userId}:`, err.message);
+        log.error({ agentId: userId, err }, 'Pending call re-delivery check failed');
     }
 }

@@ -15,12 +15,16 @@ import { ivrTerminationHandler } from '../core/ivr/IvrTerminationHandler.js';
 import { outboxDispatcher } from '../outbox/OutboxDispatcher.js';
 import { queueTimeoutService } from '../core/routing/QueueTimeoutService.js';
 import { customerChannels } from '../core/channels/CustomerChannels.js';
+import { logger } from '../infra/logging/logger.js';
+import { logLevelControl } from '../infra/logging/LogLevelControl.js';
+
+const log = logger('server.bootstrap');
 
 function logOptional(label, result, disabledFeature) {
     if (result.status === 'fulfilled')
-        console.log(`✅ ${label} initialized`);
+        log.info(`${label} initialized`);
     else
-        console.warn(`⚠️ ${label} failed — ${disabledFeature} disabled: ${result.reason.message}`);
+        log.warn({ err: result.reason }, `${label} failed — ${disabledFeature} disabled`);
 }
 
 // Base Redis client first — presenceService and redisCleanupService call
@@ -33,7 +37,9 @@ export async function initRedis() {
         presenceService.init(),
         redisCleanupService.init(),
     ]);
-    console.log("✅ Redis services initialized");
+    log.info('Redis services initialized');
+    // Runtime log-level overrides (npm run log-level); logging works without them.
+    await logLevelControl.start().catch((err) => log.warn({ err }, 'Log-level control unavailable'));
 }
 
 // storageClient (S3) and worker bridges (worker_threads) have no dependency on

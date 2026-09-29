@@ -17,6 +17,9 @@
 // score (0-100) is a continuous value used for the line-graph Y-axis:
 //   score = clamp(100 - jitter_ms * 0.8 - packet_loss_pct * 4, 0, 100)
 
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.bridge.CustomerNetworkMonitor');
 const POLL_MS = 4000;
 
 function qualityFromMetrics(packetLossFraction, jitterMs) {
@@ -47,13 +50,13 @@ export class CustomerNetworkMonitor {
     start() {
         if (this._timer) return;
         this._timer = setInterval(() => this._poll(), POLL_MS);
-        console.log(`[CustomerNetworkMonitor] Started for call ${this._callId}`);
+        log.info({ callId: this._callId }, 'Started');
     }
 
     stop() {
         clearInterval(this._timer);
         this._timer = null;
-        console.log(`[CustomerNetworkMonitor] Stopped for call ${this._callId}`);
+        log.info({ callId: this._callId }, 'Stopped');
     }
 
     async _poll() {
@@ -90,7 +93,7 @@ export class CustomerNetworkMonitor {
             this._onQuality(this._callId, { ...quality, packetLoss, jitter });
         } catch (err) {
             if (this._pc?.connectionState !== 'closed' && this._pc?.connectionState !== 'closing') {
-                console.warn(`[CustomerNetworkMonitor] getStats error for call ${this._callId}: ${err.message}`);
+                log.warn({ callId: this._callId, err }, 'getStats error');
             }
         }
     }

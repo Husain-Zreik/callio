@@ -1,6 +1,9 @@
 // src/core/agents/PresenceService.js
 import { redisBaseService } from "../../infra/redis/RedisBaseService.js";
 import { config } from "../../../config/envConfig.js";
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.agents.PresenceService');
 
 /**
  * Tracks which agents have live sockets, across all workers.
@@ -28,7 +31,7 @@ class PresenceService {
         if (this.isInitialized) return;
         await redisBaseService.init();
         this.isInitialized = true;
-        console.log(`[Presence] Worker ${this.workerId} initialized`);
+        log.debug(`Worker ${this.workerId} initialized`);
     }
 
     async ensureInitialized() {
@@ -52,9 +55,9 @@ class PresenceService {
             pipeline.expire(workerKey, this.ttl);
             await redisBaseService.executePipeline(pipeline);
 
-            console.log(`[Presence] User ${userId} connected (Socket: ${socketId})`);
+            log.info({ agentId: userId }, `User connected (Socket: ${socketId})`);
         } catch (error) {
-            console.error("[Presence] Error tracking connection:", error);
+            log.error({ err: error }, 'Error tracking connection');
         }
     }
 
@@ -68,13 +71,9 @@ class PresenceService {
             await redisBaseService.executePipeline(pipeline);
 
             const remaining = await redisBaseService.scard(this.#userSocketsKey(userId));
-            console.log(
-                remaining === 0
-                    ? `[Presence] User ${userId} is now completely offline`
-                    : `[Presence] User ${userId} disconnected (${remaining} socket(s) remaining)`
-            );
+            log.info({ agentId: userId }, remaining === 0 ? 'User is now completely offline' : `User disconnected (${remaining} socket(s) remaining)`);
         } catch (error) {
-            console.error("[Presence] Error tracking disconnection:", error);
+            log.error({ err: error }, 'Error tracking disconnection');
         }
     }
 
@@ -83,7 +82,7 @@ class PresenceService {
         try {
             return await redisBaseService.scard(this.#userSocketsKey(userId));
         } catch (error) {
-            console.error("[Presence] Error getting socket count:", error);
+            log.error({ err: error }, 'Error getting socket count');
             return 0;
         }
     }
@@ -93,7 +92,7 @@ class PresenceService {
         try {
             return await redisBaseService.smembers(this.#userSocketsKey(userId));
         } catch (error) {
-            console.error("[Presence] Error getting user sockets:", error);
+            log.error({ err: error }, 'Error getting user sockets');
             return [];
         }
     }
@@ -120,9 +119,9 @@ class PresenceService {
             pipeline.del(workerKey);
             await redisBaseService.executePipeline(pipeline);
 
-            console.log(`[Presence] Cleared ${entries.length} stale socket(s) from worker ${this.workerId}'s previous run`);
+            log.info(`Cleared ${entries.length} stale socket(s) from worker ${this.workerId}'s previous run`);
         } catch (error) {
-            console.error("[Presence] Error clearing stale presence:", error);
+            log.error({ err: error }, 'Error clearing stale presence');
         }
     }
 }

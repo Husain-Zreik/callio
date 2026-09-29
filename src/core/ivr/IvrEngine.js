@@ -13,6 +13,9 @@
 import EventBus from '../EventBus.js';
 import { IvrAudioPlayer } from '../../media/playback/IvrAudioPlayer.js';
 import { ivrErrorAudioProvider } from '../../media/playback/IvrErrorAudioProvider.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.ivr.IvrEngine');
 
 class IvrEngine {
     constructor({
@@ -54,7 +57,7 @@ class IvrEngine {
         this._dtmfHandler = ({ callId, digit }) => {
             if (callId !== this._callId) return;
             if (!this._currentMenuNode || this._stopped) {
-                console.warn(`[IvrEngine:${this._callId}] DTMF digit '${digit}' dropped — no active menu node (stopped=${this._stopped})`);
+                log.warn({ callId: this._callId }, `DTMF digit '${digit}' dropped — no active menu node (stopped=${this._stopped})`);
                 return;
             }
             this._onDtmf(this._currentMenuNode, digit);
@@ -66,14 +69,14 @@ class IvrEngine {
     start() {
         const startNode = this._findNodeByType('ivr_start');
         if (!startNode) {
-            console.error(`[IvrEngine:${this._callId}] No ivr_start node found — aborting`);
+            log.error({ callId: this._callId }, 'No ivr_start node found — aborting');
             this._complete('error');
             return;
         }
 
         const firstEdge = this._edges.find(e => e.source === startNode.id);
         if (!firstEdge) {
-            console.error(`[IvrEngine:${this._callId}] ivr_start (${startNode.id}) has no outgoing edge — aborting`);
+            log.error({ callId: this._callId }, `ivr_start (${startNode.id}) has no outgoing edge — aborting`);
             this._complete('error');
             return;
         }
@@ -97,7 +100,7 @@ class IvrEngine {
         this._clearPlayer();
         this._clearTimer();
         this._removeDtmfListener();
-        console.log(`[IvrEngine:${this._callId}] Stopped`);
+        log.info({ callId: this._callId }, 'Stopped');
     }
 
     // ── Navigation ────────────────────────────────────────────────────────────
@@ -107,7 +110,7 @@ class IvrEngine {
 
         const node = this._nodes.get(nodeId);
         if (!node) {
-            console.error(`[IvrEngine:${this._callId}] Node ${nodeId} not found — hanging up`);
+            log.warn({ callId: this._callId }, `Node ${nodeId} not found — hanging up`);
             this._complete('error');
             return;
         }
@@ -119,7 +122,7 @@ class IvrEngine {
         if (nodeId !== this._currentNodeId) this._replayCount = 0;
         this._currentNodeId = nodeId;
 
-        console.log(`[IvrEngine:${this._callId}] → ${node.type} (${nodeId})`);
+        log.info({ callId: this._callId }, `→ ${node.type} (${nodeId})`);
 
         EventBus.emit('call:ivr_node', {
             callId:     this._callId,
@@ -139,7 +142,7 @@ class IvrEngine {
             case 'ivr_transfer': this._complete('transferred', node.data ?? {}); break;
             case 'ivr_hangup':   this._complete('hung_up');                      break;
             default:
-                console.warn(`[IvrEngine:${this._callId}] Unknown node type: ${node.type}`);
+                log.warn({ callId: this._callId }, `Unknown node type: ${node.type}`);
                 this._complete('error');
         }
     }
@@ -150,7 +153,7 @@ class IvrEngine {
         const timeoutMs = ((data.timeoutSeconds ?? 0) * 1000) || this._defaultTimeout;
 
         if (!audioPath) {
-            console.warn(`[IvrEngine:${this._callId}] No audio for menu node ${node.id} — playing error and hanging up`);
+            log.warn({ callId: this._callId }, `No audio for menu node ${node.id} — playing error and hanging up`);
             this._playErrorAndHangup();
             return;
         }
@@ -165,7 +168,7 @@ class IvrEngine {
             this._player = null;
             this._timer = setTimeout(() => this._onMenuTimeout(node), timeoutMs);
         }).catch((err) => {
-            console.error(`[IvrEngine:${this._callId}] Audio playback error for node=${node.id}: ${err?.message}`);
+            log.error({ callId: this._callId, err }, `Audio playback error for node=${node.id}`);
             if (!this._stopped) this._playErrorAndHangup();
         });
     }
@@ -173,7 +176,7 @@ class IvrEngine {
     _enterPlay(node) {
         const audioPath = this._audioPathMap.get(node.id);
         if (!audioPath) {
-            console.warn(`[IvrEngine:${this._callId}] No audio for play node ${node.id} — playing error and hanging up`);
+            log.warn({ callId: this._callId }, `No audio for play node ${node.id} — playing error and hanging up`);
             this._playErrorAndHangup();
             return;
         }
@@ -186,11 +189,11 @@ class IvrEngine {
             if (nextEdge) {
                 this._navigateTo(nextEdge.target);
             } else {
-                console.warn(`[IvrEngine:${this._callId}] ivr_play ${node.id} has no outgoing edge`);
+                log.warn({ callId: this._callId }, `ivr_play ${node.id} has no outgoing edge`);
                 this._complete('hung_up');
             }
         }).catch((err) => {
-            console.error(`[IvrEngine:${this._callId}] _enterPlay error for node=${node.id}:`, err?.message);
+            log.error({ callId: this._callId, err }, `_enterPlay error for node=${node.id}`);
             if (!this._stopped) this._playErrorAndHangup();
         });
     }
@@ -228,10 +231,7 @@ class IvrEngine {
             const allHandles = this._edges
                 .filter(e => e.source === node.id)
                 .map(e => `'${e.sourceHandle}'`);
-            console.warn(
-                `[IvrEngine:${this._callId}] Digit '${digitStr}' has no route on node=${node.id} — ignoring. ` +
-                `Available: [${allHandles.join(', ') || 'none'}]`
-            );
+            log.warn({ callId: this._callId }, `Digit '${digitStr}' has no route on node=${node.id} — ignoring. Available: [${allHandles.join(', ') || 'none'}]`);
             this._safeNotify(this._onRouteSelected, {
                 digit,
                 routeMethod: 'none',
@@ -246,7 +246,7 @@ class IvrEngine {
             return;
         }
 
-        console.log(`[IvrEngine:${this._callId}] Digit '${digit}' → node=${targetNodeId} (${routeMethod})`);
+        log.info({ callId: this._callId }, `Digit '${digit}' → node=${targetNodeId} (${routeMethod})`);
         const targetNode = this._nodes.get(targetNodeId);
         this._safeNotify(this._onRouteSelected, {
             digit,
@@ -274,7 +274,7 @@ class IvrEngine {
 
         const GRACE_MS = 300;
         const action = node.data?.noInputAction ?? 'replay';
-        console.warn(`[IvrEngine:${this._callId}] No input timeout on node=${node.id}, action=${action}`);
+        log.warn({ callId: this._callId }, `No input timeout on node=${node.id}, action=${action}`);
 
         this._timer = setTimeout(() => {
             this._timer = null;
@@ -290,7 +290,7 @@ class IvrEngine {
         if (action === 'replay') {
             this._replayCount++;
             if (this._replayCount > 3) {
-                console.warn(`[IvrEngine:${this._callId}] Max replays reached on node ${node.id} — hanging up`);
+                log.warn({ callId: this._callId }, `Max replays reached on node ${node.id} — hanging up`);
                 this._complete('hung_up');
                 return;
             }
@@ -315,7 +315,7 @@ class IvrEngine {
         this._clearTimer();
         this._removeDtmfListener();
 
-        console.log(`[IvrEngine:${this._callId}] Complete — action=${action}`);
+        log.info({ callId: this._callId }, `Complete — action=${action}`);
         EventBus.emit('call:ivr_complete', { callId: this._callId, action, transferData });
     }
 
@@ -329,7 +329,7 @@ class IvrEngine {
         const errorPath = ivrErrorAudioProvider.getPath();
 
         if (!errorPath) {
-            console.warn(`[IvrEngine:${this._callId}] No error audio configured — hanging up immediately`);
+            log.warn({ callId: this._callId }, 'No error audio configured — hanging up immediately');
             this._complete('hung_up');
             return;
         }
@@ -380,7 +380,7 @@ class IvrEngine {
         try {
             handler(payload);
         } catch (err) {
-            console.warn(`[IvrEngine:${this._callId}] Observer callback failed:`, err?.message ?? err);
+            log.warn({ callId: this._callId, err }, 'Observer callback failed');
         }
     }
 }

@@ -22,6 +22,9 @@ import { IvrAudioPlayer } from './IvrAudioPlayer.js';
 import { placeholderTrackFactory } from '../bridge/PlaceholderTrackFactory.js';
 import { resolveStoragePath } from '../../infra/storage/StorageResolver.js';
 import { leakMetrics } from '../../infra/monitoring/leakMetrics.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.playback.QueueAudioCoordinator');
 
 class QueueAudioCoordinator {
     constructor() {
@@ -43,7 +46,7 @@ class QueueAudioCoordinator {
     async startQueueAudio(callId, tenantId, sender, customerPc, audioOverridePath = null, queueId = null) {
         if (this._active.has(callId)) return; // already running
 
-        console.log(`[QueueAudioCoordinator] Starting queue audio for call ${callId}`);
+        log.info({ callId }, 'Starting queue audio');
 
         // Guard against call:terminated firing during the async setup window (DB fetch,
         // storage resolve, ffmpeg decode, replaceTrack). Without this, the session can
@@ -68,21 +71,21 @@ class QueueAudioCoordinator {
             // This also serves as the fallback when no audio file is configured at all.
             interimTrack = await placeholderTrackFactory.createTrack('reconnecting');
             if (!interimTrack) {
-                console.warn(`[QueueAudioCoordinator] Could not create interim tone for call ${callId}`);
+                log.warn({ callId }, 'Could not create interim tone');
                 return;
             }
 
             try {
                 await sender.replaceTrack(interimTrack);
             } catch (err) {
-                console.warn(`[QueueAudioCoordinator] Interim replaceTrack failed for call ${callId}:`, err.message);
+                log.warn({ callId, err }, 'Interim replaceTrack failed');
                 placeholderTrackFactory.releaseGeneratedTrack(interimTrack);
                 interimTrack = null;
                 return;
             }
 
             if (terminated) {
-                console.log(`[QueueAudioCoordinator] Call ${callId} terminated during queue audio setup — aborting`);
+                log.info({ callId }, 'Call terminated during queue audio setup — aborting');
                 placeholderTrackFactory.releaseGeneratedTrack(interimTrack);
                 interimTrack = null;
                 return;
@@ -98,18 +101,18 @@ class QueueAudioCoordinator {
                 try {
                     audioInfo = await IvrRepository.getQueueAudio(queueId, tenantId);
                 } catch (err) {
-                    console.warn(`[QueueAudioCoordinator] getQueueAudio failed for call ${callId}:`, err.message);
+                    log.warn({ callId, err }, 'getQueueAudio failed');
                 }
 
                 if (!audioInfo) {
                     // No configured audio — interim placeholder tone is already playing.
                     // Fall through to register the session so cleanup handlers fire correctly.
-                    console.log(`[QueueAudioCoordinator] No hold audio configured for queue ${queueId ?? 'none'} (tenant ${tenantId}) — using built-in tone`);
+                    log.info({ tenantId }, `No hold audio configured for queue ${queueId ?? 'none'} — using built-in tone`);
                 } else {
                     try {
                         filePath = await resolveStoragePath(audioInfo);
                     } catch (err) {
-                        console.warn(`[QueueAudioCoordinator] Failed to resolve queue audio path for call ${callId}:`, err.message, '— keeping built-in tone');
+                        log.warn({ callId, err }, 'Failed to resolve queue audio path — keeping built-in tone');
                         // filePath stays null — fall through with interim tone
                     }
                 }
@@ -117,20 +120,20 @@ class QueueAudioCoordinator {
 
             // ── STEP 3: Decode and switch to real queue audio (if a file was found) ──
             if (filePath) {
-                console.log(`[QueueAudioCoordinator] Queue audio path for call ${callId}: ${filePath}`);
+                log.info({ callId }, `Queue audio path: ${filePath}`);
 
                 try {
                     pcm = await IvrAudioPlayer.decode(filePath);
-                    console.log(`[QueueAudioCoordinator] Pre-decoded queue audio for call ${callId}: ${pcm.length} samples`);
+                    log.info({ callId }, `Pre-decoded queue audio: ${pcm.length} samples`);
                 } catch (err) {
-                    console.warn(`[QueueAudioCoordinator] Failed to decode queue audio for call ${callId}:`, err.message, '— keeping built-in tone');
+                    log.warn({ callId, err }, 'Failed to decode queue audio — keeping built-in tone');
                     pcm = null;
                 }
 
                 if (pcm) {
                     const { nonstandard } = wrtc;
                     if (!nonstandard?.RTCAudioSource) {
-                        console.warn('[QueueAudioCoordinator] RTCAudioSource unavailable — keeping built-in tone');
+                        log.warn('RTCAudioSource unavailable — keeping built-in tone');
                         pcm = null; // fall through with interim tone
                     } else {
                         const audioSource = new nonstandard.RTCAudioSource();
@@ -144,7 +147,7 @@ class QueueAudioCoordinator {
                             await sender.replaceTrack(queueTrack);
                             replaced = true;
                         } catch (err) {
-                            console.warn(`[QueueAudioCoordinator] Queue audio replaceTrack failed for call ${callId}:`, err.message, '— keeping built-in tone');
+                            log.warn({ callId, err }, 'Queue audio replaceTrack failed — keeping built-in tone');
                             placeholderTrackFactory.releaseGeneratedTrack(queueTrack);
                             queueTrack = null;
                             pcm = null;
@@ -161,7 +164,7 @@ class QueueAudioCoordinator {
 
             // Final terminated check — call may have ended during the decode window.
             if (terminated) {
-                console.log(`[QueueAudioCoordinator] Call ${callId} terminated during queue audio setup — aborting`);
+                log.info({ callId }, 'Call terminated during queue audio setup — aborting');
                 // interimTrack and queueTrack are both released by the finally block.
                 return;
             }
@@ -250,7 +253,7 @@ class QueueAudioCoordinator {
             try {
                 await player.play(pcm);
             } catch (err) {
-                console.warn(`[QueueAudioCoordinator] Playback error for call ${callId}:`, err.message);
+                log.warn({ callId, err }, 'Playback error');
                 break; // on error, stop looping
             }
         }
@@ -260,7 +263,7 @@ class QueueAudioCoordinator {
         const session = this._active.get(callId);
         if (!session) return;
 
-        console.log(`[QueueAudioCoordinator] Stopping queue audio for call ${callId} (${reason})`);
+        log.info({ callId }, `Stopping queue audio (${reason})`);
 
         session.stopRequested = true;
 

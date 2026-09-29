@@ -10,6 +10,9 @@ import TenantRepository from '../../persistence/TenantRepository.js';
 import OutboxRepository from '../../persistence/OutboxRepository.js';
 import { redisBaseService } from '../../infra/redis/RedisBaseService.js';
 import { toConsumerCallView } from '../calls/CallView.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('core.events.ConsumerEventPublisher');
 
 export const API_VERSION = '2026-09-25';
 
@@ -65,7 +68,7 @@ class ConsumerEventPublisher {
             });
             return eventId;
         } catch (err) {
-            console.error(`[ConsumerEvents] Failed to publish ${eventType} for call ${callId}:`, err);
+            log.error({ callId, err }, `Failed to publish ${eventType}`);
             return null;
         }
     }
@@ -89,7 +92,7 @@ class ConsumerEventPublisher {
                 },
             });
         } catch (err) {
-            console.error(`[ConsumerEvents] Failed to publish availability for agent ${agentId}:`, err);
+            log.error({ agentId, err }, 'Failed to publish availability');
             return null;
         }
     }

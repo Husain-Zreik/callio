@@ -5,6 +5,9 @@ import { config } from '../../../config/envConfig.js';
 import RecordingRepository from '../../persistence/RecordingRepository.js';
 import EventBus from '../../core/EventBus.js';
 import { PassThrough } from 'stream';
+import { logger } from '../logging/logger.js';
+
+const log = logger('infra.storage.StreamUploader');
 
 class StreamUploader {
     constructor() {
@@ -43,7 +46,7 @@ class StreamUploader {
         const key = this.generateKey(tenantId, callId);
         const passThrough = new PassThrough();
 
-        console.log(`[StreamUploader] Creating stereo upload stream: ${key}`);
+        log.info(`Creating stereo upload stream: ${key}`);
 
         this.trackMetadata.set(callId, { bytesWritten: 0 });
 
@@ -69,7 +72,7 @@ class StreamUploader {
                     const fileSize = this.trackMetadata.get(callId)?.bytesWritten ?? 0;
                     const completion = this.completionData.get(callId);
 
-                    console.log(`[StreamUploader] ✅ Upload completed: ${key} (${fileSize} bytes)`);
+                    log.info(`Upload completed: ${key} (${fileSize} bytes)`);
                     await RecordingRepository.updateStorageKey(recordingId, key, fileSize);
 
                     // Transition to completed only after S3 confirms the upload and the
@@ -81,11 +84,11 @@ class StreamUploader {
                             recordingId: completion.recordingId,
                             durationSeconds: completion.durationSeconds,
                         });
-                        console.log(`[StreamUploader] ✅ Recording ${completion.recordingId} marked completed`);
+                        log.info(`Recording ${completion.recordingId} marked completed`);
                     }
                 })
                 .catch(async (error) => {
-                    console.error(`[StreamUploader] ❌ Upload failed:`, error.message);
+                    log.error({ err: error }, 'Upload failed');
                     await RecordingRepository.markFailed(recordingId, `upload failed: ${error.message}`);
                 })
                 .finally(() => {
@@ -107,7 +110,7 @@ class StreamUploader {
             };
 
         } catch (error) {
-            console.error(`[StreamUploader] ❌ Failed to create upload stream:`, error.message);
+            log.error({ err: error }, 'Failed to create upload stream');
             throw error;
         }
     }
@@ -120,12 +123,12 @@ class StreamUploader {
         if (!entry) return;
         const { upload } = entry;
 
-        console.log(`[StreamUploader] Aborting upload for call ${callId}`);
+        log.info({ callId }, 'Aborting upload');
         try {
             await upload.abort();
-            console.log(`[StreamUploader] Aborted upload for call ${callId}`);
+            log.info({ callId }, 'Aborted upload');
         } catch (error) {
-            console.error(`[StreamUploader] Failed to abort upload:`, error.message);
+            log.error({ err: error }, 'Failed to abort upload');
         } finally {
             // Always clean up Maps regardless of whether abort succeeded —
             // leaving entries causes the activeUploads Map to grow unboundedly.
@@ -152,20 +155,20 @@ class StreamUploader {
     async cleanup(timeoutMs = 45_000) {
         const count = this.activeUploads.size;
         if (count === 0) {
-            console.log('[StreamUploader] No active uploads — cleanup complete');
+            log.info('No active uploads — cleanup complete');
             return;
         }
 
-        console.log(`[StreamUploader] Waiting for ${count} in-flight upload(s) to complete (max ${timeoutMs / 1000}s)...`);
+        log.info(`Waiting for ${count} in-flight upload(s) to complete (max ${timeoutMs / 1000}s)...`);
 
         const uploadPromises = [...this.activeUploads.entries()].map(([callId, { uploadPromise }]) =>
             uploadPromise
-                .then(() => console.log(`[StreamUploader] ✅ Upload completed on shutdown for call ${callId}`))
-                .catch((err) => console.warn(`[StreamUploader] ⚠️ Upload failed on shutdown for call ${callId}:`, err.message))
+                .then(() => log.info({ callId }, 'Upload completed on shutdown'))
+                .catch((err) => log.warn({ callId, err }, 'Upload failed on shutdown'))
         );
 
         const timer = new Promise((resolve) => setTimeout(() => {
-            console.warn(`[StreamUploader] ⏱️ Upload wait timed out — aborting ${this.activeUploads.size} remaining upload(s)`);
+            log.warn(`Upload wait timed out — aborting ${this.activeUploads.size} remaining upload(s)`);
             resolve('timeout');
         }, timeoutMs));
 
@@ -177,7 +180,7 @@ class StreamUploader {
             }
         }
 
-        console.log('[StreamUploader] ✅ Cleanup complete');
+        log.info('Cleanup complete');
     }
 }
 

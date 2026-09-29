@@ -4,6 +4,9 @@ import { callOwnershipService } from './CallOwnershipService.js';
 import { redisBaseService } from '../redis/RedisBaseService.js';
 import { CallStatus, Channel } from '../../core/constants/CallConstants.js';
 import { config } from '../../../config/envConfig.js';
+import { logger } from '../logging/logger.js';
+
+const log = logger('infra.cluster.RedisCleanupService');
 
 /**
  * Periodically cleans up orphaned call data in Redis.
@@ -22,7 +25,7 @@ class RedisCleanupService {
     async init() {
         await redisBaseService.init();
         await callOwnershipService.init();
-        console.log(`[RedisCleanup] Worker ${this.workerId} initialized`);
+        log.debug(`Worker ${this.workerId} initialized`);
     }
 
     // Acquire distributed lock for cleanup
@@ -31,7 +34,7 @@ class RedisCleanupService {
             const claimed = await redisBaseService.setnx(this.lockKey, this.workerId, this.lockTTL);
             return claimed;
         } catch (error) {
-            console.error('[RedisCleanup] Error acquiring lock:', error.message);
+            log.error({ err: error }, 'Error acquiring lock');
             return false;
         }
     }
@@ -49,7 +52,7 @@ class RedisCleanupService {
             );
             return Number(result) === 1;
         } catch (error) {
-            console.error('[RedisCleanup] Error releasing lock:', error.message);
+            log.error({ err: error }, 'Error releasing lock');
             return false;
         }
     }
@@ -57,7 +60,7 @@ class RedisCleanupService {
     // Start periodic cleanup (runs every 5 minutes)
     start() {
         if (this.isRunning) {
-            console.log('[RedisCleanup] Already running');
+            log.debug('Already running');
             return;
         }
 
@@ -66,7 +69,7 @@ class RedisCleanupService {
         }, 5 * 60 * 1000);
 
         this.isRunning = true;
-        console.log(`[RedisCleanup] Started on worker ${this.workerId} (runs every 5 minutes)`);
+        log.info(`Started on worker ${this.workerId} (runs every 5 minutes)`);
 
         // Run immediately on start
         this.cleanupOrphanedCalls();
@@ -77,7 +80,7 @@ class RedisCleanupService {
         const hasLock = await this.acquireLock();
 
         if (!hasLock) {
-            console.log('[RedisCleanup] Skipping - another worker holds the lock');
+            log.debug('Skipping - another worker holds the lock');
             return;
         }
 
@@ -102,7 +105,7 @@ class RedisCleanupService {
                         // Call doesn't exist - clean up Redis
                         await this.cleanupCall(callId);
                         cleaned++;
-                        console.log(`[RedisCleanup] Removed ownership for non-existent call ${callId}`);
+                        log.info({ callId }, 'Removed ownership for non-existent call');
                         continue;
                     }
 
@@ -110,7 +113,7 @@ class RedisCleanupService {
                     if ([CallStatus.TERMINATED, CallStatus.FAILED, CallStatus.CANCELLED].includes(call.status)) {
                         await this.cleanupCall(callId);
                         cleaned++;
-                        console.log(`[RedisCleanup] Removed ownership for terminated call ${callId} (status: ${call.status})`);
+                        log.info({ callId }, `Removed ownership for terminated call (status: ${call.status})`);
                         continue;
                     }
 
@@ -118,16 +121,16 @@ class RedisCleanupService {
                     kept++;
 
                 } catch (callError) {
-                    console.error(`[RedisCleanup] Error checking call ${callId}:`, callError.message);
+                    log.error({ callId, err: callError }, 'Error checking call');
                 }
             }
 
             if (cleaned > 0) {
-                console.log(`[RedisCleanup] Worker ${this.workerId} cleanup complete - Cleaned: ${cleaned}, Kept: ${kept}`);
+                log.debug(`Worker ${this.workerId} cleanup complete - Cleaned: ${cleaned}, Kept: ${kept}`);
             }
 
         } catch (error) {
-            console.error('[RedisCleanup] Error during cleanup:', error.message);
+            log.error({ err: error }, 'Error during cleanup');
         } finally {
             await this.releaseLock();
         }
@@ -142,10 +145,10 @@ class RedisCleanupService {
         try {
             await redisBaseService.del(callOwnershipService.getKey(callId));
 
-            console.log(`[RedisCleanup] Cleaned up all data for call ${callId}`);
+            log.info({ callId }, 'Cleaned up all data');
             return true;
         } catch (error) {
-            console.error(`[RedisCleanup] Error cleaning up call ${callId}:`, error.message);
+            log.error({ callId, err: error }, 'Error cleaning up call');
             return false;
         }
     }
@@ -156,7 +159,7 @@ class RedisCleanupService {
             clearInterval(this.cleanupInterval);
             this.cleanupInterval = null;
             this.isRunning = false;
-            console.log('[RedisCleanup] Stopped');
+            log.info('Stopped');
         }
     }
 

@@ -1,5 +1,8 @@
 // src/media/webrtc/PeerConfig.js
 import { iceServersFor, isTurnConfigured } from './IceServers.js';
+import { logger } from '../../infra/logging/logger.js';
+
+const log = logger('media.webrtc.PeerConfig');
 
 let warned = false;
 
@@ -7,7 +10,7 @@ export class PeerConfig {
     static getICEServers() {
         if (!isTurnConfigured() && !warned) {
             warned = true;
-            console.warn('[WebRTC] TURN is not configured. Calls may fail behind restrictive NATs/firewalls.');
+            log.warn('TURN is not configured. Calls may fail behind restrictive NATs/firewalls.');
         }
         return iceServersFor('callio').iceServers;
     }
