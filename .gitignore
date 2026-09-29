@@ -8,6 +8,10 @@ node_modules/
 
 # Logs — managed by AppLogService (per-worker dated files under storage/logs/app/, stats under storage/logs/stats/)
 storage/logs/
+*.log
+
+# Local audio assets (storage_provider LOCAL, default STORAGE_LOCAL_ROOT)
+storage/app/
 
 # Firebase service account credentials — real secret, never commit
 storage/firebase/google-services.json
