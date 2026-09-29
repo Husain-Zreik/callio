@@ -3,7 +3,7 @@ auth_enabled: false
 
 server:
   http_listen_address: ${LOKI_LISTEN_ADDRESS:-0.0.0.0}
-  http_listen_port: 3100
+  http_listen_port: ${LOKI_PORT:-3100}
   grpc_listen_address: 127.0.0.1
   grpc_listen_port: 9096
 

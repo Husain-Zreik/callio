@@ -1,0 +1,46 @@
+# The server itself (node exporter :9100, nginx exporter :9113) — installed
+# by install.sh when those exporters run on the host.
+groups:
+  - name: server
+    rules:
+      - alert: ServerExporterDown
+        expr: up{job=~"node|nginx"} == 0
+        for: 3m
+        labels: { severity: warning }
+        annotations:
+          summary: "The {{ $labels.job }} exporter on {{ $labels.instance }} is not answering"
+          description: "Host metrics are missing. systemctl status prometheus-node-exporter / nginx-exporter."
+
+      - alert: ServerDiskAlmostFull
+        expr: |
+          node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|devtmpfs"}
+            / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|devtmpfs"} < 0.10
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.mountpoint }} has less than 10% free"
+          description: "Logs, databases and uploads fail when the disk fills. du -sh /var/* | sort -h"
+
+      - alert: ServerMemoryAlmostFull
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Less than 10% memory available"
+          description: "Processes will be killed or swap. Biggest: ps aux --sort=-rss | head"
+
+      - alert: ServerCpuSaturated
+        expr: 1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.90
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "CPU above 90% for 15 minutes"
+          description: "Everything on the server slows down — calls' audio included."
+
+      - alert: NginxDown
+        expr: nginx_up == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "nginx is not answering its status page"
+          description: "Every site on the server may be down. systemctl status nginx"

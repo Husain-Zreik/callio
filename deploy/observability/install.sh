@@ -4,7 +4,7 @@
 # (.env, alertmanager/alertmanager.yml) are kept.
 #
 #   From the Callio repo (installs the stack + Callio):
-#     sudo deploy/observability/install.sh
+#     sudo bash deploy/observability/install.sh
 #   Another project later (its folder has the same layout as callio/ here):
 #     sudo /opt/observability/install.sh --project /var/www/html/midlr/observability --name midlr
 #   A development machine (Docker Desktop), into <repo>/.observability:
@@ -17,6 +17,11 @@
 #   loki-rules.yml             log alert rules
 #   dashboards/*.json          Grafana dashboards (folder named after --title or the name)
 #   metrics-token-from         path to the project's .env holding METRICS_TOKEN
+#
+# Ports (in /opt/observability/.env): LOKI_PORT 3100, PROMETHEUS_PORT 9090,
+# ALERTMANAGER_PORT 9093, GRAFANA_PORT 3300, ALLOY_PORT 12345. When another
+# program holds one, the next free port is chosen and saved; when an old
+# observability service holds it, the script stops and names it.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,7 +40,7 @@ while [ $# -gt 0 ]; do
         --name) NAME="$2"; shift 2 ;;
         --title) TITLE="$2"; shift 2 ;;
         --grafana-url) GRAFANA_URL="$2"; shift 2 ;;
-        -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1 (see --help)"; exit 2 ;;
     esac
 done
@@ -51,13 +56,18 @@ if [ -z "$PROJECT_DIR" ] && [ -d "$HERE/callio" ]; then
 fi
 if $LOCAL && [ "$TARGET" = /opt/observability ]; then TARGET="$(cd "$HERE/../.." && pwd)/.observability"; fi
 [ -n "$PROJECT_DIR" ] && [ -z "$NAME" ] && NAME="$(basename "$PROJECT_DIR")"
-[ -z "$TITLE" ] && TITLE="$(printf '%s' "${NAME:0:1}" | tr '[:lower:]' '[:upper:]')${NAME:1}"
+[ -n "$NAME" ] && [ -z "$TITLE" ] && TITLE="$(printf '%s' "${NAME:0:1}" | tr '[:lower:]' '[:upper:]')${NAME:1}"
 
 say() { printf '\033[36m[observability]\033[0m %s\n' "$*"; }
+ENVF="$TARGET/.env"
+getenv() { [ -f "$ENVF" ] && grep -E "^$1=" "$ENVF" | tail -1 | cut -d= -f2- || true; }
+setenv() {
+    if grep -qE "^$1=" "$ENVF"; then sed -i "s|^$1=.*|$1=$2|" "$ENVF"; else printf '%s=%s\n' "$1" "$2" >> "$ENVF"; fi
+}
 
 # ── 1. The stack ────────────────────────────────────────────────────────────
 say "stack → $TARGET"
-mkdir -p "$TARGET"/{alloy,loki/rules/fake,prometheus/scrape.d,prometheus/rules.d,prometheus/secrets,alertmanager,grafana/dashboards,nginx,.stack}
+mkdir -p "$TARGET"/{alloy,loki/rules/fake,prometheus/scrape.d,prometheus/rules.d,prometheus/secrets,alertmanager,grafana/dashboards,nginx}
 if $LOCAL; then
     cp "$STACK/docker-compose.local.yml" "$TARGET/docker-compose.yml"
     cp "$STACK/prometheus/prometheus.local.yml" "$TARGET/prometheus/prometheus.yml"
@@ -77,33 +87,86 @@ if [ "$STACK" != "$TARGET/.stack" ]; then
 fi
 
 # .env (kept once written)
-if [ ! -f "$TARGET/.env" ]; then
+if [ ! -f "$ENVF" ]; then
     if $LOCAL; then
         # Alloy mounts the folder holding the projects at /var/www/html.
         ROOT="$(cd "$HERE/../../.." && { pwd -W 2>/dev/null || pwd; })"
-        printf 'PROJECTS_ROOT=%s\n' "$ROOT" > "$TARGET/.env"
+        printf 'PROJECTS_ROOT=%s\n' "$ROOT" > "$ENVF"
     else
         read -rsp "Grafana admin password (you will log in with admin / this): " GP; echo
         [ -n "$GP" ] || { echo "A password is required."; exit 1; }
-        printf 'PROJECTS_ROOT=/var/www/html\nGRAFANA_ADMIN_PASSWORD=%s\nGRAFANA_ROOT_URL=%s\nGRAFANA_SUB_PATH=true\n' "$GP" "$GRAFANA_URL" > "$TARGET/.env"
-        chmod 600 "$TARGET/.env"
+        printf 'PROJECTS_ROOT=/var/www/html\nGRAFANA_ADMIN_PASSWORD=%s\nGRAFANA_ROOT_URL=%s\nGRAFANA_SUB_PATH=true\n' "$GP" "$GRAFANA_URL" > "$ENVF"
+        chmod 600 "$ENVF"
     fi
-    say "wrote $TARGET/.env"
+    say "wrote $ENVF"
 fi
 
-# ── 2. The project ──────────────────────────────────────────────────────────
-if [ -n "$PROJECT_DIR" ]; then
-    say "project $NAME ← $PROJECT_DIR"
-    [ -f "$PROJECT_DIR/$NAME.alloy" ] && cp "$PROJECT_DIR/$NAME.alloy" "$TARGET/alloy/$NAME.alloy"
-    SCRAPE="$PROJECT_DIR/prometheus-scrape.yml"
-    $LOCAL && [ -f "$PROJECT_DIR/prometheus-scrape.local.yml" ] && SCRAPE="$PROJECT_DIR/prometheus-scrape.local.yml"
-    [ -f "$SCRAPE" ] && cp "$SCRAPE" "$TARGET/prometheus/scrape.d/$NAME.yml"
-    [ -f "$PROJECT_DIR/prometheus-alerts.yml" ] && cp "$PROJECT_DIR/prometheus-alerts.yml" "$TARGET/prometheus/rules.d/$NAME.yml"
-    [ -f "$PROJECT_DIR/loki-rules.yml" ] && cp "$PROJECT_DIR/loki-rules.yml" "$TARGET/loki/rules/fake/$NAME.yml"
-    if [ -d "$PROJECT_DIR/dashboards" ]; then
-        rm -rf "$TARGET/grafana/dashboards/$TITLE" && mkdir -p "$TARGET/grafana/dashboards/$TITLE"
-        cp "$PROJECT_DIR"/dashboards/*.json "$TARGET/grafana/dashboards/$TITLE/"
+# ── 2. Ports (server) ───────────────────────────────────────────────────────
+OLD_SERVICES='^(prometheus|loki|promtail|grafana|grafana-server|alertmanager|prometheus-alert)'
+OURS="$(docker ps --filter label=com.docker.compose.project=observability -q | wc -l)"
+port_owner() { ss -ltnpH "sport = :$1" 2>/dev/null | head -1; }
+in_container() { grep -qE 'docker|containerd' "/proc/$1/cgroup" 2>/dev/null; }
+
+if ! $LOCAL; then
+    # The first layout ran from the Callio repo as project "callio-observability".
+    if [ -n "$(docker ps -a --filter label=com.docker.compose.project=callio-observability -q)" ]; then
+        say "removing the earlier callio-observability containers"
+        docker compose -p callio-observability down --remove-orphans >/dev/null 2>&1 || true
     fi
+    BLOCKED=""
+    for spec in LOKI_PORT:3100 PROMETHEUS_PORT:9090 ALERTMANAGER_PORT:9093 GRAFANA_PORT:3300 ALLOY_PORT:12345; do
+        VAR="${spec%%:*}"; PORT="$(getenv "$VAR")"; PORT="${PORT:-${spec##*:}}"
+        line="$(port_owner "$PORT")"
+        [ -z "$line" ] && { setenv "$VAR" "$PORT"; continue; }
+        prog="$(printf '%s' "$line" | sed -n 's/.*users:(("\([^"]*\)",pid=\([0-9]*\).*/\1/p')"
+        pid="$(printf '%s' "$line" | sed -n 's/.*users:(("[^"]*",pid=\([0-9]*\).*/\1/p')"
+        if [ "$OURS" != 0 ] && in_container "$pid"; then setenv "$VAR" "$PORT"; continue; fi   # our running stack
+        if printf '%s' "$prog" | grep -qE "$OLD_SERVICES" && ! in_container "$pid"; then
+            BLOCKED="$BLOCKED\n  :$PORT is held by the old '$prog' service (pid $pid) — stop it: sudo systemctl disable --now $(ps -o unit= -p "$pid" 2>/dev/null || echo "$prog")"
+            continue
+        fi
+        NEXT=$((PORT + 1)); while [ -n "$(port_owner "$NEXT")" ]; do NEXT=$((NEXT + 1)); done
+        say "port $PORT is used by '$prog' (pid $pid) — $VAR=$NEXT instead (saved in $ENVF)"
+        setenv "$VAR" "$NEXT"
+    done
+    if [ -n "$BLOCKED" ]; then printf "Stop the old observability services first:%b\n" "$BLOCKED"; exit 1; fi
+
+    # Files that can't read .env get the chosen ports written in.
+    sed -i "s|127.0.0.1:9093|127.0.0.1:$(getenv ALERTMANAGER_PORT)|" "$TARGET/prometheus/prometheus.yml"
+    sed -i "s|127.0.0.1:3300|127.0.0.1:$(getenv GRAFANA_PORT)|" "$TARGET/nginx/grafana.conf"
+fi
+
+# ── 3. Projects ─────────────────────────────────────────────────────────────
+install_project() {   # dir name title
+    local dir="$1" name="$2" title="$3" scrape
+    say "project $name ← $dir"
+    [ -f "$dir/$name.alloy" ] && cp "$dir/$name.alloy" "$TARGET/alloy/$name.alloy"
+    scrape="$dir/prometheus-scrape.yml"
+    $LOCAL && [ -f "$dir/prometheus-scrape.local.yml" ] && scrape="$dir/prometheus-scrape.local.yml"
+    [ -f "$scrape" ] && cp "$scrape" "$TARGET/prometheus/scrape.d/$name.yml"
+    [ -f "$dir/prometheus-alerts.yml" ] && cp "$dir/prometheus-alerts.yml" "$TARGET/prometheus/rules.d/$name.yml"
+    [ -f "$dir/loki-rules.yml" ] && cp "$dir/loki-rules.yml" "$TARGET/loki/rules/fake/$name.yml"
+    if [ -d "$dir/dashboards" ]; then
+        rm -rf "$TARGET/grafana/dashboards/$title" && mkdir -p "$TARGET/grafana/dashboards/$title"
+        cp "$dir"/dashboards/*.json "$TARGET/grafana/dashboards/$title/"
+    fi
+    return 0
+}
+
+# The server itself, when its exporters run on the host (node :9100, nginx :9113).
+if ! $LOCAL && { [ -n "$(port_owner 9100)" ] || [ -n "$(port_owner 9113)" ]; }; then
+    install_project "$STACK/server" server Server
+    {
+        echo "# The host's exporters (written by install.sh)."
+        echo "scrape_configs:"
+        [ -n "$(port_owner 9100)" ] && printf "  - job_name: node\n    static_configs:\n      - targets: ['127.0.0.1:9100']\n"
+        [ -n "$(port_owner 9113)" ] && printf "  - job_name: nginx\n    static_configs:\n      - targets: ['127.0.0.1:9113']\n"
+        true
+    } > "$TARGET/prometheus/scrape.d/server.yml"
+fi
+
+if [ -n "$PROJECT_DIR" ]; then
+    install_project "$PROJECT_DIR" "$NAME" "$TITLE"
 
     # The project's /metrics token (Callio: METRICS_TOKEN in its .env; created if missing).
     ENV_FILE=""
@@ -122,26 +185,13 @@ if [ -n "$PROJECT_DIR" ]; then
     fi
 fi
 
-# ── 3. Start / refresh ──────────────────────────────────────────────────────
-if ! $LOCAL; then
-    # The first layout ran from the Callio repo as project "callio-observability".
-    if [ -n "$(docker ps -a --filter label=com.docker.compose.project=callio-observability -q)" ]; then
-        say "removing the earlier callio-observability containers"
-        docker compose -p callio-observability down --remove-orphans >/dev/null 2>&1 || true
-    fi
-    # Ports the stack needs must be free (or already ours).
-    OURS="$(docker ps --filter label=com.docker.compose.project=observability -q | wc -l)"
-    BUSY=""
-    for p in 3100 9090 9093 3300 12345; do
-        line="$(ss -ltnpH "sport = :$p" 2>/dev/null | head -1)"
-        if [ -n "$line" ] && [ "$OURS" = 0 ]; then BUSY="$BUSY\n  :$p  $line"; fi
-    done
-    if [ -n "$BUSY" ]; then
-        printf "Ports the stack needs are in use:%b\nStop those first (README.md, 'Old observability services').\n" "$BUSY"
-        exit 1
-    fi
-fi
+# ── 4. Start / refresh ──────────────────────────────────────────────────────
 say "starting"
 (cd "$TARGET" && docker compose up -d --remove-orphans)
 (cd "$TARGET" && docker compose restart alloy prometheus loki >/dev/null)
-say "done — Grafana: $($LOCAL && echo http://localhost:3300 || echo "$GRAFANA_URL")"
+if $LOCAL; then
+    say "done — Grafana: http://localhost:3300"
+else
+    say "done — Grafana: $(getenv GRAFANA_ROOT_URL)  (nginx: include $TARGET/nginx/grafana.conf)"
+    say "ports: loki $(getenv LOKI_PORT), prometheus $(getenv PROMETHEUS_PORT), alertmanager $(getenv ALERTMANAGER_PORT), grafana $(getenv GRAFANA_PORT), alloy $(getenv ALLOY_PORT)"
+fi

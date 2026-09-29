@@ -1,9 +1,10 @@
 # SIP Trunk Integration
 
 Status: **Milestone A** (the gateway) is validated with a real inbound call.
-**Milestone B** (the SIP channel in `src/channels/sip/`) is implemented and
-passes the local end-to-end suite with real audio; the run against the real
-trunk is pending (see the end of this doc).
+**Milestone B** (the SIP channel in `src/channels/sip/`) passes the local
+end-to-end suite with real audio, and a real inbound call from Digitalk has
+reached an agent through it with two-way audio (2026-09-29). Outbound, DTMF
+and a real DID are still open (see the end of this doc).
 
 ## Goal
 
@@ -208,10 +209,15 @@ networking and the public IP.
 
 ### Still to do on the real trunk
 
-1. Move the dev server to the new database, deploy, set the env above,
-   create the Digitalk trunk (with its CIDR) and a SIP channel for the DID.
-2. A real inbound call: two-way audio, hang-up both ways, IVR key presses —
-   and whether Digitalk falls back to in-band DTMF when telephone-event is
-   declined (if it insists on RFC 4733, Callio needs to take DTMF from the
-   events instead: rtpengine can report them).
+Done (2026-09-29): the dev server runs on the new database with the Digitalk
+trunk (id 1) and a SIP channel `sip-digitalk` for `+96171000000`, the number
+Digitalk dials for tests. A real inbound call from Digitalk was answered by
+an agent, with two-way audio.
+
+1. A real DID from Digitalk, and all of its signalling and media source IPs
+   (trunk CIDRs, firewall for 5060 and rtpengine's RTP range).
+2. Hang-up from each side, and IVR key presses: whether Digitalk falls back
+   to in-band DTMF when telephone-event is declined (if it insists on
+   RFC 4733, Callio needs to take DTMF from the events instead: rtpengine can
+   report them).
 3. Outbound needs Digitalk to enable it (the `503` from Milestone A).

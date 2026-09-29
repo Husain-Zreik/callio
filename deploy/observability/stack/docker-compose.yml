@@ -11,7 +11,9 @@
 #
 # Host networking, everything on 127.0.0.1: nothing reachable from outside,
 # the host firewall untouched. Grafana is published through nginx
-# (nginx/grafana.conf).
+# (nginx/grafana.conf). Ports come from .env (install.sh picks free ones when
+# another program holds a default): LOKI_PORT 3100, PROMETHEUS_PORT 9090,
+# ALERTMANAGER_PORT 9093, GRAFANA_PORT 3300, ALLOY_PORT 12345.
 name: observability
 
 services:
@@ -21,7 +23,8 @@ services:
     command: ["-config.file=/etc/loki/loki.yml", "-config.expand-env=true"]
     environment:
       LOKI_LISTEN_ADDRESS: 127.0.0.1
-      ALERTMANAGER_URL: http://127.0.0.1:9093
+      LOKI_PORT: ${LOKI_PORT:-3100}
+      ALERTMANAGER_URL: http://127.0.0.1:${ALERTMANAGER_PORT:-9093}
     volumes:
       - ./loki/loki.yml:/etc/loki/loki.yml:ro
       - ./loki/rules:/etc/loki/rules:ro
@@ -32,9 +35,9 @@ services:
     image: grafana/alloy:v1.7.5
     network_mode: host
     # A directory: every *.alloy file in it is loaded (base + one per project).
-    command: ["run", "/etc/alloy", "--storage.path=/var/lib/alloy/data", "--server.http.listen-addr=127.0.0.1:12345"]
+    command: ["run", "/etc/alloy", "--storage.path=/var/lib/alloy/data", "--server.http.listen-addr=127.0.0.1:${ALLOY_PORT:-12345}"]
     environment:
-      LOKI_PUSH_URL: http://127.0.0.1:3100/loki/api/v1/push
+      LOKI_PUSH_URL: http://127.0.0.1:${LOKI_PORT:-3100}/loki/api/v1/push
     volumes:
       - ./alloy:/etc/alloy:ro
       # Projects' log files, read-only, at the same paths as on the host.
@@ -50,7 +53,7 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=15d
-      - --web.listen-address=127.0.0.1:9090
+      - --web.listen-address=127.0.0.1:${PROMETHEUS_PORT:-9090}
       - --web.enable-lifecycle
     volumes:
       - ./prometheus:/etc/prometheus:ro
@@ -63,7 +66,7 @@ services:
     command:
       - --config.file=/etc/alertmanager/alertmanager.yml
       - --storage.path=/alertmanager
-      - --web.listen-address=127.0.0.1:9093
+      - --web.listen-address=127.0.0.1:${ALERTMANAGER_PORT:-9093}
       - --cluster.listen-address=
     volumes:
       - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
@@ -75,7 +78,7 @@ services:
     network_mode: host
     environment:
       GF_SERVER_HTTP_ADDR: 127.0.0.1
-      GF_SERVER_HTTP_PORT: "3300"
+      GF_SERVER_HTTP_PORT: ${GRAFANA_PORT:-3300}
       # Behind nginx at https://<domain>/grafana/ (nginx/grafana.conf).
       GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://127.0.0.1:3300/}
       GF_SERVER_SERVE_FROM_SUB_PATH: ${GRAFANA_SUB_PATH:-false}
@@ -84,9 +87,9 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       # Logs Drilldown (Explore → Logs): point-and-click log exploration.
       GF_PLUGINS_PREINSTALL: grafana-lokiexplore-app
-      PROMETHEUS_URL: http://127.0.0.1:9090
-      LOKI_URL: http://127.0.0.1:3100
-      ALERTMANAGER_URL: http://127.0.0.1:9093
+      PROMETHEUS_URL: http://127.0.0.1:${PROMETHEUS_PORT:-9090}
+      LOKI_URL: http://127.0.0.1:${LOKI_PORT:-3100}
+      ALERTMANAGER_URL: http://127.0.0.1:${ALERTMANAGER_PORT:-9093}
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
