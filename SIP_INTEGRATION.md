@@ -165,7 +165,7 @@ Callio, per worker (`.env`):
 ```
 DRACHTIO_HOST=127.0.0.1        # unset = SIP disabled
 DRACHTIO_PORT=9022
-DRACHTIO_SECRET=…              # = <admin secret> in drachtio.conf.xml
+DRACHTIO_SECRET=…              # = DRACHTIO_SECRET in deploy/sip-gateway/.env (see below)
 RTPENGINE_HOST=127.0.0.1
 RTPENGINE_NG_PORT=22222
 # Only when rtpengine has several named interfaces (e.g. private + public):
@@ -181,6 +181,17 @@ curl -X PUT …/v1/tenants/{t}/channels/sip-main -d '{ "type": "SIP", "address":
 ```
 
 A trunk without `--cidr` accepts INVITEs from any source — development only.
+
+**The drachtio secret** that counts is `DRACHTIO_SECRET` in
+`deploy/sip-gateway/.env`: the image applies it over `drachtio.conf.xml`'s
+`<admin secret>`. Callio's `.env` must hold the same value; after changing
+it, `docker compose up -d --force-recreate drachtio` and restart Callio. A
+mismatch logs `[SIP] … failed to authenticate to server`.
+
+**Firewall:** SIP scanners probe every public port 5060 within minutes
+(INVITEs to numbers like `+3908…` from unknown IPs). Callio answers them 404
+and the trunk's CIDRs reject unknown sources, but allow 5060 only from the
+carrier's signaling IPs at the firewall too.
 
 ### Testing
 

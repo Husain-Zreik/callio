@@ -7,10 +7,13 @@ import { CustomerAddressType } from '../../core/constants/CallConstants.js';
 const { parseUri } = Srf;
 const PHONE = /^\+?\d{5,15}$/;
 
+// '+961…', '961…' and '00961…' (the international prefix) are the same number.
 export function toE164(value) {
     if (!value) return null;
     const s = String(value).trim();
-    return PHONE.test(s) ? `+${s.replace(/[^\d]/g, '')}` : null;
+    if (!PHONE.test(s) && !/^00\d{5,15}$/.test(s)) return null;
+    const digits = s.replace(/[^\d]/g, '').replace(/^00/, '');
+    return digits.length >= 5 ? `+${digits}` : null;
 }
 
 // The number a call was placed to: the Request-URI user, else the To user.
