@@ -22,7 +22,7 @@
   caught by actually running the container, not a hypothetical one.
 -->
 <drachtio>
-  <admin port="9022" secret="CHANGE_ME">127.0.0.1</admin>
+  <admin port="9022" secret="5f92f108b2e645ad2fd454966ca4913e75e2564cb9909cfd">127.0.0.1</admin>
 
   <sip>
     <contacts>
