@@ -109,6 +109,9 @@ The same signature header is sent on lookup-hook requests.
   `COMPLETED` means the customer talked to an agent (or the IVR ended the call
   itself). A customer who hangs up before any agent answered — including while
   waiting after an IVR — is `CANCELLED` (within 5 s) or `NO_ANSWER`.
+  A live call transferred to an agent who doesn't accept it in time goes back
+  to its queue (inbound) — it keeps ringing agents, no event — or ends as
+  `TIMEOUT` / `SYSTEM` (outbound calls, calls without a queue).
 - `terminatedBy`: `AGENT`, `CUSTOMER`, `PROVIDER`, `SYSTEM`.
 - `customer.addressType`: `E164`, `WHATSAPP_USER` (a WhatsApp user reachable
   without a phone number), `SIP_URI`.

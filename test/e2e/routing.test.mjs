@@ -167,9 +167,33 @@ try {
     });
     check('an agent not on the call cannot transfer it', Boolean(outsider), outsider?.message);
 
+    // A transfer the target never accepts comes back through the queue.
     await setAvailable(a2);
+    const answeredBefore = (await callRow(row3.id)).answered_at;
+    const seenByA1 = a1.incoming.length;   // only offers made after the transfer count
     a1.socket.emit('call:transfer', { callId: row3.id, agentId: id['agent-2'] });
-    const xfer = await nextIncoming(a2, row3.id, 10000, (p) => p.assignmentType === 'TRANSFERRED');
+    await nextIncoming(a2, row3.id, 10000, (p) => p.assignmentType === 'TRANSFERRED');
+    const withdrawn = waitFor(() => a2.events.find((e) => e.event === 'call:offer_withdrawn' && String(e.payload?.callId) === String(row3.id)),
+        15000, 'transfer withdrawn from agent-2').catch(() => null);
+    const back = await waitFor(() => a1.incoming.slice(seenByA1).find((p) => String(p.callId) === String(row3.id)), 15000, 'call offered back to agent-1');
+    const rowBack = await callRow(row3.id);
+    const offeredToA1 = back.agentId === id['agent-1'] || (back.offeredAgentIds ?? []).includes(id['agent-1']);
+    check('an unaccepted transfer goes back to the queue and is offered again', offeredToA1 && rowBack.status === 'RINGING',
+        `${rowBack.status} agentId=${back.agentId} offered=${back.offeredAgentIds}`);
+    await accept(a1, back, 880);
+    await waitFor(async () => { const r = await callRow(row3.id); return r.status === 'IN_PROGRESS' && r.state === 'ACTIVE'; }, 15000, 'call answered again');
+    const cust3r = await c3.customer.received;
+    await hear(cust3r, 3000, 3000);
+    const rowAgain = await callRow(row3.id);
+    check('after taking it back, the customer hears the agent again and the answer time is kept',
+        cust3r.dominant() === 880 && String(rowAgain.answered_at) === String(answeredBefore), `tone=${cust3r.dominant()}`);
+    check('the target who ignored the transfer is told it was withdrawn', Boolean(await withdrawn));
+
+    await setAvailable(a2);
+    const seenByA2 = a2.incoming.length;
+    a1.socket.emit('call:transfer', { callId: row3.id, agentId: id['agent-2'] });
+    const xfer = await waitFor(() => a2.incoming.slice(seenByA2).find((p) => String(p.callId) === String(row3.id) && p.assignmentType === 'TRANSFERRED'),
+        10000, 'transfer offered to agent-2');
     check('the target agent is offered the transferred call', xfer.transferredFrom?.id === id['agent-1']);
     await accept(a2, xfer, 660);
     await waitFor(async () => (await callRow(row3.id)).agent_id === id['agent-2'], 10000, 'call moved to agent-2');
@@ -177,8 +201,9 @@ try {
     await hear(cust3b, 3000, 3000);
     check('after the transfer the customer hears the new agent', cust3b.dominant() === 660, `tone=${cust3b.dominant()}`);
     const logs = await q('SELECT * FROM call_transfer_logs WHERE call_id = ?', [row3.id]);
-    check('the transfer is logged and the previous agent released', logs.length === 1 && logs[0].from_agent_id === id['agent-1']
-        && logs[0].to_agent_id === id['agent-2'] && (await availability('agent-1')) === 'AVAILABLE');
+    const last = logs[logs.length - 1];
+    check('the transfer is logged and the previous agent released', logs.length === 2 && last?.from_agent_id === id['agent-1']
+        && last?.to_agent_id === id['agent-2'] && (await availability('agent-1')) === 'AVAILABLE');
     a1.peer?.close(); a1.peer = null;
     await endByAgent(a2, row3.id);
 

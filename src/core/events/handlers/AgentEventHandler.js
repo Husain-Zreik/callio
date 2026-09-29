@@ -95,6 +95,10 @@ export class AgentEventHandler {
                         tenantId, userId, availability: AgentAvailability.ON_CALL, updatedAt: new Date().toISOString(),
                     });
                 }
+            } else if (!await CallRepository.claimHandover(callId, userId)) {
+                // A transfer accept: only the agent it was handed to, and only
+                // while it is still theirs (it goes back to the queue on timeout).
+                throw new Error('Call assignment conflict. The transfer is no longer yours.');
             }
 
             iceCoordinator.setConnectionInfo(callId, ConnectionType.AGENT, socketId);
@@ -176,7 +180,10 @@ export class AgentEventHandler {
                     throw new Error(`Call status changed to ${nowStatus} before accept could complete`);
                 }
                 await CallRepository.updateState(callId, 'ACTIVE');
-                await CallRepository.updateTimestamp(callId, 'answered_at', new Date());
+                // A handover that came back to the queue keeps the time the customer
+                // was first answered; a fresh call (or one the IVR held) is answered now.
+                const returnedHandover = callRecord?.answered_at && !isIvrTransferred;
+                if (!returnedHandover) await CallRepository.updateTimestamp(callId, 'answered_at', new Date());
             }
 
             const result = peerRegistry.getConnectionData(callId, ConnectionType.AGENT);

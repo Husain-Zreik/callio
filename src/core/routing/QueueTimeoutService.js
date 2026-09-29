@@ -5,6 +5,10 @@
 //                         rings everyone at once and has no per-agent timeout)
 //   max_wait_seconds      a call unanswered this long after entering the queue
 //                         moves to overflow_queue_id, or ends as TIMEOUT
+// and on live calls being handed over:
+//   CALL_TRANSFER_TIMEOUT_SECONDS  a transfer the target doesn't accept in
+//                         time goes back to the call's queue (inbound) and is
+//                         offered again; outbound / no queue: ends as TIMEOUT
 // State lives in the calls row (offered_at, queued_at, overflow_count), so any
 // worker can do this after a restart. One worker scans at a time (Redis lock).
 import { redisBaseService } from '../../infra/redis/RedisBaseService.js';
@@ -12,7 +16,7 @@ import CallRepository from '../../persistence/CallRepository.js';
 import { agentAssignmentCoordinator } from './AgentAssignmentCoordinator.js';
 import { queueRouter } from './QueueRouter.js';
 import { callTerminator } from '../calls/CallTerminator.js';
-import { TerminationReason, TerminatedBy, CallStatus } from '../constants/CallConstants.js';
+import { TerminationReason, TerminatedBy, CallStatus, CallDirection } from '../constants/CallConstants.js';
 import { config } from '../../../config/envConfig.js';
 import { logger } from '../../infra/logging/logger.js';
 
@@ -52,6 +56,7 @@ class QueueTimeoutService {
             if (!locked) return;
             await this.#expireOffers();
             await this.#expireWaits();
+            await this.#expireHandovers();
         } catch (err) {
             log.error({ err }, 'Scan failed');
         } finally {
@@ -85,6 +90,39 @@ class QueueTimeoutService {
                 log.error({ callId: call.id, err }, 'Max-wait handling failed');
             }
         }
+    }
+
+    async #expireHandovers() {
+        for (const call of await CallRepository.findExpiredHandovers(config.call.transferTimeoutSeconds)) {
+            try {
+                await this.#handoverExpired(call);
+            } catch (err) {
+                log.error({ callId: call.id, err }, 'Unanswered-transfer handling failed');
+            }
+        }
+    }
+
+    // The target never accepted the transfer. Inbound: back to the queue, where
+    // the usual offer flow (next agent, offer history, auto-offline, max wait,
+    // overflow) takes over. Otherwise the call can't wait anywhere: end it.
+    async #handoverExpired(call) {
+        const agentId = call.agent_id;
+        if (call.direction === CallDirection.INBOUND && call.queue_id) {
+            if (!await CallRepository.returnHandoverToQueue(call.id, agentId, call.offered_at)) return;
+            log.info({ callId: call.id, agentId, queueId: call.queue_id }, 'Transfer not accepted in time — back to the queue');
+            await agentAssignmentCoordinator.passOffer({ ...call, status: CallStatus.RINGING }, agentId, 'missed');
+            return;
+        }
+        if (!await CallRepository.expireHandover(call.id, agentId, call.offered_at)) return;
+        log.info({ callId: call.id, agentId }, 'Transfer not accepted in time — ending the call');
+        await callTerminator.end(call, {
+            reason: TerminationReason.TIMEOUT,
+            terminatedBy: TerminatedBy.SYSTEM,
+            onlyIfStatus: CallStatus.IN_PROGRESS,
+            provider: 'terminate',
+            source: 'transfer_unanswered',
+            log: { transfer_timeout_seconds: config.call.transferTimeoutSeconds },
+        });
     }
 
     async #waitExpired(call) {

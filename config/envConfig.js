@@ -183,6 +183,9 @@ export const config = {
     },
     call: {
         recordingStorageLimitGb: parseInt(process.env.RECORDING_STORAGE_LIMIT_GB || "1", 10) || 1,
+        // A live call transferred to an agent who doesn't accept within this
+        // goes back to its queue (inbound) or ends (outbound).
+        transferTimeoutSeconds: parseInt(process.env.CALL_TRANSFER_TIMEOUT_SECONDS || "30", 10) || 30,
         workers: {
             encodingWorkerCount: parseInt(process.env.ENCODING_WORKER_COUNT) || 2,
             maxCallsPerWorker: parseInt(process.env.MAX_CALLS_PER_WORKER) || 10,

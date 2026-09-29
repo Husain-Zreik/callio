@@ -465,6 +465,66 @@ class CallRepository {
         return result.affectedRows > 0;
     }
 
+    // ── Handovers (a live call transferred to an agent who must accept) ──────
+    // offered_at on an IN_PROGRESS call = a handover waiting for the target to
+    // accept; QueueTimeoutService expires it after CALL_TRANSFER_TIMEOUT_SECONDS.
+
+    async markHandoverOffered(callId, agentId) {
+        await connection.execute(
+            `UPDATE calls SET offered_at = NOW(), updated_at = NOW()
+             WHERE id = ? AND agent_id = ? AND status = 'IN_PROGRESS'`,
+            [callId, agentId]
+        );
+    }
+
+    // The target accepting. False if the handover is no longer theirs (it
+    // timed out and moved on).
+    async claimHandover(callId, agentId) {
+        const [result] = await connection.execute(
+            `UPDATE calls SET offered_at = NULL, updated_at = NOW()
+             WHERE id = ? AND agent_id = ? AND status = 'IN_PROGRESS'`,
+            [callId, agentId]
+        );
+        return result.affectedRows > 0;
+    }
+
+    async findExpiredHandovers(timeoutSeconds, limit = 50) {
+        const [rows] = await connection.execute(
+            `SELECT * FROM calls
+             WHERE status = 'IN_PROGRESS' AND agent_id IS NOT NULL AND offered_at IS NOT NULL
+               AND offered_at <= DATE_SUB(NOW(), INTERVAL ? SECOND)
+             ORDER BY offered_at ASC
+             LIMIT ${Math.max(1, Math.min(Number(limit) || 50, 200))}`,
+            [Math.max(1, Number(timeoutSeconds) || 30)]
+        );
+        return rows;
+    }
+
+    // An unaccepted handover goes back to its queue as a waiting call. The
+    // offer (agent_id, offered_at) stays so the usual withdraw → next agent
+    // path takes it from here. Only if nobody accepted it since the scan read it.
+    async returnHandoverToQueue(callId, agentId, offeredAt) {
+        const [result] = await connection.execute(
+            `UPDATE calls SET status = 'RINGING', state = 'QUEUE', queued_at = NOW(), updated_at = NOW()
+             WHERE id = ? AND agent_id = ? AND status = 'IN_PROGRESS'
+               AND offered_at IS NOT NULL AND offered_at <= ?`,
+            [callId, agentId, offeredAt]
+        );
+        return result.affectedRows > 0;
+    }
+
+    // An unaccepted handover that can't go back to a queue (outbound, no
+    // queue): take it off the target before ending the call.
+    async expireHandover(callId, agentId, offeredAt) {
+        const [result] = await connection.execute(
+            `UPDATE calls SET offered_at = NULL, updated_at = NOW()
+             WHERE id = ? AND agent_id = ? AND status = 'IN_PROGRESS'
+               AND offered_at IS NOT NULL AND offered_at <= ?`,
+            [callId, agentId, offeredAt]
+        );
+        return result.affectedRows > 0;
+    }
+
     async updateCallAgentIfCurrent(callId, oldAgentId, newAgentId) {
         const [result] = await connection.execute(
             `UPDATE calls

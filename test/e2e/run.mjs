@@ -54,6 +54,7 @@ const env = {
     FIREBASE_SERVICE_ACCOUNT_PATH: join(work, 'no-firebase.json'),
     // Each suite's Callio output (pretty, debug) lands in <work>/<suite>.callio.log.
     LOG_LEVEL: process.env.TEST_LOG_LEVEL || 'debug', LOG_STDOUT: 'true', LOG_FORMAT: 'pretty',
+    CALL_TRANSFER_TIMEOUT_SECONDS: '6',
     ...sipEnv,
 };
 

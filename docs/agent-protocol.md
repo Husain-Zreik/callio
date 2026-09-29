@@ -112,7 +112,7 @@ acting. A socket receives:
 | Event | Payload |
 |---|---|
 | `call:incoming` | A call offered to this agent (see *Call payload*). `assignmentType`: `DIRECT` (claimed for you), `QUEUED` (from a queue; with `agentId: null` it's a `RING_ALL` offer — first accept wins), `TRANSFERRED`. Carries `sdpOffer`. |
-| `call:offer_withdrawn` | `{ callId, reason }` — stop ringing for this call. `reason`: `declined` (you declined, possibly on another device), `taken` (another member answered a `RING_ALL` call), `timeout` (the queue's ring timeout passed it to someone else), `overflow` (it waited too long and moved to another queue). |
+| `call:offer_withdrawn` | `{ callId, reason }` — stop ringing for this call. `reason`: `declined` (you declined, possibly on another device), `taken` (another member answered a `RING_ALL` call), `timeout` (the queue's ring timeout passed it to someone else, or a live call transferred to you wasn't accepted within `CALL_TRANSFER_TIMEOUT_SECONDS` — it went back to its queue), `overflow` (it waited too long and moved to another queue). |
 | `call:started` | Reply to `call:start`: the call plus `sdpAnswer`. |
 | `call:handled` | `{ callId, userId, agentName, deviceId, action: 'accepted'\|'rejected' }` — someone answered/declined; other agents should stop ringing. |
 | `call:status` | `{ callId, status, userId, ringingAt?, answeredAt? }` — provider status changes (`RINGING`, `ACCEPTED`, ...). |

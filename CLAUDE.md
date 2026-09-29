@@ -56,7 +56,7 @@ There is no unit-test suite and no lint/format config. **Verify behaviour change
 
 - `core/` — the call engine; no HTTP/socket/provider imports expected here (a few existing handlers still import `realtime/managers/RoomManager` — don't add more).
   - `calls/` — `CallTerminator` (the one way a call ends: guarded commit, then call:terminated → agent release → provider → media → log, in that order; every end path goes through it), `CallView` (the one call shape for agents and consumers), `IncomingCallPayload`, `CallAccess`, `CallQueryService`, `CallCleanupService` (stuck calls, expired outbound intents, stale recordings), `CallLifecycleLogger`, `CustomerLookup`.
-  - `routing/` — `QueueRouter` (the only place that interprets `queues.strategy`), `CallAgentAssignmentService` (per-queue Redis lock, round-robin order), `AgentAssignmentCoordinator` (single entry point for availability changes, releasing agents, draining queues, transfers into queues, passing an offer on, overflow), `QueueTimeoutService` (enforces `ring_timeout_seconds` / `max_wait_seconds` / overflow from `calls.offered_at` / `queued_at`), `OfferHistory` (who declined or missed a waiting call), `AutoOfflinePolicy`.
+  - `routing/` — `QueueRouter` (the only place that interprets `queues.strategy`), `CallAgentAssignmentService` (per-queue Redis lock, round-robin order), `AgentAssignmentCoordinator` (single entry point for availability changes, releasing agents, draining queues, transfers into queues, passing an offer on, overflow), `QueueTimeoutService` (enforces `ring_timeout_seconds` / `max_wait_seconds` / overflow from `calls.offered_at` / `queued_at`, and the transfer timeout: an `IN_PROGRESS` call with `offered_at` is a handover waiting for its target), `OfferHistory` (who declined or missed a waiting call), `AutoOfflinePolicy`.
   - `events/` — `CallEventHandler` routes Redis-delivered call events to handlers (`handlers/`: initiation/outbound, agent accept/reconnect, connection, customer, termination, rejection, transfer, monitor); `ConsumerEventPublisher` bridges in-process events to the outbox.
   - `ivr/` — `IvrEngine` (flow graph), `IvrCoordinator`, `IvrTransferHandler`, `IvrTerminationHandler`.
   - `agents/PresenceService` — which agents have live sockets (per-worker bookkeeping).
@@ -117,7 +117,7 @@ All of it is in `src/infra/logging/`; **`policy.js` is the one place for the rul
 - WhatsApp and SIP, inbound and outbound; queues (`RING_ALL`/`ROUND_ROBIN`/`PRIORITY`) with ring timeout / max wait / overflow; IVR, transfer, monitoring, recording, push, the Management API and consumer events are implemented and covered by `test/e2e` (SIP against the local gateway and a fake carrier).
 - Deployed dev environment: `callio.pcg-ms.com` (nginx → PM2), on Callio's own database. Real inbound calls verified there: WhatsApp, and SIP from the carrier (Digitalk) through the SIP channel to an agent with two-way audio. Outbound SIP, carrier DTMF and a real DID are still open (SIP_INTEGRATION.md, last section).
 - `sdk/agent-js` — the JS agent SDK (browser + Node), tested by `test/e2e/sdk.test.mjs`; `examples/agent.html` is a working agent page. React bindings and the Dart SDK are next.
-- Not yet: per-consumer push credentials (push uses platform credentials from env). A live call transferred to an agent who doesn't answer has no timeout yet (queue timers cover calls that are waiting, not answered calls being handed over).
+- Not yet: per-consumer push credentials (push uses platform credentials from env).
 
 ## History
 
