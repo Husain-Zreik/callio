@@ -11,3 +11,11 @@ datasources:
     type: loki
     access: proxy
     url: ${LOKI_URL}
+  - name: Alertmanager
+    uid: alertmanager
+    type: alertmanager
+    access: proxy
+    url: ${ALERTMANAGER_URL}
+    jsonData:
+      implementation: prometheus
+      handleGrafanaManagedAlerts: false

@@ -1,17 +1,15 @@
 // src/infra/monitoring/WorkerStatsService.js
 //
-// Writes per-worker resource metrics to a dedicated daily log file:
-//   storage/logs/stats/worker-{id}-{YYYY-MM-DD}.log
+// Worker resource and leak diagnostics, in one snapshot():
+//   - /health (healthController) returns it;
+//   - every SNAPSHOT_INTERVAL_MS it is logged as one record (component
+//     infra.monitoring.WorkerStatsService, "Worker snapshot"), and on shutdown
+//     and crashes too (logSnapshot) — same files, npm run logs and Loki as the
+//     rest of the logs;
+//   - its leak counters are Prometheus gauges (metrics.js, collected at scrape).
 //
-// Each line is a human-readable summary followed by the raw JSON on the same
-// line, separated by "  ||  ", so you can read it with the naked eye and also
-// grep / jq it programmatically.
-//
-// Files rotate at midnight automatically (new file = new date).
-// Files older than RETENTION_DAYS are deleted on startup.
-
+// Read the snapshot's comments below for what healthy values look like.
 import fs from 'fs';
-import path from 'path';
 import v8 from 'v8';
 import { monitorEventLoopDelay } from 'perf_hooks';
 import { peerRegistry } from '../../media/webrtc/PeerRegistry.js';
@@ -24,14 +22,9 @@ import { logger } from '../logging/logger.js';
 
 const log = logger('infra.monitoring.WorkerStatsService');
 
-const INTERVAL_MS = 30_000;  // write a line every 30 s
-const RETENTION_DAYS = 7;       // keep the last 7 days of stat files
-
-// Resolve log directory relative to the project root (two levels above src/)
-const LOG_DIR = path.resolve(
-    new URL('../../../storage/logs/stats', import.meta.url).pathname
-        .replace(/^\/([A-Z]:)/, '$1')   // fix Windows paths like /C:/...
-);
+const SNAPSHOT_INTERVAL_MS = 5 * 60_000;   // one snapshot record every 5 minutes
+// Snapshots taken because something went wrong are logged as errors.
+const FAILURE_REASONS = new Set(['uncaught_exception', 'unhandled_rejection']);
 
 class WorkerStatsService {
     constructor() {
@@ -51,25 +44,14 @@ class WorkerStatsService {
         // the event loop.
         this._loopMonitor = monitorEventLoopDelay({ resolution: 10 });
         this._loopMonitor.enable();
-
-        // File-writer state
-        this._stream = null;   // current write stream
-        this._streamDay = null;   // YYYY-MM-DD the stream was opened for
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
 
     start() {
         if (this._timer) return;
-
-        this._ensureLogDir();
-        this._pruneOldFiles();
-        this._openStream();
-
-        this._timer = setInterval(() => this._write('periodic'), INTERVAL_MS);
-        if (this._timer.unref) this._timer.unref();
-
-        log.info({ dir: LOG_DIR, intervalSeconds: INTERVAL_MS / 1000, retentionDays: RETENTION_DAYS }, 'Writing worker stats');
+        this._timer = setInterval(() => this.logSnapshot('periodic'), SNAPSHOT_INTERVAL_MS);
+        this._timer.unref?.();
     }
 
     stop() {
@@ -78,7 +60,6 @@ class WorkerStatsService {
             this._timer = null;
         }
         this._loopMonitor.disable();
-        this._closeStream();
     }
 
     /**
@@ -163,10 +144,10 @@ class WorkerStatsService {
                 },
                 eventBusListeners: this._eventBusListeners(),
             },
-            // ── Event loop delay (main thread only, last 30 s window) ───────────
+            // ── Event loop delay (main thread only, since the previous snapshot) ──
             // Measures how long the main thread event loop was blocked between
             // iterations.  The histogram is reset after every snapshot so each
-            // line represents the worst blocking in that 30 s period, not lifetime.
+            // snapshot shows the worst blocking since the previous one, not lifetime.
             //
             // Healthy baseline (idle):          p50 ≈ 0–2 ms,  p99 ≈ 2–5 ms
             // Under concurrent recordings:
@@ -176,6 +157,23 @@ class WorkerStatsService {
             // Values > 20 ms on p99 mean the event loop is saturated and WebSocket
             // events / ICE candidates are being delayed by that amount.
             eventLoopDelay: this._eventLoopDelay(),
+        };
+    }
+
+    /**
+     * The leak counters alone, without side effects (snapshot() resets the CPU
+     * sample) — read by Prometheus at every scrape (metrics.js).
+     */
+    diagnostics() {
+        const heapStats = v8.getHeapStatistics();
+        return {
+            handles: this._handles(),
+            leaks: { ...leakMetrics },
+            retained: callStateCensus(),
+            threads: this._threadCount(),
+            detachedContexts: heapStats.number_of_detached_contexts,
+            eventBusListeners: this._eventBusListeners(),
+            activeRecordings: this._activeRecordings().length,
         };
     }
 
@@ -198,127 +196,18 @@ class WorkerStatsService {
     }
 
     /**
-     * Write a snapshot with the given reason tag.
-     * Safe to call from crash handlers before process.exit().
+     * Log a snapshot tagged with why it was taken ('periodic', 'graceful_shutdown',
+     * 'uncaught_exception', …). Synchronous — safe in crash handlers.
      */
     logSnapshot(reason = 'periodic') {
-        this._write(reason);
-    }
-
-    // ── File management ───────────────────────────────────────────────────────
-
-    _ensureLogDir() {
-        if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
-    }
-
-    _today() {
-        return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-    }
-
-    _filePath(day) {
-        return path.join(LOG_DIR, `worker-${this._workerId}-${day}.log`);
-    }
-
-    _openStream() {
-        const day = this._today();
-        if (this._streamDay === day && this._stream) return; // already correct
-
-        this._closeStream();
-        this._streamDay = day;
-        this._stream = fs.createWriteStream(this._filePath(day), { flags: 'a' });
-        this._stream.on('error', (err) =>
-            log.error({ err }, 'Log write error')
-        );
-    }
-
-    _closeStream() {
-        if (this._stream) {
-            try { this._stream.end(); } catch { /* best effort */ }
-            this._stream = null;
-            this._streamDay = null;
-        }
-    }
-
-    _pruneOldFiles() {
         try {
-            const cutoff = Date.now() - RETENTION_DAYS * 86_400_000;
-            const prefix = `worker-${this._workerId}-`;
-            for (const name of fs.readdirSync(LOG_DIR)) {
-                if (!name.startsWith(prefix) || !name.endsWith('.log')) continue;
-                const full = path.join(LOG_DIR, name);
-                if (fs.statSync(full).mtimeMs < cutoff) {
-                    fs.unlinkSync(full);
-                    log.info(`Pruned old stats file: ${name}`);
-                }
-            }
-        } catch { /* non-fatal */ }
-    }
-
-    // ── Core write ────────────────────────────────────────────────────────────
-
-    _write(reason) {
-        try {
-            // Rotate file if the date rolled over
-            this._openStream();
-
-            const s = this.snapshot();
-            // Reset the histogram so the NEXT snapshot shows only the next 30 s window,
-            // not the lifetime maximum.  Called after snapshot() so the current line
-            // captures the worst lag in the period just measured.
+            const { workerId, pid, ...snapshot } = this.snapshot();   // every record already names the worker
+            // The event-loop histogram restarts so each snapshot covers its own period.
             this._loopMonitor.reset();
-
-            const ts = new Date().toISOString();
-            const time = ts.slice(11, 19); // HH:MM:SS
-
-            // ── Human-readable line ───────────────────────────────────────────
-            const callList = s.activeCalls.callIds.join(', ') || 'none';
-            const recList = s.activeRecordings.callIds.join(', ') || 'none';
-            const el = s.eventLoopDelay;
-            const readable =
-                `[${ts.slice(0, 10)} ${time}]` +
-                `  ${this._padReason(reason)}` +
-                `  CPU ${String(s.cpu.totalPercent).padStart(5)}%` +
-                `  EL p50 ${String(el.p50).padStart(4)}ms  p99 ${String(el.p99).padStart(4)}ms  max ${String(el.max).padStart(4)}ms` +
-                `  Heap ${String(s.memory.heapUsedMB).padStart(6)}/${s.memory.heapTotalMB} MB` +
-                `  RSS ${String(s.memory.rssMB).padStart(6)} MB` +
-                `  Ext ${String(s.memory.externalMB).padStart(5)} MB` +
-                `  AB ${String(s.memory.arrayBuffersMB).padStart(5)} MB` +
-                `  Timers ${String(s.handles.timers).padStart(4)}` +
-                `  Threads ${String(s.process.threads ?? '?').padStart(4)}` +
-                `  DetCtx ${String(s.process.v8.detachedCtx).padStart(3)}` +
-                `  EvtLis ${String(s.process.eventBusListeners).padStart(4)}` +
-                `  PHlive ${String(s.leaks.placeholderLive).padStart(4)}` +
-                `  PHtrk ${String(s.retained.breakdown.placeholderTracks).padStart(3)}` +
-                `  SrcLive ${String(s.leaks.audioSourceLive).padStart(4)}` +
-                `  SnkLive ${String(s.leaks.audioSinkLive).padStart(4)}` +
-                `  Retained ${String(s.retained.total).padStart(3)}` +
-                `  Calls(${s.activeCalls.count}): [${callList}]` +
-                `  Rec(${s.activeRecordings.count}): [${recList}]`;
-
-            // ── Raw JSON for grep/jq ──────────────────────────────────────────
-            const json = JSON.stringify({ reason, ...s, ts });
-
-            const line = `${readable}  ||  ${json}\n`;
-
-            if (this._stream) {
-                this._stream.write(line);
-            } else {
-                // Fallback: write to stdout if file is unavailable
-                process.stdout.write(line);
-            }
+            log[FAILURE_REASONS.has(reason) ? 'error' : 'info']({ reason, ...snapshot }, 'Worker snapshot');
         } catch (err) {
-            log.error({ err }, 'Write failed');
+            log.error({ err }, 'Worker snapshot failed');
         }
-    }
-
-    _padReason(reason) {
-        const labels = {
-            periodic: 'PERIODIC  ',
-            graceful_shutdown: 'SHUTDOWN  ',
-            uncaught_exception: 'CRASH !!!  ',
-            unhandled_rejection: 'REJECTION  ',
-        };
-        return labels[reason] ?? reason.toUpperCase().padEnd(10);
     }
 
     // ── Metrics helpers ───────────────────────────────────────────────────────

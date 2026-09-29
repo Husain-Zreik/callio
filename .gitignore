@@ -6,7 +6,7 @@ node_modules/
 .env.*
 !.env.example
 
-# Logs — src/infra/logging (per-worker daily JSON files under storage/logs/app/, stats under storage/logs/stats/)
+# Logs — src/infra/logging (per-worker daily JSON files under storage/logs/app/)
 storage/logs/
 *.log
 

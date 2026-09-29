@@ -103,3 +103,5 @@ export const COMPONENTS = Object.freeze({
 // Where `npm run log-level` stores the override and announces changes (Redis).
 export const LOG_LEVELS_KEY = 'callio:log-levels';
 export const LOG_LEVELS_CHANNEL = 'callio:log-levels';
+// In-process: the main thread hands its levels to worker threads (BroadcastChannel).
+export const THREAD_LEVELS_CHANNEL = 'callio:log-levels:threads';

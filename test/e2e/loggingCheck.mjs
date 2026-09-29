@@ -67,5 +67,19 @@ check('throttle lets the first through and counts the rest', seen[0] === 0 && se
         `drops=${JSON.stringify(drops)} bytes=${written.length}`);
 }
 
+{
+    const { spawnSync } = await import('child_process');
+    const { mkdtempSync } = await import('fs');
+    const { tmpdir } = await import('os');
+    const { join } = await import('path');
+    const run = spawnSync(process.execPath, [new URL('./loggingThreadCheck.mjs', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')], {
+        encoding: 'utf8', env: { ...process.env, LOG_DIR: mkdtempSync(join(tmpdir(), 'callio-logthreads-')) },
+    });
+    let t = {};
+    try { t = JSON.parse(run.stdout); } catch { /* reported below */ }
+    check('worker threads follow level changes made in the main thread', t.before === 'info' && t.afterChange === 'trace', run.stdout || run.stderr);
+    check('a worker thread started later gets the current levels', t.lateLevel === 'trace', run.stdout || run.stderr);
+}
+
 process.stdout.write(JSON.stringify(results));
 process.exit(0);

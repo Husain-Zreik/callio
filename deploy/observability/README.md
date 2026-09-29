@@ -7,8 +7,9 @@ the tools that collect and show them:
 |---|---|---|
 | **Grafana Alloy** | tails `storage/logs/app/worker-*/*.log` and ships each record to Loki | 127.0.0.1:12345 (status UI) |
 | **Loki** | stores and indexes the logs (14 days) | 127.0.0.1:3100 |
-| **Prometheus** | scrapes each worker's `/metrics` every 15 s (15 days) | 127.0.0.1:9090 |
-| **Grafana** | dashboards and log search; the *Callio — overview* dashboard is provisioned | 127.0.0.1:3300 |
+| **Prometheus** | scrapes each worker's `/metrics` every 15 s (15 days), evaluates the metric alerts | 127.0.0.1:9090 |
+| **Alertmanager** | receives the alerts (from Prometheus and Loki) and sends notifications | 127.0.0.1:9093 |
+| **Grafana** | dashboards, log search, alert list; the *Callio — overview* dashboard is provisioned | 127.0.0.1:3300 |
 
 `docker-compose.yml` is for the Callio server (host networking, everything on
 127.0.0.1, host firewall untouched). `docker-compose.local.yml` is the same
@@ -67,6 +68,43 @@ Check it's working:
 curl -s -H "authorization: Bearer $(cat deploy/observability/prometheus/metrics_token)" 127.0.0.1:3003/metrics | head
 curl -s 127.0.0.1:9090/api/v1/targets | grep -o '"health":"[a-z]*"'
 curl -s -G 127.0.0.1:3100/loki/api/v1/query --data-urlencode 'query=sum by (level) (count_over_time({service="callio"}[1h]))'
+```
+
+## Alerts
+
+| Alert | From | Severity | Fires when |
+|---|---|---|---|
+| CallioWorkerDown | metrics | critical | a worker doesn't answer `/metrics` for 2 min |
+| CallioCallsFailing | metrics | critical | ≥ 3 calls end on SYSTEM_ERROR / NETWORK_ERROR / PROVIDER_ERROR / AGENT_MEDIA_NOT_READY / CUSTOMER_NETWORK_LOSS in 15 min |
+| CallioFatal | logs | critical | a `fatal` record (a worker crashed) |
+| CallioAgentStuck | logs | critical | "AGENT STUCK" — an agent couldn't be released after a call |
+| CallioWorkerRestarted | metrics | warning | a worker restarted (crash, memory limit, deploy) |
+| CallioManyUnansweredCalls | metrics | warning | ≥ 10 calls NO_ANSWER / TIMEOUT in 30 min |
+| CallioWebhookDeliveriesFailing | metrics | warning | a consumer webhook was given up on |
+| CallioHttpErrors | metrics | warning | > 5 % of HTTP requests are 5xx for 10 min |
+| CallioEventLoopLag | metrics | warning | event loop blocked > 100 ms (p99) for 5 min |
+| CallioMemoryHigh | metrics | warning | a worker above 900 MB for 10 min (PM2 restarts at 1 GB) |
+| CallioStateRetainedAtIdle / CallioNativeAudioLeak | metrics | warning | call state or native audio objects left with no calls for 15 min (a leak) |
+| CallioErrorLogsHigh | logs | warning | a component logs > 20 errors in 10 min |
+| CallioLogRecordsDropped / CallioLogCapReached | metrics / logs | warning | logging protected the service (stalled disk, daily cap) |
+
+Rules: `prometheus/alerts.yml` and `loki/rules/fake/callio.yml` — thresholds
+are starting points; tune them to real traffic. Alerts show in Grafana
+(Alerting → Alert list, Alertmanager) without any setup. To be **notified**,
+fill a receiver (email, Slack, Telegram, webhook) in
+`alertmanager/alertmanager.yml`, set `route.receiver` to it, and
+`docker compose -f deploy/observability/docker-compose.yml restart alertmanager`.
+
+## Worker snapshots
+
+Every 5 minutes, on shutdown and on a crash each worker logs one
+`Worker snapshot` record (component `infra.monitoring.WorkerStatsService`):
+CPU, memory, event-loop delay, active calls and recordings, and the leak
+counters (native audio objects, per-call state retained, timers, threads).
+The same numbers are `/health` and, over time, the leak gauges in Prometheus.
+
+```bash
+npm run -s logs -- --component infra.monitoring --since 1h
 ```
 
 ## Querying

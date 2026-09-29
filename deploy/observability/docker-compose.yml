@@ -1,6 +1,7 @@
 # Observability for Callio on its server: Loki (logs), Grafana Alloy (ships
 # the log files to Loki), Prometheus (metrics from each worker's /metrics),
-# Grafana (dashboards). See README.md in this folder.
+# Alertmanager (alerts from both), Grafana (dashboards, alerts, log search).
+# See README.md in this folder.
 #
 # Host networking, everything bound to 127.0.0.1: nothing is reachable from
 # outside and the host firewall is untouched. Open Grafana through an SSH
@@ -16,8 +17,10 @@ services:
     command: ["-config.file=/etc/loki/loki.yml", "-config.expand-env=true"]
     environment:
       LOKI_LISTEN_ADDRESS: 127.0.0.1
+      ALERTMANAGER_URL: http://127.0.0.1:9093
     volumes:
       - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - ./loki/rules:/etc/loki/rules:ro
       - loki-data:/loki
     restart: unless-stopped
 
@@ -44,8 +47,22 @@ services:
       - --web.listen-address=127.0.0.1:9090
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - ./prometheus/metrics_token:/etc/prometheus/metrics_token:ro
       - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    network_mode: host
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.listen-address=127.0.0.1:9093
+      - --cluster.listen-address=
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
     restart: unless-stopped
 
   grafana:
@@ -59,6 +76,7 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       PROMETHEUS_URL: http://127.0.0.1:9090
       LOKI_URL: http://127.0.0.1:3100
+      ALERTMANAGER_URL: http://127.0.0.1:9093
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -70,4 +88,5 @@ volumes:
   loki-data:
   alloy-data:
   prometheus-data:
+  alertmanager-data:
   grafana-data:

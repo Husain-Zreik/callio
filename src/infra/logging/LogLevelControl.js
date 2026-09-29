@@ -6,7 +6,7 @@
 // on the announcement and at startup (so a worker that restarts keeps it), and
 // drops it when it expires. `npm run log-level` is the way to set it.
 //
-// Worker threads keep the levels they started with.
+// Worker threads follow through logger.js (BroadcastChannel).
 import { redisClient } from '../redis/RedisClient.js';
 import { logger, resetLogLevels, setLogLevels } from './logger.js';
 import { COMPONENTS, LOG_LEVELS_CHANNEL, LOG_LEVELS_KEY } from './policy.js';

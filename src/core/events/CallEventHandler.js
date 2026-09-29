@@ -12,6 +12,7 @@ import { RejectionEventHandler } from './handlers/RejectionEventHandler.js';
 import { TransferEventHandler } from './handlers/TransferEventHandler.js';
 import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinator.js';
 import { logger } from '../../infra/logging/logger.js';
+import { endedDuringWork } from '../calls/endedDuringWork.js';
 
 const log = logger('core.events.CallEventHandler');
 
@@ -47,7 +48,7 @@ export class CallEventHandler {
         log.debug({ callId }, `Handling ${eventType}`);
 
         if (!isValidEventType(eventType)) {
-            log.warn(`Unknown event type: ${eventType}`);
+            log.warn({ callId, eventType }, 'Unknown event type');
             return;
         }
 
@@ -112,11 +113,10 @@ export class CallEventHandler {
                     break;
 
                 default:
-                    log.warn(`Unhandled event type: ${eventType}`);
+                    log.warn({ callId, eventType }, 'Unhandled event type');
             }
         } catch (error) {
-            const isKnownRace = error.message.includes('already terminated') || error.message.includes('already failed');
-            log[isKnownRace ? 'warn' : 'error']({ callId, err: error }, `Error handling ${eventType}`);
+            log[endedDuringWork(error) ? 'warn' : 'error']({ callId, err: error }, `Error handling ${eventType}`);
             // Target the socket that triggered this event when we know it (data.socketId,
             // e.g. agent_joined/call_rejected) so a per-actor failure (like losing a
             // ring-group accept race) isn't broadcast to every socket in the call room —

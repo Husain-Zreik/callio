@@ -1,0 +1,33 @@
+# Alerts on Callio's logs, evaluated by Loki's ruler and sent to Alertmanager.
+# (The folder name "fake" is Loki's tenant when auth is off.)
+groups:
+  - name: callio-logs
+    interval: 1m
+    rules:
+      - alert: CallioFatal
+        expr: sum by (env, host) (count_over_time({service="callio", level="fatal"}[5m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "A Callio worker crashed on {{ $labels.host }} ({{ $labels.env }})"
+          description: 'Logs: {service="callio", level="fatal"}'
+
+      - alert: CallioAgentStuck
+        expr: sum by (env) (count_over_time({service="callio", component="core.calls.CallTerminator"} |= "AGENT STUCK" [15m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "An agent could not be released after a call ({{ $labels.env }})"
+          description: 'The agent stays ON_CALL and gets no new calls until fixed. Logs: {service="callio"} |= "AGENT STUCK"'
+
+      - alert: CallioErrorLogsHigh
+        expr: sum by (env, component) (count_over_time({service="callio", level=~"error|fatal"}[10m])) > 20
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.component }} logged {{ $value }} errors in 10 minutes ({{ $labels.env }})"
+          description: 'Logs: {service="callio", component="{{ $labels.component }}", level="error"}'
+
+      - alert: CallioLogCapReached
+        expr: sum by (env, host) (count_over_time({service="callio", component="infra.logging"} |= "Daily log cap reached" [1h])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "A worker reached LOG_MAX_DAILY_MB on {{ $labels.host }}"
+          description: "Only warn and above are kept until midnight UTC. Find the noisy component: npm run logs:stats"

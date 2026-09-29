@@ -22,6 +22,7 @@ import { toCallView } from '../../calls/CallView.js';
 import { callTerminator } from '../../calls/CallTerminator.js';
 import { AssignmentType, AgentAvailability } from '../../constants/CallConstants.js';
 import { logger } from '../../../infra/logging/logger.js';
+import { endedDuringWork } from '../../calls/endedDuringWork.js';
 
 const log = logger('core.events.AgentEventHandler');
 
@@ -224,8 +225,7 @@ export class AgentEventHandler {
 
             log.info({ agentId: userId, callId }, 'Agent successfully joined call');
         } catch (error) {
-            const isKnownRace = error.message.includes('already terminated') || error.message.includes('already failed');
-            log[isKnownRace ? 'warn' : 'error']({ callId, err: error }, 'Failed to handle agent join');
+            log[endedDuringWork(error) ? 'warn' : 'error']({ callId, err: error }, 'Failed to handle agent join');
 
             // Agent is already on another call — notify the socket directly so the UI
             // doesn't stay stuck on the ringing screen waiting for an accept that cannot happen.

@@ -20,10 +20,10 @@
 //   consoleBridge.js console.* from libraries
 //   LogLevelControl  runtime level changes over Redis (npm run log-level)
 import { hostname } from 'os';
-import { isMainThread, threadId } from 'worker_threads';
+import { BroadcastChannel, isMainThread, threadId } from 'worker_threads';
 import pino from 'pino';
 import { config } from '../../../config/envConfig.js';
-import { COMPONENTS } from './policy.js';
+import { COMPONENTS, THREAD_LEVELS_CHANNEL } from './policy.js';
 import { serializeError } from './errors.js';
 import { LevelRegistry } from './levels.js';
 import { currentLogContext } from './context.js';
@@ -67,10 +67,21 @@ export function logger(component) {
 
 // ── Levels ──────────────────────────────────────────────────────────────────
 
-/** Apply { level?, levels? } on this worker (over the current state). */
-export const setLogLevels = (override) => registry.apply(override);
+// Worker threads (DTMF, Opus encoding) follow the main thread's levels: it
+// posts them on every change, and a thread that starts later asks for them.
+const threadLevels = new BroadcastChannel(THREAD_LEVELS_CHANNEL);
+threadLevels.unref();
+const shareLevels = () => threadLevels.postMessage({ type: 'levels', state: registry.state() });
+threadLevels.onmessage = ({ data }) => {
+    if (isMainThread && data?.type === 'hello') shareLevels();
+    else if (!isMainThread && data?.type === 'levels') registry.replace(data.state);
+};
+if (!isMainThread) threadLevels.postMessage({ type: 'hello' });
+
+/** Apply { level?, levels? } on this worker and its threads (over the current state). */
+export const setLogLevels = (override) => { registry.apply(override); if (isMainThread) shareLevels(); };
 /** Back to LOG_LEVEL / LOG_LEVELS. */
-export const resetLogLevels = () => registry.reset();
+export const resetLogLevels = () => { registry.reset(); if (isMainThread) shareLevels(); };
 export const currentLogLevels = () => registry.snapshot();
 export const knownComponents = () => registry.components();
 

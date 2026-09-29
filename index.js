@@ -56,6 +56,7 @@ async function startServer() {
         registerRuntimeGauges({
             activeMediaCalls: () => peerRegistry.peerConnections.size,
             agentSockets: () => io.engine.clientsCount,
+            diagnostics: () => workerStatsService.diagnostics(),
         });
         onLogDrops(({ buffer, cap }) => {
             if (buffer) metrics.logDropped.inc({ reason: 'buffer' }, buffer);

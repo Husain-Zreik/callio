@@ -60,6 +60,17 @@ export class LevelRegistry {
         this.#sync();
     }
 
+    /** The active levels (to hand to another thread). */
+    state() {
+        return structuredClone(this.#active);
+    }
+
+    /** Take another thread's active levels as ours. */
+    replace({ level, levels }) {
+        this.#active = { level: isLevel(level) ? level : this.#active.level, levels: { ...(levels ?? {}) } };
+        this.#sync();
+    }
+
     snapshot() {
         return { ...structuredClone(this.#active), configured: structuredClone(this.#configured) };
     }

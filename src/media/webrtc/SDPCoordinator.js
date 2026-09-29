@@ -9,6 +9,7 @@ import { peerRegistry } from './PeerRegistry.js';
 import { sdpProcessor } from './SDPProcessor.js';
 import { ConnectionType } from '../../core/constants/CallConstants.js';
 import { logger } from '../../infra/logging/logger.js';
+import { endedDuringWork } from '../../core/calls/endedDuringWork.js';
 
 const log = logger('media.webrtc.SDPCoordinator');
 
@@ -47,7 +48,7 @@ class SDPCoordinator {
             log.debug({ callId }, `${connectionType} SDP offer ready`);
             return sdp;
         } catch (err) {
-            log.error({ err }, `Failed to create ${connectionType} offer`);
+            log[endedDuringWork(err) ? 'warn' : 'error']({ callId, err }, `Failed to create ${connectionType} offer`);
             await peerRegistry.closePeerConnection(callId, connectionType);
             throw err;
         }
@@ -93,7 +94,7 @@ class SDPCoordinator {
             log.debug({ callId }, `${connectionType} SDP answer created`);
             return sdp;
         } catch (err) {
-            log.error({ err }, `Failed to create ${connectionType} answer`);
+            log[endedDuringWork(err) ? 'warn' : 'error']({ callId, err }, `Failed to create ${connectionType} answer`);
             await peerRegistry.closePeerConnection(callId, connectionType);
             throw err;
         }

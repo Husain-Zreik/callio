@@ -1,0 +1,103 @@
+# Alerts on Callio's metrics (src/infra/monitoring/metrics.js), evaluated by
+# Prometheus and sent to Alertmanager. severity: critical = act now,
+# warning = look today. Thresholds are starting points — tune to real traffic.
+groups:
+  - name: callio-availability
+    rules:
+      - alert: CallioWorkerDown
+        expr: up{job="callio"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Callio worker {{ $labels.instance }} is not answering /metrics"
+          description: "The worker is down or stuck; calls routed to it fail. Check pm2 status and npm run logs:errors."
+
+      - alert: CallioWorkerRestarted
+        expr: changes(callio_process_start_time_seconds[15m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Callio worker {{ $labels.worker }} restarted"
+          description: "A crash, a memory-limit restart (WORKER_MEMORY_LIMIT) or a deploy. Calls with media on it were dropped. See the 'Worker snapshot' record with reason uncaught_exception in the logs."
+
+  - name: callio-calls
+    rules:
+      - alert: CallioCallsFailing
+        expr: sum by (env) (increase(callio_calls_ended_total{reason=~"SYSTEM_ERROR|NETWORK_ERROR|PROVIDER_ERROR|AGENT_MEDIA_NOT_READY|CUSTOMER_NETWORK_LOSS"}[15m])) >= 3
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $value | printf \"%.0f\" }} calls ended on a failure in the last 15 minutes ({{ $labels.env }})"
+          description: "Failures by reason: sum by (reason) (increase(callio_calls_ended_total[15m])). Logs: {service=\"callio\", level=~\"warn|error\"}."
+
+      - alert: CallioManyUnansweredCalls
+        expr: sum by (env) (increase(callio_calls_ended_total{reason=~"NO_ANSWER|TIMEOUT|IVR_AGENT_NO_ANSWER"}[30m])) >= 10
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value | printf \"%.0f\" }} calls went unanswered in 30 minutes ({{ $labels.env }})"
+          description: "Not enough agents available, or agents not receiving offers (push, sockets)."
+
+  - name: callio-integrations
+    rules:
+      - alert: CallioWebhookDeliveriesFailing
+        expr: sum by (env) (increase(callio_webhook_deliveries_total{result="failed"}[15m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Consumer webhook deliveries are being given up on ({{ $labels.env }})"
+          description: "A consumer's event endpoint rejected every retry. Logs: {service=\"callio\", component=\"outbox.OutboxDispatcher\"}."
+
+      - alert: CallioHttpErrors
+        expr: |
+          sum by (env) (rate(callio_http_requests_total{status=~"5.."}[5m]))
+            / sum by (env) (rate(callio_http_requests_total[5m])) > 0.05
+          and sum by (env) (rate(callio_http_requests_total[5m])) > 0.1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "More than 5% of HTTP requests fail with 5xx ({{ $labels.env }})"
+          description: "Routes: sum by (route) (rate(callio_http_requests_total{status=~\"5..\"}[5m]))."
+
+  - name: callio-runtime
+    rules:
+      - alert: CallioEventLoopLag
+        expr: max by (instance) (callio_nodejs_eventloop_lag_p99_seconds) > 0.1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Worker {{ $labels.instance }} event loop blocked >100 ms (p99)"
+          description: "Signalling, ICE and audio relays are delayed; call quality suffers."
+
+      - alert: CallioMemoryHigh
+        expr: callio_process_resident_memory_bytes > 900 * 1024 * 1024
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Worker {{ $labels.worker }} uses {{ $value | humanize1024 }}B"
+          description: "PM2 restarts a worker at WORKER_MEMORY_LIMIT (1G), dropping its calls. Check callio_native_audio_live and callio_retained_call_state for leaks."
+
+      - alert: CallioStateRetainedAtIdle
+        expr: |
+          sum by (instance) (callio_retained_call_state) > 0
+          and on (instance) sum by (instance) (callio_media_calls_active) == 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Worker {{ $labels.instance }} holds call state with no calls"
+          description: "An ended call left state behind (a leak). Which registry: callio_retained_call_state by registry."
+
+      - alert: CallioNativeAudioLeak
+        expr: |
+          sum by (instance) (callio_native_audio_live) > 0
+          and on (instance) sum by (instance) (callio_media_calls_active) == 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Worker {{ $labels.instance }} keeps native audio objects with no calls"
+          description: "wrtc sources/sinks not released; memory grows until PM2 restarts the worker."
+
+  - name: callio-logging
+    rules:
+      - alert: CallioLogRecordsDropped
+        expr: sum by (env, worker, reason) (increase(callio_log_records_dropped_total[15m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Worker {{ $labels.worker }} dropped log records ({{ $labels.reason }})"
+          description: "buffer = the disk can't keep up; cap = LOG_MAX_DAILY_MB reached (a component logging far too much — npm run logs:stats)."

@@ -9,8 +9,11 @@ services:
     image: grafana/loki:3.4.2
     command: ["-config.file=/etc/loki/loki.yml", "-config.expand-env=true"]
     ports: ["127.0.0.1:3100:3100"]
+    environment:
+      ALERTMANAGER_URL: http://alertmanager:9093
     volumes:
       - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - ./loki/rules:/etc/loki/rules:ro
       - loki-data:/loki
 
   alloy:
@@ -32,8 +35,17 @@ services:
     extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - ./prometheus/prometheus.local.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - ./prometheus/metrics_token:/etc/prometheus/metrics_token:ro
       - prometheus-data:/prometheus
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager", "--cluster.listen-address="]
+    ports: ["127.0.0.1:9093:9093"]
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
 
   grafana:
     image: grafana/grafana:11.5.2
@@ -43,6 +55,7 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       PROMETHEUS_URL: http://prometheus:9090
       LOKI_URL: http://loki:3100
+      ALERTMANAGER_URL: http://alertmanager:9093
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -53,4 +66,5 @@ volumes:
   loki-data:
   alloy-data:
   prometheus-data:
+  alertmanager-data:
   grafana-data:
