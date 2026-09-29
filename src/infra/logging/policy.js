@@ -43,14 +43,34 @@ export const CONTEXT_FIELDS = Object.freeze(['callId', 'tenantId', 'agentId', 'r
 export const BASE_FIELDS = Object.freeze(['time', 'level', 'msg', 'worker', 'thread', 'pid', 'component', 'mod']);
 
 // ── Redaction (always on) ───────────────────────────────────────────────────
-// Values under these keys, at the top level or one level down, are replaced
-// by REDACT_CENSOR in every record.
-export const REDACT_KEYS = Object.freeze(['token', 'accessToken', 'access_token', 'apiKey', 'api_key', 'secret',
-    'appSecret', 'password', 'authorization', 'Authorization', 'cookie', 'credential', 'credentials',
-    'privateKey', 'private_key', 'signingKey', 'signing_key', 'masterKey', 'jwt']);
-export const REDACT_EXTRA_PATHS = Object.freeze(['req.headers.authorization', 'req.headers.cookie',
-    'req.headers["x-api-key"]', 'headers["x-api-key"]', 'req.headers["x-hub-signature-256"]']);
+// Values under these keys (case-insensitive, up to REDACT_DEPTH levels deep)
+// are replaced by REDACT_CENSOR in every record.
+export const REDACT_KEYS = Object.freeze(['token', 'accesstoken', 'access_token', 'refresh_token', 'apikey', 'api_key',
+    'secret', 'appsecret', 'client_secret', 'password', 'passwd', 'authorization', 'proxy-authorization', 'cookie',
+    'set-cookie', 'credential', 'credentials', 'privatekey', 'private_key', 'signingkey', 'signing_key', 'masterkey',
+    'jwt', 'x-api-key', 'x-hub-signature-256']);
+export const REDACT_DEPTH = 4;
 export const REDACT_CENSOR = '[redacted]';
+
+// ── Errors ──────────────────────────────────────────────────────────────────
+// What an `err` field keeps: type, message, stack, these scalar properties,
+// `cause` / AggregateError members (ERROR_MAX_DEPTH deep), and for HTTP-client
+// errors (axios) only { method, url without query, status, body preview }.
+// Never request/config/headers/sockets — they carry credentials and are huge.
+export const ERROR_FIELDS = Object.freeze(['code', 'errno', 'syscall', 'status', 'statusCode', 'sqlState',
+    'sqlMessage', 'sql', 'reason']);
+export const ERROR_MAX_DEPTH = 2;
+export const ERROR_TEXT_MAX = 4000;      // message / stack / sql, characters
+export const ERROR_BODY_MAX = 1000;      // HTTP response body preview, characters
+
+// ── Output limits ───────────────────────────────────────────────────────────
+// Logging must never slow the service down or fill the disk.
+export const OUTPUT = Object.freeze({
+    batchBytes: 4096,              // writes are batched up to this size …
+    flushIntervalMs: 1000,         // … and flushed at least this often (so tails stay live)
+    maxBufferBytes: 16 * 1024 * 1024, // a stalled disk drops records past this instead of growing memory
+    dailyCapLevelBelow: 40,        // past a file's daily cap, records below warn are dropped
+});
 
 // ── PII masking (LOG_MASK_PII=true) ─────────────────────────────────────────
 // Field names whose value is a customer's address (phone number / SIP URI);

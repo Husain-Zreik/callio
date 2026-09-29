@@ -40,6 +40,9 @@ export function formatRecord(rec, { colors = false } = {}) {
         const e = rec.err;
         const text = (e.stack ?? `${e.type ?? 'Error'}: ${e.message ?? JSON.stringify(e)}`).replace(/\n\s*/g, '\n      ');
         line += `\n    ${paint(colors, 31, text)}`;
+        // code, status, http, cause … — everything the serializer kept besides the text.
+        const { type, message, stack, ...rest } = typeof e === 'object' ? e : {};
+        if (Object.keys(rest).length) line += `\n      ${paint(colors, 31, JSON.stringify(rest))}`;
     }
     return line;
 }

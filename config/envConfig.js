@@ -119,6 +119,8 @@ export const config = {
         // Mask customer phone numbers / SIP users in records (off by default).
         maskPii: process.env.LOG_MASK_PII === "true",
         retentionDays: parseInt(process.env.LOG_RETENTION_DAYS || "14", 10) || 14,
+        // Per worker per day; past it only warn and above are kept (0 = no cap).
+        dailyCapMb: Math.max(0, parseInt(process.env.LOG_MAX_DAILY_MB || "1024", 10) || 0),
         dir: process.env.LOG_DIR ? resolve(process.env.LOG_DIR) : resolve(__dirname, "../storage/logs/app"),
     },
     notifications: {

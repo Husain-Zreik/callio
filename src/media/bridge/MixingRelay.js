@@ -154,7 +154,8 @@ export class MixingRelay {
     _maybeLog() {
         const d = this._diag;
         if (d.frames % LOG_EVERY !== 0) return;
-        log.debug({ relay: this._label, trackId: this._sourceTrackId, ...d }, 'Mixing relay stats');
+        // Hot path: build the record only when debug is on for this component.
+        if (log.isLevelEnabled('debug')) log.debug({ relay: this._label, trackId: this._sourceTrackId, ...d }, 'Mixing relay stats');
         d.srcPeak = 0; d.supPeak = 0; d.outPeak = 0;
     }
 }

@@ -14,7 +14,8 @@
 //   levels.js        which level each component logs at (LOG_LEVEL / LOG_LEVELS / runtime)
 //   context.js       fields bound to a flow (callId, tenantId, agentId, requestId)
 //   redaction.js     secrets redacted always, PII masked when LOG_MASK_PII=true
-//   destinations.js  files, stdout
+//   errors.js        what an `err` keeps (never request configs / headers)
+//   destinations.js  files (LogFiles.js: batched, bounded, daily cap), stdout
 //   throttle.js      one record per window for repeating events
 //   consoleBridge.js console.* from libraries
 //   LogLevelControl  runtime level changes over Redis (npm run log-level)
@@ -22,10 +23,11 @@ import { isMainThread, threadId } from 'worker_threads';
 import pino from 'pino';
 import { config } from '../../../config/envConfig.js';
 import { COMPONENTS } from './policy.js';
+import { serializeError } from './errors.js';
 import { LevelRegistry } from './levels.js';
 import { currentLogContext } from './context.js';
-import { maskingHook, redactOptions } from './redaction.js';
-import { destination, flushDestinations, initDestinations } from './destinations.js';
+import { maskingHook, redact } from './redaction.js';
+import { destination, flushDestinations, initDestinations, takeDrops } from './destinations.js';
 import { installConsoleBridge as bridgeConsole } from './consoleBridge.js';
 
 export { runWithLogContext, withLogContext, addLogContext } from './context.js';
@@ -40,9 +42,8 @@ const root = pino({
     base: { worker: config.runtime.workerId, pid: process.pid, ...(isMainThread ? {} : { thread: threadId }) },
     timestamp: pino.stdTimeFunctions.isoTime,
     messageKey: 'msg',
-    serializers: { err: pino.stdSerializers.err, error: pino.stdSerializers.err },
-    redact: redactOptions,
-    formatters: { level: (label, number) => ({ level: number }) },
+    serializers: { err: serializeError, error: serializeError },
+    formatters: { level: (label, number) => ({ level: number }), log: redact },
     mixin: currentLogContext,
     hooks: settings.maskPii ? { logMethod: maskingHook } : {},
 }, destination);
@@ -76,11 +77,18 @@ export function initLogging() {
     const opened = initDestinations({
         dir: settings.dir, workerId: config.runtime.workerId, retentionDays: settings.retentionDays,
         prune: isMainThread, stdout: settings.stdout, format: settings.format, stdoutLevel: settings.stdoutLevel,
+        dailyCapBytes: settings.dailyCapMb * 1024 * 1024,
     });
-    if (opened && isMainThread) {
+    if (!opened) return;
+    if (isMainThread) {
         const { level, levels } = registry.snapshot();
         logger(COMPONENTS.process).info({ node: process.version, defaultLevel: level, levels }, 'worker starting');
     }
+    // Records dropped to protect the service (stalled disk, daily cap) are reported, not silent.
+    setInterval(() => {
+        const drops = takeDrops();
+        if (drops.buffer || drops.cap) logger(COMPONENTS.logging).warn({ dropped: drops }, 'Log records dropped to protect the service');
+    }, 60_000).unref();
 }
 
 /** console.* from libraries into the logger. */
