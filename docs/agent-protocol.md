@@ -1,6 +1,7 @@
 # Agent protocol (v1)
 
 How an agent client (browser, mobile app, desktop softphone) talks to Callio.
+For JavaScript clients, `sdk/agent-js` implements all of this.
 One Socket.IO connection per agent session carries all signaling; audio flows
 over WebRTC between the client and Callio's media engine — never peer to
 peer, never through the consumer's backend.

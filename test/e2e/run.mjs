@@ -78,7 +78,7 @@ async function startCallio(logFile) {
     const { openSync } = await import('fs');
     const out = openSync(logFile, 'w');
     const child = spawn(process.execPath, ['index.js'], { cwd: root, env, stdio: ['ignore', out, out] });
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 120; i++) {   // up to 60 s: a cold first start (native modules, AV scanning) can be slow
         try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) return child; } catch { /* not up yet */ }
         await new Promise((r) => setTimeout(r, 500));
     }

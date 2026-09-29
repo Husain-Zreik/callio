@@ -35,6 +35,8 @@ pm2 start ecosystem.config.cjs    # multi-worker fleet (production shape)
 npm run consumer:create -- --name "Acme" --slug acme [--webhook-url URL] [--lookup-url URL]
 npm run seed:dev -- --phone-number-id <id> --whatsapp-token <token> [--sip-did +961…]   # dev consumer/tenant/agents/queue/channels
 npm run sip:trunk -- --name <name> --host <carrier> [--cidr <source/32>]   # create/update a SIP trunk (operator)
+npm run agent:token -- --consumer <slug> --tenant <ref> --agent <ref>   # sign a test agent token
+npm run demo:agent                # the SDK's demo agent page on http://localhost:5173
 
 docker compose -f test/e2e/docker-compose.yml up -d   # MySQL + Redis for tests
 docker compose -f deploy/sip-gateway/docker-compose.local.yml up -d   # SIP gateway, for the SIP suite
@@ -101,7 +103,8 @@ Background loops (`CallCleanupService`, `QueueTimeoutService`, `RedisCleanupServ
 
 - WhatsApp and SIP, inbound and outbound; queues (`RING_ALL`/`ROUND_ROBIN`/`PRIORITY`) with ring timeout / max wait / overflow; IVR, transfer, monitoring, recording, push, the Management API and consumer events are implemented and covered by `test/e2e` (SIP against the local gateway and a fake carrier).
 - Deployed dev environment: `callio.pcg-ms.com` (nginx → PM2), not yet moved to the new database. The SIP gateway there has handled a real inbound call from the carrier (Digitalk); the SIP channel hasn't been run against the real trunk yet (SIP_INTEGRATION.md, last section).
-- Not yet: per-consumer push credentials (push uses platform credentials from env), an agent client SDK. A live call transferred to an agent who doesn't answer has no timeout yet (queue timers cover calls that are waiting, not answered calls being handed over).
+- `sdk/agent-js` — the JS agent SDK (browser + Node), tested by `test/e2e/sdk.test.mjs`; `examples/agent.html` is a working agent page. React bindings and the Dart SDK are next.
+- Not yet: per-consumer push credentials (push uses platform credentials from env). A live call transferred to an agent who doesn't answer has no timeout yet (queue timers cover calls that are waiting, not answered calls being handed over).
 
 ## History
 

@@ -1,0 +1,21 @@
+{
+  "name": "@callio/agent-sdk",
+  "version": "0.1.0",
+  "description": "Agent client for Callio: ring, answer, hang up and transfer calls over Callio's agent gateway (Socket.IO + WebRTC).",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "demo": "node examples/serve.mjs"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.8.1"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}

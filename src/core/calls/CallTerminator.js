@@ -39,6 +39,8 @@ class CallTerminator {
      *   media         'broadcast' (default) | 'local' — see #closeMedia
      *   source        short label for logs and call:terminated (e.g. 'queue_max_wait')
      *   log           extra lifecycle-log fields
+     *   agentAfter    where the agent goes: 'auto' (default: INBOUND → AVAILABLE and
+     *                 drain the queues, OUTBOUND → OFFLINE) or 'offline' (they're gone)
      * @returns {Promise<boolean>} true if this call ended it
      */
     async end(callOrId, opts) {
@@ -61,7 +63,7 @@ class CallTerminator {
 
     // Steps 2–6 for a call whose final state is already committed.
     async settle(callOrId, {
-        reason, terminatedBy, provider = 'none', media = 'broadcast', source = null, log = {},
+        reason, terminatedBy, provider = 'none', media = 'broadcast', source = null, log = {}, agentAfter = 'auto',
     }) {
         const call = await this.#load(callOrId);
         if (!call) return;
@@ -78,7 +80,7 @@ class CallTerminator {
 
         if (call.agent_id) {
             try {
-                if (call.direction === CallDirection.OUTBOUND) {
+                if (agentAfter === 'offline' || call.direction === CallDirection.OUTBOUND) {
                     await agentAssignmentCoordinator.releaseAgentOfflineIfIdle(call.agent_id);
                 } else {
                     await agentAssignmentCoordinator.releaseAgentIfIdle(call.agent_id);

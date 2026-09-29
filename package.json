@@ -17,7 +17,9 @@
     "test:e2e": "node test/e2e/run.mjs",
     "consumer:create": "node scripts/create-consumer.js",
     "seed:dev": "node scripts/seed-dev.js",
-    "sip:trunk": "node scripts/sip-trunk.js"
+    "sip:trunk": "node scripts/sip-trunk.js",
+    "agent:token": "node scripts/agent-token.js",
+    "demo:agent": "node sdk/agent-js/examples/serve.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.990.0",

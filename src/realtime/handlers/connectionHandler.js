@@ -47,9 +47,12 @@ export async function handleConnection(socket) {
 
     const tracksPresence = userId !== "Unknown" && tenantId !== "Unknown" && isSessionConnection;
 
-    // First, before anything that can deliver a call to this socket.
-    socket.emit("session:ready", sessionReady(socket));
+    // Listeners first, then session:ready — clients answer it at once (calls:sync),
+    // and an event that arrives before its listener exists is silently dropped.
+    // Both before anything that can deliver a call to this socket.
+    registerAllSocketListeners(socket);
     socket.on("session:refresh", () => socket.emit("session:ready", sessionReady(socket)));
+    socket.emit("session:ready", sessionReady(socket));
 
     if (tracksPresence) {
         let isFirstSocket = false;
@@ -74,9 +77,6 @@ export async function handleConnection(socket) {
             );
         }
     }
-
-    registerAllSocketListeners(socket);
-
 
     socket.on("disconnect", async (reason) => {
         console.log(

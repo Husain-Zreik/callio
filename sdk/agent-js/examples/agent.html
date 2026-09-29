@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Callio Agent Demo</title>
+<!-- The SDK imports 'socket.io-client'; the page maps it to a CDN build. -->
+<script type="importmap">
+{ "imports": { "socket.io-client": "https://cdn.jsdelivr.net/npm/socket.io-client@4.8.1/+esm" } }
+</script>
+<style>
+  :root { --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #6b7280; --line: #e3e6eb;
+          --accent: #2563eb; --ok: #15803d; --warn: #b45309; --bad: #b91c1c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #11151c; --card: #1a202b; --text: #e6e9ef; --muted: #9aa3b2; --line: #2a3140;
+            --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 16px 48px; display: grid; gap: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: grid; gap: 10px; }
+  label { font-size: 13px; color: var(--muted); display: grid; gap: 4px; }
+  input, textarea { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; }
+  textarea { min-height: 70px; font-family: ui-monospace, monospace; font-size: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.ok { background: var(--ok); border-color: var(--ok); color: #fff; }
+  button.bad { background: var(--bad); border-color: var(--bad); color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+  .pill.ok { color: var(--ok); border-color: var(--ok); } .pill.warn { color: var(--warn); border-color: var(--warn); } .pill.bad { color: var(--bad); border-color: var(--bad); }
+  .call { border-left: 4px solid var(--accent); }
+  .call.ringing { border-left-color: var(--warn); animation: pulse 1s infinite alternate; }
+  @keyframes pulse { to { box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 25%, transparent); } }
+  .muted { color: var(--muted); font-size: 13px; }
+  #log { font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; max-height: 220px; overflow: auto; margin: 0; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Callio agent demo</h1>
+
+  <section class="card" id="connectCard">
+    <label>Callio URL <input id="url" value="https://callio.pcg-ms.com"></label>
+    <label>Agent token (from <code>npm run agent:token -- --consumer … --tenant … --agent …</code>)
+      <textarea id="token" placeholder="eyJhbGciOiJIUzI1NiIs…"></textarea></label>
+    <div class="row">
+      <button class="primary" id="connectBtn">Connect</button>
+      <span class="pill" id="connPill">disconnected</span>
+    </div>
+  </section>
+
+  <section class="card" id="agentCard" hidden>
+    <div class="row">
+      <strong id="agentName"></strong>
+      <span class="pill" id="availPill">—</span>
+    </div>
+    <div class="row">
+      <button class="ok" id="availableBtn">Available</button>
+      <button id="offlineBtn">Offline</button>
+    </div>
+    <div class="muted" id="queueInfo"></div>
+  </section>
+
+  <section id="calls"></section>
+
+  <section class="card">
+    <strong>Log</strong>
+    <pre id="log"></pre>
+  </section>
+</main>
+
+<audio id="remoteAudio" autoplay></audio>
+
+<script type="module">
+import { connect } from '../src/index.js';
+
+const $ = (id) => document.getElementById(id);
+const log = (...parts) => {
+  const line = `${new Date().toLocaleTimeString()}  ${parts.map((p) => typeof p === 'string' ? p : JSON.stringify(p)).join(' ')}`;
+  $('log').textContent = `${line}\n${$('log').textContent}`.slice(0, 20000);
+};
+const pill = (el, text, kind = '') => { el.textContent = text; el.className = `pill ${kind}`; };
+
+let agent = null;
+const cards = new Map();
+
+$('token').value = localStorage.getItem('callio.demo.token') ?? '';
+$('url').value = localStorage.getItem('callio.demo.url') ?? $('url').value;
+
+$('connectBtn').onclick = async () => {
+  const url = $('url').value.trim();
+  const token = $('token').value.trim();
+  localStorage.setItem('callio.demo.url', url);
+  localStorage.setItem('callio.demo.token', token);
+  $('connectBtn').disabled = true;
+  pill($('connPill'), 'connecting…', 'warn');
+  try {
+    agent = await connect({ url, token });
+    wire(agent);
+  } catch (err) {
+    pill($('connPill'), 'failed', 'bad');
+    log('connect failed:', err.message);
+    $('connectBtn').disabled = false;
+  }
+};
+
+function wire(agent) {
+  const s = agent.session;
+  pill($('connPill'), 'connected', 'ok');
+  $('agentCard').hidden = false;
+  $('agentName').textContent = `${s.agent.name} (${s.agent.ref}) · tenant ${s.tenant.ref}`;
+  log('connected as', s.agent.ref, '— ICE servers:', s.iceServers.length);
+
+  $('availableBtn').onclick = () => agent.setAvailability('AVAILABLE');
+  $('offlineBtn').onclick = () => agent.setAvailability('OFFLINE');
+
+  agent.on('ready', () => { pill($('connPill'), 'connected', 'ok'); log('reconnected'); });
+  agent.on('disconnected', (reason) => { pill($('connPill'), `disconnected (${reason})`, 'bad'); log('disconnected:', reason); });
+  agent.on('availability', ({ availability, reason }) => {
+    pill($('availPill'), availability, availability === 'AVAILABLE' ? 'ok' : availability === 'ON_CALL' ? 'warn' : '');
+    log('availability', availability, reason ?? '');
+  });
+  agent.on('queue', (q) => {
+    const mine = q.members?.some((m) => String(m.agentId) === String(agent.agent.id));
+    if (mine) $('queueInfo').textContent = `Queue "${q.queueName}" · ${q.availableCount}/${q.members.length} available · ${q.waitingCount} waiting`;
+  });
+  agent.on('error', (e) => log('error:', e.code ?? '', e.message ?? String(e)));
+  agent.on('incoming', (call) => { log('incoming call', call.id, call.customer.address); show(call); notify(call); });
+  agent.on('elsewhere', (call) => { log('call', call.id, 'is active on another device'); show(call); });
+  agent.on('callEnded', (call, info) => { log('call', call.id, 'ended:', info.reason, info.terminationReason ?? ''); });
+}
+
+function show(call) {
+  const el = document.createElement('div');
+  el.className = 'card call';
+  el.innerHTML = `
+    <div class="row"><strong class="who"></strong><span class="pill state"></span><span class="muted meta"></span></div>
+    <div class="row actions">
+      <button class="ok accept">Accept</button>
+      <button class="bad decline">Decline</button>
+      <button class="switch">Switch call here</button>
+      <button class="mute">Mute</button>
+      <button class="bad hangup">Hang up</button>
+    </div>
+    <div class="muted timer"></div>`;
+  $('calls').prepend(el);
+  cards.set(call.id, el);
+  const q = (sel) => el.querySelector(sel);
+  q('.who').textContent = call.customer.name ? `${call.customer.name} · ${call.customer.address}` : call.customer.address ?? `Call ${call.id}`;
+  q('.meta').textContent = `${call.direction ?? ''} ${call.channel ?? ''} #${call.id}`;
+
+  let started = null, timer = null;
+  const render = () => {
+    const st = call.state;
+    pill(q('.state'), st, st === 'active' ? 'ok' : st === 'ended' ? '' : 'warn');
+    el.classList.toggle('ringing', st === 'ringing');
+    q('.accept').hidden = st !== 'ringing';
+    q('.decline').hidden = st !== 'ringing';
+    q('.switch').hidden = st !== 'elsewhere';
+    q('.mute').hidden = !['active', 'connecting'].includes(st);
+    q('.hangup').hidden = ['ringing', 'ended', 'elsewhere'].includes(st);
+    q('.mute').textContent = call.muted ? 'Unmute' : 'Mute';
+    if (st === 'active' && !started) {
+      started = Date.now();
+      timer = setInterval(() => { q('.timer').textContent = `${Math.floor((Date.now() - started) / 1000)} s`; }, 1000);
+    }
+    if (st === 'ended') {
+      clearInterval(timer);
+      q('.timer').textContent = `ended: ${call.endReason}`;
+      setTimeout(() => el.remove(), 8000);
+    }
+  };
+  call.on('state', (st) => { log('call', call.id, '→', st); render(); });
+  call.on('remoteStream', (stream) => {
+    const audio = $('remoteAudio');
+    audio.srcObject = stream;
+    audio.play().catch((err) => log('audio playback blocked — click anywhere on the page:', err.message));
+  });
+  call.on('dtmf', ({ digit }) => log('customer pressed', digit));
+  call.on('customerMedia', ({ state }) => log('customer audio', state));
+  call.on('supervisorMode', ({ mode }) => log('supervisor mode', mode));
+
+  q('.accept').onclick = async () => {
+    try { await call.accept(); } catch (err) { log('accept failed:', err.message); }
+  };
+  q('.decline').onclick = () => call.decline();
+  q('.hangup').onclick = () => call.hangup();
+  q('.mute').onclick = () => { call.mute(!call.muted); render(); };
+  q('.switch').onclick = async () => {
+    try { await call.switchHere(); } catch (err) { log('switch failed:', err.message); }
+  };
+  render();
+}
+
+function notify(call) {
+  if (document.hasFocus() || !('Notification' in window)) return;
+  if (Notification.permission === 'granted') new Notification('Incoming call', { body: call.customer.address ?? '' });
+  else if (Notification.permission !== 'denied') Notification.requestPermission();
+}
+</script>
+</body>
+</html>
