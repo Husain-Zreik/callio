@@ -10,7 +10,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const envPath = resolve(__dirname, "../.env");
-dotenv.config({ path: envPath });
+// Under PM2 the .env file wins: PM2 keeps the environment a process was
+// first started with and re-injects it on every `pm2 restart`, so without
+// override a changed .env (a new secret) would silently not apply. Outside
+// PM2 (npm run dev, the e2e suites), variables already set take precedence.
+dotenv.config({ path: envPath, override: process.env.pm_id !== undefined });
 
 // Export all config in a structured way
 export const config = {
