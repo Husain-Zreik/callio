@@ -1,6 +1,6 @@
-// Grafana Alloy: ships Callio's log files to Loki.
+// Callio's logs → Loki (loaded by the shared stack next to base.alloy).
 //
-// Reads storage/logs/app/worker-*/YYYY-MM-DD.log (mounted at /callio-logs).
+// Reads storage/logs/app/worker-*/YYYY-MM-DD.log.
 // The .error.log files hold the same error records again and are skipped, so
 // nothing arrives twice. Positions survive restarts (the data volume).
 //
@@ -10,8 +10,8 @@
 
 local.file_match "callio" {
     path_targets = [{
-        __path__         = "/callio-logs/worker-*/*.log",
-        __path_exclude__ = "/callio-logs/worker-*/*.error.log",
+        __path__         = "/var/www/html/callio/storage/logs/app/worker-*/*.log",
+        __path_exclude__ = "/var/www/html/callio/storage/logs/app/worker-*/*.error.log",
     }]
     sync_period = "10s"
 }
@@ -44,6 +44,11 @@ loki.process "callio" {
         format = "RFC3339Nano"
     }
 
+    // Everything in these files is Callio's, even records older than the service field.
+    stage.static_labels {
+        values = { service = "callio" }
+    }
+
     stage.labels {
         values = { service = "", env = "", host = "", level = "", component = "" }
     }
@@ -52,11 +57,5 @@ loki.process "callio" {
         values = { worker = "", callId = "", providerCallId = "", tenantId = "", agentId = "", requestId = "" }
     }
 
-    forward_to = [loki.write.default.receiver]
-}
-
-loki.write "default" {
-    endpoint {
-        url = sys.env("LOKI_PUSH_URL")
-    }
+    forward_to = [loki.write.default.receiver]   // base.alloy
 }

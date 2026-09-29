@@ -1,0 +1,15 @@
+# Prometheus on a development machine (docker-compose.local.yml).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules.d/*.yml
+
+scrape_config_files:
+  - /etc/prometheus/scrape.d/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']

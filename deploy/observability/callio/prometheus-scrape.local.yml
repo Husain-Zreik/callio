@@ -1,0 +1,9 @@
+# Callio on a development machine: npm run dev (3001) and the e2e runner (3901).
+scrape_configs:
+  - job_name: callio
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/callio_metrics_token
+    static_configs:
+      - targets: ['host.docker.internal:3001', 'host.docker.internal:3901']

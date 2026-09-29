@@ -23,6 +23,5 @@ storage/apple/
 *.rdb
 dump.rdb
 
-# Observability stack secrets (deploy/observability)
-deploy/observability/prometheus/metrics_token
-deploy/observability/.env
+# Local observability stack (bash deploy/observability/install.sh --local)
+.observability/

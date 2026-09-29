@@ -1,5 +1,4 @@
 # Alerts on Callio's logs, evaluated by Loki's ruler and sent to Alertmanager.
-# (The folder name "fake" is Loki's tenant when auth is off.)
 groups:
   - name: callio-logs
     interval: 1m

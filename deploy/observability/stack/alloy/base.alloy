@@ -1,0 +1,10 @@
+// Shared by every project: where logs go. Each project adds its own
+// <project>.alloy next to this file that reads its log files and forwards to
+// loki.write.default.receiver. Conventions for a project's records:
+//   labels (indexed, few values):  service, env, host, level, component
+//   structured metadata:           ids (request, call, user …) — never labels
+loki.write "default" {
+    endpoint {
+        url = sys.env("LOKI_PUSH_URL")
+    }
+}

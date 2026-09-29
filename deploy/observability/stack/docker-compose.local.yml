@@ -1,8 +1,8 @@
-# The same stack for a development machine with Docker Desktop (no host
-# networking): Callio runs on the host (npm run dev / npm start, port 3001).
-#   docker compose -f deploy/observability/docker-compose.local.yml up -d
+# The same stack on a development machine with Docker Desktop (no host
+# networking). install.sh --local puts it in .observability/ with this file as
+# its docker-compose.yml; projects run on the host (Callio: npm run dev).
 #   Grafana: http://localhost:3300  (admin / admin)
-name: callio-observability-local
+name: observability-local
 
 services:
   loki:
@@ -18,25 +18,23 @@ services:
 
   alloy:
     image: grafana/alloy:v1.7.5
-    command: ["run", "/etc/alloy/config.alloy", "--storage.path=/var/lib/alloy/data", "--server.http.listen-addr=0.0.0.0:12345"]
+    command: ["run", "/etc/alloy", "--storage.path=/var/lib/alloy/data", "--server.http.listen-addr=0.0.0.0:12345"]
     environment:
       LOKI_PUSH_URL: http://loki:3100/loki/api/v1/push
     ports: ["127.0.0.1:12345:12345"]
     volumes:
-      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
-      - ../../storage/logs/app:/callio-logs:ro
+      - ./alloy:/etc/alloy:ro
+      - ${PROJECTS_ROOT}:/var/www/html:ro
       - alloy-data:/var/lib/alloy/data
     depends_on: [loki]
 
   prometheus:
     image: prom/prometheus:v3.2.1
-    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--web.enable-lifecycle"]
     ports: ["127.0.0.1:9090:9090"]
     extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
-      - ./prometheus/prometheus.local.yml:/etc/prometheus/prometheus.yml:ro
-      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
-      - ./prometheus/metrics_token:/etc/prometheus/metrics_token:ro
+      - ./prometheus:/etc/prometheus:ro
       - prometheus-data:/prometheus
 
   alertmanager:
@@ -53,7 +51,6 @@ services:
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_ANALYTICS_REPORTING_ENABLED: "false"
-      # Logs Drilldown (Explore → Logs): point-and-click log exploration.
       GF_PLUGINS_PREINSTALL: grafana-lokiexplore-app
       PROMETHEUS_URL: http://prometheus:9090
       LOKI_URL: http://loki:3100

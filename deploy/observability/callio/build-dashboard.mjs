@@ -1,5 +1,5 @@
-// Builds grafana/dashboards/callio-overview.json (the provisioned dashboard).
-// Edit the panels here, then:  node deploy/observability/grafana/build-dashboard.mjs
+// Builds callio/dashboards/callio-overview.json (provisioned into Grafana folder "Callio").
+// Edit the panels here, then:  node deploy/observability/callio/build-dashboard.mjs
 import { writeFileSync } from 'fs';
 const P = { type: 'prometheus', uid: 'prometheus' };
 const L = { type: 'loki', uid: 'loki' };

@@ -1,0 +1,11 @@
+# Callio's workers — one target per PM2 worker, each serves its own /metrics.
+# Match the ports to BASE_PORT / WORKER_COUNT in Callio's .env.
+# The token file is written by install.sh from Callio's METRICS_TOKEN.
+scrape_configs:
+  - job_name: callio
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/callio_metrics_token
+    static_configs:
+      - targets: ['127.0.0.1:3003', '127.0.0.1:3004']

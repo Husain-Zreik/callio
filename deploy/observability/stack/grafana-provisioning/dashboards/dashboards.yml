@@ -1,0 +1,10 @@
+# Dashboards from grafana/dashboards/<Project>/*.json — one Grafana folder per
+# project, named after the directory.
+apiVersion: 1
+providers:
+  - name: projects
+    type: file
+    disableDeletion: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true

@@ -1,14 +1,18 @@
-# Observability for Callio on its server: Loki (logs), Grafana Alloy (ships
-# the log files to Loki), Prometheus (metrics from each worker's /metrics),
-# Alertmanager (alerts from both), Grafana (dashboards, alerts, log search).
-# See README.md in this folder.
+# The server's shared observability stack — one per server, used by every
+# project on it. Installed to /opt/observability by install.sh (in the folder
+# above); projects plug in their own files there (see README.md):
 #
-# Host networking, everything bound to 127.0.0.1: nothing is reachable from
-# outside and the host firewall is untouched. Open Grafana through an SSH
-# tunnel (ssh -L 3300:127.0.0.1:3300 <server>) or put it behind nginx.
+#   alloy/*.alloy                  which log files to ship (base.alloy + one per project)
+#   prometheus/scrape.d/*.yml      which /metrics to scrape
+#   prometheus/rules.d/*.yml       metric alerts
+#   prometheus/secrets/            bearer tokens for the scrapes
+#   loki/rules/fake/*.yml          log alerts
+#   grafana/dashboards/<Project>/  dashboards, one Grafana folder per project
 #
-#   docker compose -f deploy/observability/docker-compose.yml up -d
-name: callio-observability
+# Host networking, everything on 127.0.0.1: nothing reachable from outside,
+# the host firewall untouched. Grafana is published through nginx
+# (nginx/grafana.conf).
+name: observability
 
 services:
   loki:
@@ -27,12 +31,14 @@ services:
   alloy:
     image: grafana/alloy:v1.7.5
     network_mode: host
-    command: ["run", "/etc/alloy/config.alloy", "--storage.path=/var/lib/alloy/data", "--server.http.listen-addr=127.0.0.1:12345"]
+    # A directory: every *.alloy file in it is loaded (base + one per project).
+    command: ["run", "/etc/alloy", "--storage.path=/var/lib/alloy/data", "--server.http.listen-addr=127.0.0.1:12345"]
     environment:
       LOKI_PUSH_URL: http://127.0.0.1:3100/loki/api/v1/push
     volumes:
-      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
-      - ../../storage/logs/app:/callio-logs:ro
+      - ./alloy:/etc/alloy:ro
+      # Projects' log files, read-only, at the same paths as on the host.
+      - ${PROJECTS_ROOT:-/var/www/html}:/var/www/html:ro
       - alloy-data:/var/lib/alloy/data
     depends_on: [loki]
     restart: unless-stopped
@@ -45,10 +51,9 @@ services:
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=15d
       - --web.listen-address=127.0.0.1:9090
+      - --web.enable-lifecycle
     volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
-      - ./prometheus/metrics_token:/etc/prometheus/metrics_token:ro
+      - ./prometheus:/etc/prometheus:ro
       - prometheus-data:/prometheus
     restart: unless-stopped
 
@@ -71,10 +76,10 @@ services:
     environment:
       GF_SERVER_HTTP_ADDR: 127.0.0.1
       GF_SERVER_HTTP_PORT: "3300"
-      # Behind nginx at https://<domain>/grafana/ (nginx/grafana.conf): set both in .env.
+      # Behind nginx at https://<domain>/grafana/ (nginx/grafana.conf).
       GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://127.0.0.1:3300/}
       GF_SERVER_SERVE_FROM_SUB_PATH: ${GRAFANA_SUB_PATH:-false}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in deploy/observability/.env}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in /opt/observability/.env}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       # Logs Drilldown (Explore → Logs): point-and-click log exploration.
