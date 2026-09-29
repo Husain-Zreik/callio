@@ -21,6 +21,7 @@
     "consumer:create": "node scripts/create-consumer.js",
     "seed:dev": "node scripts/seed-dev.js",
     "sip:trunk": "node scripts/sip-trunk.js",
+    "ivr:test": "node scripts/ivr-test.js",
     "agent:token": "node scripts/agent-token.js",
     "demo:agent": "node sdk/agent-js/examples/serve.mjs"
   },
