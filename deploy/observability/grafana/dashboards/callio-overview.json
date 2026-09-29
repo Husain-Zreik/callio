@@ -128,7 +128,7 @@
           },
           "expr": "sum(callio_agent_sockets{env=~\"$env\"})",
           "legendFormat": "",
-          "refId": "B"
+          "refId": "A"
         }
       ]
     },
@@ -154,7 +154,7 @@
           },
           "expr": "sum(increase(callio_calls_ended_total{env=~\"$env\"}[1h]))",
           "legendFormat": "",
-          "refId": "C"
+          "refId": "A"
         }
       ],
       "fieldConfig": {
@@ -213,7 +213,7 @@
           },
           "expr": "sum(increase(callio_webhook_deliveries_total{env=~\"$env\",result=\"failed\"}[1h]))",
           "legendFormat": "",
-          "refId": "E"
+          "refId": "A"
         }
       ]
     },
@@ -239,7 +239,7 @@
           },
           "expr": "max(callio_nodejs_eventloop_lag_p99_seconds{env=~\"$env\"})",
           "legendFormat": "",
-          "refId": "F"
+          "refId": "A"
         }
       ],
       "fieldConfig": {
@@ -271,7 +271,7 @@
           },
           "expr": "sum by (reason) (rate(callio_calls_ended_total{env=~\"$env\"}[5m])) * 60",
           "legendFormat": "{{reason}}",
-          "refId": "G"
+          "refId": "A"
         }
       ],
       "fieldConfig": {
@@ -303,7 +303,7 @@
           },
           "expr": "histogram_quantile(0.5, sum by (le) (rate(callio_call_duration_seconds_bucket{env=~\"$env\"}[15m])))",
           "legendFormat": "p50",
-          "refId": "H"
+          "refId": "A"
         },
         {
           "datasource": {
@@ -312,7 +312,7 @@
           },
           "expr": "histogram_quantile(0.95, sum by (le) (rate(callio_call_duration_seconds_bucket{env=~\"$env\"}[15m])))",
           "legendFormat": "p95",
-          "refId": "H"
+          "refId": "B"
         }
       ],
       "fieldConfig": {
@@ -344,7 +344,7 @@
           },
           "expr": "sum by (status) (rate(callio_http_requests_total{env=~\"$env\"}[5m]))",
           "legendFormat": "{{status}}",
-          "refId": "I"
+          "refId": "A"
         }
       ],
       "fieldConfig": {
@@ -376,7 +376,7 @@
           },
           "expr": "histogram_quantile(0.95, sum by (le, route) (rate(callio_http_request_duration_seconds_bucket{env=~\"$env\"}[5m])))",
           "legendFormat": "{{route}}",
-          "refId": "J"
+          "refId": "A"
         }
       ],
       "fieldConfig": {
@@ -462,7 +462,7 @@
           },
           "expr": "callio_process_resident_memory_bytes{env=~\"$env\"}",
           "legendFormat": "worker {{worker}}",
-          "refId": "M"
+          "refId": "A"
         }
       ],
       "fieldConfig": {
@@ -494,7 +494,7 @@
           },
           "expr": "rate(callio_process_cpu_seconds_total{env=~\"$env\"}[1m])",
           "legendFormat": "worker {{worker}}",
-          "refId": "N"
+          "refId": "A"
         }
       ],
       "fieldConfig": {
