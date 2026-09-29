@@ -661,13 +661,16 @@ class CallRepository {
     }
 
     // NO_ANSWER with a non-null answered_at is a contradiction (a late ACCEPTED
-    // proved the call was answered) — flip it to COMPLETED.
+    // proved the call was answered) — flip it to COMPLETED. Not for IVR calls:
+    // there answered_at is the IVR picking up, and a caller who then gave up
+    // waiting for an agent is rightly NO_ANSWER.
     async correctNoAnswerIfAnswered(callId) {
         const [result] = await connection.execute(
             `UPDATE calls
              SET termination_reason = 'COMPLETED', updated_at = NOW()
              WHERE id = ? AND status = 'TERMINATED'
-               AND termination_reason = 'NO_ANSWER' AND answered_at IS NOT NULL`,
+               AND termination_reason = 'NO_ANSWER' AND answered_at IS NOT NULL
+               AND ivr_flow_id IS NULL`,
             [callId]
         );
         return result.affectedRows > 0;

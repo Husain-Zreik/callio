@@ -722,6 +722,16 @@ class ChannelIngress {
                 } else if (existingStatus === CallStatus.IN_PROGRESS) {
                     terminationReason = TerminationReason.CANCELLED;
                 }
+            } else if (existingStatus === CallStatus.RINGING && existingCall.ivr_flow_id) {
+            //  5. Answered by the IVR, then waiting in the queue when it ended: no
+            //     agent ever took it. Same rule as an unanswered call, timed from
+            //     when it entered the queue.
+                const waitedSec = existingCall.queued_at
+                    ? Math.max(0, Math.floor((effectiveEndedAt - new Date(existingCall.queued_at)) / 1000))
+                    : 0;
+                terminationReason = (direction === CallDirection.INBOUND && waitedSec < 5)
+                    ? TerminationReason.CANCELLED
+                    : TerminationReason.NO_ANSWER;
             }
 
             // terminated_by: keep whatever the agent path already stamped (COALESCE

@@ -159,6 +159,25 @@ try {
     a1.socket.emit('call:terminate', { callId: row6.id });
     await waitFor(async () => (await callRow(row6.id)).status === 'TERMINATED', 10000, 'IVR SIP call ended');
     a1.peer?.close(); a1.peer = null;
+
+    // The caller gives up while waiting for an agent after the IVR: the IVR
+    // answered the call, but no agent did — not COMPLETED.
+    const c6b = await carrier.callIn({ from: '+96181030847', to: DID, freqs: [440] });
+    const row6b = await sipCall(c6b.callId);
+    await c6b.answered;
+    await waitFor(async () => (await q('SELECT id FROM ivr_sessions WHERE call_id = ?', [row6b.id]))[0], 15000, 'IVR session');
+    await sleep(2000);
+    c6b.rtp.tone([697, 1209]);
+    await sleep(400);
+    c6b.rtp.tone([440]);
+    await nextIncoming(a1, row6b.id, 15000);
+    await sleep(6000);                      // ringing the agent, unanswered
+    await carrier.hangUp(c6b);
+    await waitFor(async () => (await callRow(row6b.id)).status === 'TERMINATED', 10000, 'abandoned IVR call ended');
+    const end6b = await callRow(row6b.id);
+    check('a caller who hangs up while waiting after the IVR is NO_ANSWER, not COMPLETED',
+        end6b.termination_reason === 'NO_ANSWER' && end6b.terminated_by === 'CUSTOMER', `${end6b.termination_reason}/${end6b.terminated_by}`);
+
     await api('PUT', '/v1/tenants/demo/ivr-flows/sip-menu', { name: 'SIP menu', channel_ref: 'sip-main', status: 'INACTIVE',
         structure: { nodes: [{ id: 'start', type: 'ivr_start', data: {} }], edges: [] } });
 

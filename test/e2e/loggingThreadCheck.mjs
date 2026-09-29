@@ -9,7 +9,7 @@ if (isMainThread) {
         worker.once('message', resolve);
         worker.postMessage('level?');
     });
-    const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
 
     const running = new Worker(new URL(import.meta.url));
     await settle();
@@ -17,9 +17,10 @@ if (isMainThread) {
     setLogLevels({ levels: { 'check.thread': 'trace' } });
     await settle();
     const afterChange = await ask(running);
+    // A new thread asks for the levels once it starts; the answer is asynchronous.
     const late = new Worker(new URL(import.meta.url));
-    await settle();
-    const lateLevel = await ask(late);
+    let lateLevel = await ask(late);
+    for (let i = 0; i < 30 && lateLevel !== 'trace'; i++) { await settle(); lateLevel = await ask(late); }
     await running.terminate();
     await late.terminate();
     process.stdout.write(JSON.stringify({ before, afterChange, lateLevel }));
