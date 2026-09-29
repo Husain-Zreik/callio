@@ -31,8 +31,13 @@ schema_config:
 
 limits_config:
   allow_structured_metadata: true
+  volume_enabled: true              # Grafana Logs Drilldown: volume by label
   retention_period: 336h            # 14 days, like the files
   reject_old_samples: false         # the first sync may ship a day or two of files
+
+# Grafana Logs Drilldown: the Patterns tab (recurring messages, grouped).
+pattern_ingester:
+  enabled: true
 
 # Log-based alerts: loki/rules/fake/*.yml → Alertmanager.
 ruler:

@@ -77,6 +77,8 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in deploy/observability/.env}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_ANALYTICS_REPORTING_ENABLED: "false"
+      # Logs Drilldown (Explore → Logs): point-and-click log exploration.
+      GF_PLUGINS_PREINSTALL: grafana-lokiexplore-app
       PROMETHEUS_URL: http://127.0.0.1:9090
       LOKI_URL: http://127.0.0.1:3100
       ALERTMANAGER_URL: http://127.0.0.1:9093

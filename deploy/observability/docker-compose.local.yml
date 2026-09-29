@@ -53,6 +53,8 @@ services:
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_ANALYTICS_REPORTING_ENABLED: "false"
+      # Logs Drilldown (Explore → Logs): point-and-click log exploration.
+      GF_PLUGINS_PREINSTALL: grafana-lokiexplore-app
       PROMETHEUS_URL: http://prometheus:9090
       LOKI_URL: http://loki:3100
       ALERTMANAGER_URL: http://alertmanager:9093
