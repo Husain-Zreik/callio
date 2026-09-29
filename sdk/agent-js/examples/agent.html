@@ -83,7 +83,12 @@ const log = (...parts) => {
   const line = `${new Date().toLocaleTimeString()}  ${parts.map((p) => typeof p === 'string' ? p : JSON.stringify(p)).join(' ')}`;
   $('log').textContent = `${line}\n${$('log').textContent}`.slice(0, 20000);
 };
-const pill = (el, text, kind = '') => { el.textContent = text; el.className = `pill ${kind}`; };
+// Only swaps the colour class, so the element keeps its other classes.
+const pill = (el, text, kind = '') => {
+  el.textContent = text;
+  el.classList.remove('ok', 'warn', 'bad');
+  if (kind) el.classList.add(kind);
+};
 
 let agent = null;
 const cards = new Map();
@@ -149,7 +154,10 @@ function show(call) {
     <div class="muted timer"></div>`;
   $('calls').prepend(el);
   cards.set(call.id, el);
-  const q = (sel) => el.querySelector(sel);
+  // Each element looked up once, when the card is built.
+  const refs = {};
+  for (const name of ['who', 'meta', 'state', 'accept', 'decline', 'switch', 'mute', 'hangup', 'timer']) refs[name] = el.querySelector(`.${name}`);
+  const q = (sel) => refs[sel.slice(1)];
   q('.who').textContent = call.customer.name ? `${call.customer.name} · ${call.customer.address}` : call.customer.address ?? `Call ${call.id}`;
   q('.meta').textContent = `${call.direction ?? ''} ${call.channel ?? ''} #${call.id}`;
 
