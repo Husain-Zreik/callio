@@ -1,5 +1,5 @@
-# Alertmanager: receives Callio's alerts (Prometheus rules, Loki rules) and
-# sends notifications. Alerts always show in Grafana (Alerting → Alert list,
+# Alertmanager: receives the server's alerts (every project's Prometheus and Loki
+# rules) and sends notifications. Alerts always show in Grafana (Alerting → Alert list,
 # data source "Alertmanager") and at 127.0.0.1:9093; to also be notified,
 # fill one receiver below and point `route.receiver` at it, then:
 #   cd /opt/observability && docker compose restart alertmanager
