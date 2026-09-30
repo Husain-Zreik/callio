@@ -14,7 +14,8 @@ import { callCleanupService } from '../../core/calls/CallCleanupService.js';
 import { storageClient } from '../../infra/storage/StorageClient.js';
 import { customerChannels } from '../../core/channels/CustomerChannels.js';
 import { Channel } from '../../core/constants/CallConstants.js';
-import { badRequest, notFound } from '../errors.js';
+import { badRequest, notFound, HttpError } from '../errors.js';
+import { entityDeletion } from '../../core/tenancy/EntityDeletion.js';
 import { requireString, optionalInt, oneOf, optionalObject, ref } from './validate.js';
 
 // ── Shaping ──────────────────────────────────────────────────────────────────
@@ -78,6 +79,22 @@ async function resolveAudioId(tenant, audioId, field) {
     const asset = await IvrRepository.findAudioAsset(Number(audioId), tenant.id);
     if (!asset) throw badRequest(`${field} does not match an audio asset`);
     return asset.id;
+}
+
+// A refused delete: 409 in_use, with what is using it.
+async function deleted(reply, what, result) {
+    if (result.deleted) return reply.code(204).send();
+    if (!result.blockedBy) throw notFound(what.replace(/^The /, '').replace(/^./, (c) => c.toUpperCase()));   // gone meanwhile
+    const b = result.blockedBy;
+    const parts = [
+        b.liveCalls && 'live calls',
+        b.channels?.length && `channels ${b.channels.join(', ')}`,
+        b.overflowQueues?.length && `queues overflowing into it (${b.overflowQueues.join(', ')})`,
+        b.queues?.length && `queues ${b.queues.join(', ')}`,
+        b.ivrFlows?.length && `IVR flows ${b.ivrFlows.join(', ')}`,
+    ].filter(Boolean);
+    const details = Object.fromEntries(Object.entries(b).filter(([, v]) => v === true || v?.length));
+    throw new HttpError(409, 'in_use', `${what} is in use by ${parts.join('; ')}`, details);
 }
 
 // ── Routes ───────────────────────────────────────────────────────────────────
@@ -167,6 +184,13 @@ export default async function managementRoutes(fastify) {
         return { queue: queueView(queue) };
     });
 
+    fastify.delete('/tenants/:tenantRef/queues/:queueRef', async (request, reply) => {
+        const tenant = await resolveTenant(request);
+        const queue = await QueueRepository.findByExternalRef(tenant.id, ref(request.params.queueRef, 'queue'));
+        if (!queue) throw notFound('Queue');
+        return deleted(reply, 'The queue', await entityDeletion.deleteQueue(tenant.id, queue));
+    });
+
     fastify.get('/tenants/:tenantRef/queues', async (request) => {
         const tenant = await resolveTenant(request);
         return { queues: (await QueueRepository.listForTenant(tenant.id)).map(queueView) };
@@ -227,6 +251,13 @@ export default async function managementRoutes(fastify) {
         return { channel: channelView(channel) };
     });
 
+    fastify.delete('/tenants/:tenantRef/channels/:channelRef', async (request, reply) => {
+        const tenant = await resolveTenant(request);
+        const channel = await ChannelRepository.findByExternalRef(tenant.id, ref(request.params.channelRef, 'channel'));
+        if (!channel) throw notFound('Channel');
+        return deleted(reply, 'The channel', await entityDeletion.deleteChannel(tenant.id, channel));
+    });
+
     fastify.get('/tenants/:tenantRef/channels', async (request) => {
         const tenant = await resolveTenant(request);
         return { channels: (await ChannelRepository.listForTenant(tenant.id)).map(channelView) };
@@ -254,6 +285,13 @@ export default async function managementRoutes(fastify) {
             status: oneOf(body, 'status', ['ACTIVE', 'INACTIVE'], { optional: true, fallback: 'INACTIVE' }),
         });
         return { ivrFlow: flowView(flow) };
+    });
+
+    fastify.delete('/tenants/:tenantRef/ivr-flows/:flowRef', async (request, reply) => {
+        const tenant = await resolveTenant(request);
+        const flow = await IvrRepository.findFlowByExternalRef(tenant.id, ref(request.params.flowRef, 'ivr flow'));
+        if (!flow) throw notFound('IVR flow');
+        return deleted(reply, 'The IVR flow', await entityDeletion.deleteIvrFlow(tenant.id, flow));
     });
 
     fastify.get('/tenants/:tenantRef/ivr-flows', async (request) => {
@@ -293,6 +331,15 @@ export default async function managementRoutes(fastify) {
             file_size_bytes: size,
         });
         return reply.code(201).send({ audioAsset: audioView(asset) });
+    });
+
+    fastify.delete('/tenants/:tenantRef/audio-assets/:assetId', async (request, reply) => {
+        const tenant = await resolveTenant(request);
+        const id = Number(request.params.assetId);
+        const asset = Number.isInteger(id) && id > 0 ? await IvrRepository.findAudioAsset(id, tenant.id) : null;
+        // Platform defaults are shared by every tenant: not the consumer's to delete.
+        if (!asset || asset.tenant_id == null) throw notFound('Audio asset');
+        return deleted(reply, 'The audio asset', await entityDeletion.deleteAudioAsset(tenant.id, asset));
     });
 
     fastify.get('/tenants/:tenantRef/audio-assets', async (request) => {

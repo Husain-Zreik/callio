@@ -99,6 +99,22 @@ class ChannelRepository {
         );
         return this.findByExternalRef(tenantId, externalRef);
     }
+
+    // Guarded: not while a live call is on the channel. Its IVR flows go with
+    // it (FK cascade); call history keeps channel_id NULL and its own address.
+    async deleteIfUnused(channelId, tenantId) {
+        const [result] = await connection.execute(
+            `DELETE FROM channels WHERE id = ? AND tenant_id = ?
+               AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.channel_id = ? AND c.status IN ('INITIATED', 'RINGING', 'IN_PROGRESS'))`,
+            [channelId, tenantId, channelId]
+        );
+        return result.affectedRows;
+    }
+
+    async usingInboundQueue(queueId) {
+        const [rows] = await connection.execute('SELECT external_ref FROM channels WHERE inbound_queue_id = ?', [queueId]);
+        return rows.map((r) => r.external_ref);
+    }
 }
 
 export default new ChannelRepository();

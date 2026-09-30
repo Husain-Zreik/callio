@@ -123,6 +123,22 @@ class QueueRepository {
             conn.release();
         }
     }
+
+    // Guarded: not while a live call is in the queue. 0 = something is using it
+    // (or it's gone). Members go with it; call history keeps queue_id NULL.
+    async deleteIfUnused(queueId, tenantId) {
+        const [result] = await connection.execute(
+            `DELETE FROM queues WHERE id = ? AND tenant_id = ?
+               AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.queue_id = ? AND c.status IN ('INITIATED', 'RINGING', 'IN_PROGRESS'))`,
+            [queueId, tenantId, queueId]
+        );
+        return result.affectedRows;
+    }
+
+    async overflowingInto(queueId) {
+        const [rows] = await connection.execute('SELECT external_ref FROM queues WHERE overflow_queue_id = ?', [queueId]);
+        return rows.map((r) => r.external_ref);
+    }
 }
 
 export default new QueueRepository();

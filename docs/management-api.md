@@ -60,6 +60,8 @@ Every error has one shape:
 { "error": { "code": "invalid_request", "message": "name is required" } }
 ```
 
+Some errors add `details` (for `in_use`: what is using the entity).
+
 | Status | `code` | When |
 |---|---|---|
 | `400` | `invalid_request` | A field is missing, has the wrong type or is out of range; a `*_ref` in the body matches nothing; malformed JSON |
@@ -70,6 +72,7 @@ Every error has one shape:
 | `409` | `invalid_channel`, `channel_disabled`, `unsupported_channel`, `invalid_agent`, `agent_busy`, `invalid_customer` | `POST …/calls` — see [Outbound calls](#outbound-calls) |
 | `409` | `call_ended` | `POST /v1/calls/{id}/terminate` on a call that already ended |
 | `409` | `idempotency_key_in_use` | A request with this `Idempotency-Key` is still running |
+| `409` | `in_use` | A `DELETE` of something still in use — see [Deleting](#deleting) |
 | `413` | `invalid_request` | Request body over the size limit |
 | `422` | `idempotency_key_reused` | The `Idempotency-Key` was used with a different request |
 | `429` | `rate_limited` | Over the rate limit |
@@ -160,6 +163,7 @@ them: your Firebase project, your Apple key, your OneSignal app.
 | `PUT` | `/v1/tenants/{t}/queues/{queueRef}` | see below | `{ queue }` |
 | `GET` | `/v1/tenants/{t}/queues` | — | `{ queues }` |
 | `PUT` | `/v1/tenants/{t}/queues/{queueRef}/members` | `{ members: [{ agent_ref, priority? }] }` — replaces the list | `{ members }` |
+| `DELETE` | `/v1/tenants/{t}/queues/{queueRef}` | — | `204` — see [Deleting](#deleting) |
 
 ```json
 {
@@ -206,6 +210,7 @@ maxWaitSeconds, overflowQueueId, holdAudioAssetId, status }`. `members`:
 |---|---|---|---|
 | `PUT` | `/v1/tenants/{t}/channels/{channelRef}` | see below | `{ channel }` |
 | `GET` | `/v1/tenants/{t}/channels` | — | `{ channels }` |
+| `DELETE` | `/v1/tenants/{t}/channels/{channelRef}` | — | `204` — see [Deleting](#deleting) |
 
 WhatsApp line:
 
@@ -263,6 +268,7 @@ Credentials are encrypted at rest and never returned. An address or
 |---|---|---|---|
 | `PUT` | `/v1/tenants/{t}/ivr-flows/{flowRef}` | see below | `{ ivrFlow }` |
 | `GET` | `/v1/tenants/{t}/ivr-flows` | — | `{ ivrFlows }` (without `structure`) |
+| `DELETE` | `/v1/tenants/{t}/ivr-flows/{flowRef}` | — | `204` — see [Deleting](#deleting) |
 
 ```json
 {
@@ -324,6 +330,7 @@ triggerPriority, timeoutSeconds, agentRingTimeout, status, structure }`.
 |---|---|---|---|
 | `POST` | `/v1/tenants/{t}/audio-assets` | upload or register — see below | `201 { audioAsset }` |
 | `GET` | `/v1/tenants/{t}/audio-assets` | — | `{ audioAssets }` (includes platform-wide defaults) |
+| `DELETE` | `/v1/tenants/{t}/audio-assets/{id}` | — | `204` — see [Deleting](#deleting); platform defaults are `404` |
 
 - Upload: `{ name, content_base64, mime_type }` — stored in object storage
   (`400` if none is configured).
@@ -336,6 +343,26 @@ triggerPriority, timeoutSeconds, agentRingTimeout, status, structure }`.
 durationSeconds, platformDefault }`; `storageProvider` is lowercase (`s3`,
 `local`). Any format ffmpeg can decode works (WAV, MP3, OGG). The whole JSON
 body is limited to 15 MB, so base64 content can carry about 11 MB of audio.
+
+## Deleting
+
+Queues, channels, IVR flows and audio assets are deleted for good. Call
+history stays: a call keeps its own channel address, customer and times, and
+its link to the deleted entity becomes `null`.
+
+A delete is refused with `409 in_use` while something depends on it.
+`error.details` says what, so you can re-point it and try again:
+
+| Entity | Refused while | `details` |
+|---|---|---|
+| Queue | a live call is in it; a channel routes into it; a queue overflows into it; an IVR flow transfers to it | `liveCalls`, `channels`, `overflowQueues`, `ivrFlows` |
+| Channel | a live call is on it | `liveCalls` |
+| IVR flow | a live call is in it or came through it | `liveCalls` |
+| Audio asset | a queue holds with it; an IVR flow plays it | `queues`, `ivrFlows` |
+
+`liveCalls` is `true`; the others are lists of your refs. A channel's IVR
+flows are deleted with it. An audio file Callio stored itself (an upload) is
+removed from storage; an object you registered by `storage_key` is left alone.
 
 ## Calls
 

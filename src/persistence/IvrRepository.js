@@ -280,6 +280,33 @@ class IvrRepository {
             await connection.execute(`UPDATE calls SET state = ?, updated_at = NOW() WHERE id = ?`, [state, callId]);
         }
     }
+
+    // Every flow of the tenant with its structure — for reference checks.
+    async listFlowStructures(tenantId) {
+        const [rows] = await connection.execute('SELECT id, external_ref, structure FROM ivr_flows WHERE tenant_id = ?', [tenantId]);
+        return rows.map((r) => ({ ...r, structure: parseJson(r.structure, null) }));
+    }
+
+    // Guarded: not while a live call went through (or is in) the flow.
+    async deleteFlowIfUnused(flowId, tenantId) {
+        const [result] = await connection.execute(
+            `DELETE FROM ivr_flows WHERE id = ? AND tenant_id = ?
+               AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.ivr_flow_id = ? AND c.status IN ('INITIATED', 'RINGING', 'IN_PROGRESS'))`,
+            [flowId, tenantId, flowId]
+        );
+        return result.affectedRows;
+    }
+
+    async queuesHoldingAudio(assetId) {
+        const [rows] = await connection.execute('SELECT external_ref FROM queues WHERE hold_audio_asset_id = ?', [assetId]);
+        return rows.map((r) => r.external_ref);
+    }
+
+    // Only the tenant's own assets; platform defaults can't be deleted through the API.
+    async deleteAudioAsset(assetId, tenantId) {
+        const [result] = await connection.execute('DELETE FROM audio_assets WHERE id = ? AND tenant_id = ?', [assetId, tenantId]);
+        return result.affectedRows;
+    }
 }
 
 export default new IvrRepository();
