@@ -41,6 +41,13 @@ class CallCleanupService {
         this._ivrTimer = setInterval(() => this._runIvrRingCleanup(),   30_000).unref();
     }
 
+    stop() {
+        clearInterval(this._timer);
+        clearInterval(this._ivrTimer);
+        this._timer = null;
+        this._ivrTimer = null;
+    }
+
     // ── Public API ────────────────────────────────────────────────────────────
 
     enqueue(callId, tenantId, reason) {

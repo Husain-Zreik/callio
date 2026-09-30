@@ -20,6 +20,7 @@ import CallRepository from '../persistence/CallRepository.js';
 import dbPool from '../../config/dbConnection.js';
 import { outboxDispatcher } from '../outbox/OutboxDispatcher.js';
 import { queueTimeoutService } from '../core/routing/QueueTimeoutService.js';
+import { callCleanupService } from '../core/calls/CallCleanupService.js';
 import { logger } from '../infra/logging/logger.js';
 
 const log = logger('server.shutdown');
@@ -46,6 +47,19 @@ export async function shutdown(server, io) {
     if (isShuttingDown) return;
     log.info('Shutting down server...');
     isShuttingDown = true;
+
+    // Hard kill after 60 s — long enough for S3 multipart finalization on slow
+    // links. Armed first, so a step that hangs can't keep the worker alive.
+    // PM2's kill_timeout (WORKER_KILL_TIMEOUT) must be above this.
+    setTimeout(() => {
+        log.warn('Force exit after timeout');
+        process.exit(1);
+    }, 60_000);
+
+    // 0. Stop the stuck-call / orphan-peer sweep — it would race step 3's peer
+    //    closing and batch terminate, and could tick after Redis or the DB pool
+    //    are closed.
+    callCleanupService.stop();
 
     try {
         // 1. Close Socket.IO — stops new events from triggering peer or Redis ops.
@@ -206,10 +220,4 @@ export async function shutdown(server, io) {
         log.info('Server closed');
         process.exit(0);
     });
-
-    // Hard kill after 60 s — long enough for S3 multipart finalization on slow links.
-    setTimeout(() => {
-        log.warn('Force exit after timeout');
-        process.exit(1);
-    }, 60_000);
 }

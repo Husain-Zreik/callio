@@ -437,8 +437,10 @@ the same code for both channels ([sip.md](sip.md)).
 7. **Listen.** Signal handlers, worker stats, then `listen`.
 
 **Shutdown** (`src/server/shutdown.js`) runs in strict order. It has a double-run guard, and
-`isShuttingDown` makes the WhatsApp webhook answer 503.
+`isShuttingDown` makes the WhatsApp webhook answer 503. A hard exit is armed first: the worker
+exits after 60 s even if a step hangs. PM2's `WORKER_KILL_TIMEOUT` (default 65 s) is above it.
 
+0. Stop `callCleanupService` (its sweep would race the peer closing below).
 1. Close Socket.IO and wait 800 ms.
 2. Stop recordings: flush Opus, finalize the OGG, end the upload streams. Then (2a) terminate
    the encoding and DTMF worker threads.
@@ -455,19 +457,11 @@ the same code for both channels ([sip.md](sip.md)).
 9. Close storage.
 10. Close the MySQL pool.
 
-Then `server.close()`, with a hard exit after 60 s.
+Then `server.close()` and exit.
 
 ## Known gaps
 
 - **Per-consumer push credentials aren't used.** Push uses platform credentials from env.
   `consumers.push_credentials` is stored (`ConsumerRepository.getPushCredentials`) but nothing in
   `src/push/` reads it.
-- **PM2 kill timeout is too short for the S3 drain.** `WORKER_KILL_TIMEOUT` defaults to 5 s
-  (`ecosystem.config.cjs`), under shutdown's 45 s S3 drain. With recordings on, PM2 can SIGKILL
-  mid-drain unless it is raised.
-- **Shutdown doesn't stop `CallCleanupService`.** Its timers are unref'd, but a tick can fire
-  after Redis or the DB pool is closed.
-- **IVR-stage calls have no Redis subscriber.** There is no AGENT offer yet, so a
-  `CALL_TERMINATED` published during the IVR (API terminate, supervisor hang-up) reaches no
-  worker.
 - **Boundary leaks.** Listed under [Boundaries](#boundaries).

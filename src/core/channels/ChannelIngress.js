@@ -277,6 +277,13 @@ class ChannelIngress {
                 const ivrAnsweredAt = new Date();
                 const flowHeader = await IvrRepository.findFlowHeader(ivrFlowId, tenantId).catch(() => null);
                 try {
+                    // This worker holds the media from here on, and nothing else
+                    // subscribes it yet (that's the AGENT offer, after the flow
+                    // transfers). Without it a CALL_TERMINATED published during the
+                    // IVR — API terminate, supervisor hang-up — reaches no worker.
+                    // The later AGENT offer's subscribe is a no-op; closing the
+                    // call's peers unsubscribes.
+                    await redisPubSubService.subscribeToCallEvents(callId, callEventHandler.handleCallEvent);
                     const adapter = customerChannels.get(channel.type);
                     const customerSdpAnswer = await sdpCoordinator.createSDPAnswer(
                         callId, sdpOffer, ConnectionType.CUSTOMER, { sdpProfile: adapter.sdp }

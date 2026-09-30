@@ -11,9 +11,10 @@
 //   NODE_ENV=production        # 'development' | 'staging' | 'production'
 //   UV_THREADPOOL_SIZE=16
 //   WORKER_MEMORY_LIMIT=1G
-//   WORKER_KILL_TIMEOUT=5000   (ms — must exceed shutdown() force-exit of 60 s
-//                                if graceful S3 upload drain is needed; keep at
-//                                5000 only when recordings are disabled or short)
+//   WORKER_KILL_TIMEOUT=65000  (ms — how long PM2 waits after SIGINT before SIGKILL.
+//                                Keep it above shutdown()'s own 60 s force exit, so
+//                                the recording upload drain (up to 45 s) can finish.
+//                                A worker with nothing to drain exits in ~1 s anyway.)
 //
 // The app's logger (src/infra/logging) writes storage/logs/app/worker-{id}/YYYY-MM-DD.log
 // (+ .error.log), JSON, and turns stdout off under PM2 by default (LOG_STDOUT),
@@ -35,7 +36,7 @@ const WORKER_COUNT  = parseInt(process.env.WORKER_COUNT           || '2',    10)
 const BASE_PORT     = parseInt(process.env.BASE_PORT              || '3001', 10);
 const MEMORY_LIMIT  =          process.env.WORKER_MEMORY_LIMIT    || '1G';
 const THREAD_POOL   =          process.env.UV_THREADPOOL_SIZE      || '16';
-const KILL_TIMEOUT  = parseInt(process.env.WORKER_KILL_TIMEOUT    || '5000', 10);
+const KILL_TIMEOUT  = parseInt(process.env.WORKER_KILL_TIMEOUT    || '65000', 10);
 // Identifies this app/server so `pm2 ls` / `pm2 monit` stay readable when
 // multiple servers are watched from one PM2 dashboard (e.g. pm2-plus).
 const APP_NAME      =          process.env.APP_NAME                || 'app';

@@ -250,6 +250,22 @@ try {
     check('the IVR session and the key press are recorded', session?.outcome === 'transferred' && inputs.some((i) => i.input === '1'),
         `outcome=${session?.outcome} inputs=${inputs.map((i) => i.input).join(',')}`);
     await endByAgent(agent6, row6.id);
+
+    // ── 6b. The API ends a call while it is still in the IVR ──
+    // Nothing had subscribed the owning worker to the call's events before an
+    // AGENT offer, so this terminate used to reach no worker.
+    const c6b = await meta.callIn('wacid.r.6b', { from: '96181030847' });
+    const row6b = await callByProvider(c6b.id);
+    await waitFor(() => sup.events.some((e) => e.event === 'call:ivr_state' && e.payload.callId === row6b.id && e.payload.nodeType === 'ivr_menu'), 15000, 'menu node (6b)');
+    const term6b = await api('POST', `/v1/calls/${row6b.id}/terminate`);
+    check('terminate during the IVR is accepted', term6b.status === 202, `HTTP ${term6b.status}`);
+    const ended6b = await waitFor(async () => { const r = await callRow(row6b.id); return r.status === 'TERMINATED' ? r : null; }, 10000, 'IVR call ended by the API').catch(() => null);
+    check('the API ends a call in the IVR', ended6b?.status === 'TERMINATED', `status=${(await callRow(row6b.id)).status}`);
+    const told6b = await waitFor(() => meta.calls.some((c) => c.body.action === 'terminate' && c.body.call_id === c6b.id), 5000, 'provider terminate (6b)').catch(() => false);
+    const session6b = await waitFor(async () => (await q('SELECT * FROM ivr_sessions WHERE call_id = ? AND ended_at IS NOT NULL', [row6b.id]))[0], 5000, 'IVR session ended (6b)').catch(() => null);
+    check('the provider is told and the IVR session stops', Boolean(told6b) && Boolean(session6b?.ended_at),
+        `provider=${Boolean(told6b)} session=${session6b?.outcome}/${session6b?.ended_at}`);
+
     await api('PUT', '/v1/tenants/demo/ivr-flows/main-menu', { ...flow.body.ivrFlow, name: 'Main menu', status: 'INACTIVE',
         structure: { nodes: [{ id: 'start', type: 'ivr_start', data: {} }], edges: [] } });
 
