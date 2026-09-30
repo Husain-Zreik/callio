@@ -116,7 +116,7 @@ All of it is in `src/infra/logging/`; **`policy.js` is the one place for the rul
 
 - WhatsApp and SIP, inbound and outbound; queues (`RING_ALL`/`ROUND_ROBIN`/`PRIORITY`) with ring timeout / max wait / overflow; IVR, transfer, monitoring, recording, push, the Management API and consumer events are implemented and covered by `test/e2e` (SIP against the local gateway and a fake carrier).
 - Deployed dev environment: `callio.pcg-ms.com` (nginx → PM2), on Callio's own database. Real inbound calls verified there: WhatsApp, and SIP from the carrier (Digitalk) through the SIP channel to an agent with two-way audio. Outbound SIP, carrier DTMF and a real DID are still open (SIP_INTEGRATION.md, last section).
-- `sdk/agent-js` — the JS agent SDK (browser + Node), tested by `test/e2e/sdk.test.mjs`; `examples/agent.html` is a working agent page. React bindings and the Dart SDK are next.
+- `sdk/agent-js` — the JS agent SDK (browser + Node, TypeScript types): agents (calls, availability, transfer, reconnect/devices, credential refresh) and supervisors (live board of the tenant's calls, monitoring listen/whisper/barge); tested by `test/e2e/sdk.test.mjs`; `examples/agent.html` is a working agent page. React bindings and the Dart SDK are next.
 - Not yet: per-consumer push credentials (push uses platform credentials from env).
 
 ## History

@@ -59,8 +59,23 @@ try {
     a1.setAvailability('AVAILABLE');
     check('setAvailability reports back through the availability event', (await avail).availability === 'AVAILABLE');
 
+    // A supervisor on the SDK: the tenant's live calls (board) and monitoring.
+    const sup = await sdkAgent('sup-1', 'sup-browser', agentToken(seed, 'sup-1', 'SUPERVISOR'));
+    opened.push(sup);
+    check('a supervisor connects with the SDK and is recognised as one', sup.isSupervisor && !a1.isSupervisor);
+
+    // A credentials refresh on a live connection: new session, no resync, calls untouched.
+    let resynced = false;
+    const offReady = a1.on('ready', () => { resynced = true; });
+    const refreshed = nextEvent(a1, 'sessionRefreshed');
+    a1.refreshSession();
+    const refreshedSession = await refreshed;
+    offReady();
+    check('refreshSession() gets a fresh session without a reconnect or resync', Boolean(refreshedSession?.iceServers) && !resynced);
+
     // ── 1. Ring, accept, hear both ways, hang up ──
     const ringing = nextEvent(a1, 'incoming');
+    const onBoard = nextEvent(sup, 'boardCall');
     const c1 = await meta.callIn('wacid.sdk.1');
     const call1 = await ringing;
     const row1 = await callByProvider(c1.id);
@@ -76,11 +91,41 @@ try {
     const customerHears = await hear(await c1.customer.received);
     check('the agent hears the customer and the customer hears the agent', agentHears.dominant() === 440 && customerHears.dominant() === 880,
         `agent=${agentHears.dominant()} customer=${customerHears.dominant()}`);
+
+    // The supervisor's board and monitoring of this call.
+    const boardView = await onBoard;
+    await waitFor(() => String(sup.board.get(String(row1.id))?.agentId) === String(a1.agent.id), 8000, 'board shows who answered');
+    const view1 = sup.board.get(String(row1.id));
+    check('the board shows the new call, then who answered it', String(boardView.callId) === String(row1.id)
+        && view1?.status === 'IN_PROGRESS', `first=${boardView.callId} status=${view1?.status} agent=${view1?.agentId}`);
+    const monitor = await sup.monitor(row1.id, { stream: mic(660) });
+    await waitFor(() => monitor.agentStream && monitor.customerStream && monitor.state === 'active', 10000, 'monitor streams');
+    const supHearsAgent = listen(monitor.agentStream.getAudioTracks()[0]);
+    const supHearsCustomer = listen(monitor.customerStream.getAudioTracks()[0]);
+    await hear(supHearsAgent);
+    await hear(supHearsCustomer, 1000, 0);
+    check('monitor() hears the agent and the customer on separate streams',
+        supHearsAgent.dominant() === 880 && supHearsCustomer.dominant() === 440, `agent=${supHearsAgent.dominant()} customer=${supHearsCustomer.dominant()}`);
+    const agentEar = await ear1;
+    await hear(agentEar);
+    const inListen = agentEar.has(660);
+    const whisper = nextEvent(monitor, 'mode', (m) => m === 'whisper');
+    monitor.setMode('whisper');
+    await whisper;
+    await hear(agentEar);
+    check('listen is silent to the agent; setMode("whisper") lets the agent hear the supervisor', !inListen && agentEar.has(660),
+        `listen=${inListen} whisper=${agentEar.has(660)}`);
+    const monitorEnded = nextEvent(monitor, 'ended');
+    const boardEnded = nextEvent(sup, 'boardCallEnded', (v) => String(v.callId) === String(row1.id));
+
     const ended1 = nextEvent(call1, 'ended');
     call1.hangup();
     check('hangup() ends the call locally', (await ended1).reason === 'hangup');
     await waitFor(async () => (await callRow(row1.id)).status === 'TERMINATED', 10000, 'call 1 ended');
     check('…and at Callio (COMPLETED/AGENT)', (await callRow(row1.id)).terminated_by === 'AGENT');
+    const [monitorEnd, boardEnd] = await Promise.all([monitorEnded, boardEnded]);
+    check('when the call ends, the monitor ends and the call leaves the board',
+        monitorEnd.reason === 'call_ended' && !sup.board.has(String(row1.id)) && String(boardEnd.callId) === String(row1.id), monitorEnd.reason);
     await waitFor(async () => (await availability('agent-1')) === 'AVAILABLE', 8000, 'agent-1 available');
 
     // ── 2. The customer hangs up ──

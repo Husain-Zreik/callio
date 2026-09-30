@@ -43,16 +43,18 @@ ICE/TURN servers come from Callio; the app never configures them.
 
 | | |
 |---|---|
-| `agent.setAvailability('AVAILABLE' \| 'OFFLINE')` | `ON_CALL` is set by Callio |
+| `agent.setAvailability('AVAILABLE' \| 'OFFLINE', { agentId? })` | `ON_CALL` is set by Callio; `agentId`: a supervisor setting someone else |
 | `agent.startOutbound(callId, { stream? })` | start an outbound call the consumer created (`POST /v1/tenants/{t}/calls`) |
 | `agent.calls`, `agent.call(id)` | this agent's calls |
 | `agent.queues` | queue snapshots by queue id |
+| `agent.team` | the tenant's agents' availability, as it changes |
+| `agent.refreshSession()` | new ICE/TURN credentials (done automatically before they expire) |
 | `agent.agent`, `agent.session` | identity from `session:ready` |
 | `agent.close()` | |
 
 Events: `incoming` (call), `elsewhere` (call), `callState` (call, state, previous),
-`callEnded` (call, info), `availability`, `queue`, `ready` (after each reconnect),
-`disconnected`, `error`.
+`callEnded` (call, info), `availability`, `team`, `queue`, `ready` (after each reconnect),
+`sessionRefreshed`, `disconnected`, `error`.
 
 ## A call
 
@@ -80,6 +82,41 @@ Events: `state` (state, previous), `remoteStream` (stream), `ended` ({ reason })
 `terminationReason`), `withdrawn` (the offer went to someone else),
 `answered_elsewhere`, `media_failed`, `accept_failed`, `error`, `gone`.
 
+## Supervisors
+
+An agent whose token has `role: 'SUPERVISOR'` (`agent.isSupervisor`) also gets:
+
+| | |
+|---|---|
+| `agent.board` | the tenant's live calls (`Map` callId → call view: status, direction, customer, agent, queue, `ivr` position), rebuilt on every sync |
+| `agent.monitor(callId, { stream? })` | listen to a call → a `Monitor` |
+| `agent.transferCall(callId, { agentId } \| { queueId })` | move any call |
+| `agent.setAvailability(value, { agentId })` | set an agent's availability |
+
+Board events: `board` (the whole board, after each sync), `boardCall` (a call
+appeared or changed), `boardCallEnded` (view, { terminationReason, terminatedBy }).
+
+```js
+const monitor = await agent.monitor(callId);            // asks for the microphone
+monitor.on('agentStream', (s) => { agentAudio.srcObject = s; });
+monitor.on('customerStream', (s) => { customerAudio.srcObject = s; });
+monitor.setMode('whisper');                              // 'listen' | 'whisper' | 'barge'
+monitor.stop();
+```
+
+`listen`: the supervisor hears both, nobody hears the supervisor ·
+`whisper`: the agent hears the supervisor · `barge`: both do. Callio mixes, so
+switching modes is instant. Monitor events: `state`, `agentStream`,
+`customerStream`, `mode`, `agentPrivate` (the agent talking privately to you),
+`agentReconnected`, `ended` ({ reason: `stopped` \| `call_ended` \| `ended` \|
+`disconnected` \| `failed` }). A reconnect of the supervisor's socket ends
+monitoring — start it again.
+
+## TypeScript
+
+Types ship with the package (`src/index.d.ts`): `connect`, `CallioAgent`,
+`Call`, `Monitor` and the payload shapes.
+
 ## What it handles
 
 - Resync on every connect (`calls:sync`): ringing calls, calls on this device
@@ -87,7 +124,10 @@ Events: `state` (state, previous), `remoteStream` (stream), `ended` ({ reason })
 - ICE candidates buffered both ways until each side is ready.
 - Media recovery: no media within 15 s or a failed connection → one reconnect,
   then the call is ended with `system_failed`.
-- Offers withdrawn (taken, timed out, declined elsewhere) and redelivered offers.
+- Offers withdrawn (taken, timed out, declined elsewhere, an unaccepted
+  transfer returned to its queue) and redelivered offers.
+- TURN credentials refreshed on the live connection before they expire, for
+  long shifts.
 
 ## Demo
 
