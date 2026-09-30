@@ -1,0 +1,23 @@
+name: callio_agent_example
+description: "Callio agent example: take and make calls on a phone with callio_agent."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  callio_agent:
+    path: ../
+  flutter_callkit_incoming: ^3.1.6
+  flutter_webrtc: ^1.6.2+hotfix.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
