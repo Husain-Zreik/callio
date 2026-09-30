@@ -38,7 +38,8 @@ deploy/observability/            (in the Callio repo)
   alloy/base.alloy               + alloy/<project>.alloy
   prometheus/scrape.d/<project>.yml  rules.d/<project>.yml  secrets/<project>_metrics_token
   loki/rules/fake/<project>.yml
-  alertmanager/alertmanager.yml  notification receivers (kept on updates — edit here)
+  alerts.sh                      where alerts are sent (email / Slack / Telegram)
+  alertmanager/alertmanager.yml  written by alerts.sh (kept on updates); notify.env + secrets/ beside it
   grafana/dashboards/<Title>/    one Grafana folder per project
   nginx/grafana.conf             included by the site's nginx
 ```
@@ -194,10 +195,33 @@ sudo systemctl disable --now loki promtail grafana-server
 
 Server alerts: see *The server itself*. Thresholds are starting points — tune
 them in `callio/prometheus-alerts.yml` / `callio/loki-rules.yml` (or
-`stack/server/prometheus-alerts.yml`) and re-run `install.sh`. To be
-**notified**, fill a receiver (email, Slack, Telegram, webhook) in
-`/opt/observability/alertmanager/alertmanager.yml`, point `route.receiver` at
-it, and `cd /opt/observability && docker compose restart alertmanager`.
+`stack/server/prometheus-alerts.yml`) and re-run `install.sh`.
+
+### Notifications
+
+Alerts always show in Grafana (**Alerting → Alert list**). To be told as
+well, pick one or more receivers with `alerts.sh`. Secrets are asked for
+without echo and kept in `alertmanager/secrets/` (mode 600), never in the
+config:
+
+```bash
+# Email (SMTP; for Gmail use an app password):
+sudo /opt/observability/alerts.sh --email ops@example.com --smtp smtp.gmail.com:587 --from alerts@example.com
+# Slack (an incoming webhook for the channel):
+sudo /opt/observability/alerts.sh --slack '#callio-alerts'
+# Telegram (a bot from @BotFather, added to the group; the group's chat id):
+sudo /opt/observability/alerts.sh --telegram -1001234567890
+
+sudo /opt/observability/alerts.sh --test      # a test alert, arrives in ~30 s
+sudo /opt/observability/alerts.sh --show      # what's set
+sudo /opt/observability/alerts.sh --remove slack
+```
+
+Every alert goes to every receiver that's set; critical ones repeat hourly,
+the others every 4 h, and a *resolved* message follows. The script checks the
+generated config with Alertmanager's own `amtool` before switching to it.
+An `alertmanager.yml` edited by hand before is kept as
+`alertmanager.yml.before-alerts-sh`.
 
 ## Callio's data
 

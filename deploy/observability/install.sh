@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Installs / updates the server's shared observability stack and plugs a
 # project into it. Safe to re-run: stack files are refreshed, files you edit
-# (.env, alertmanager/alertmanager.yml) are kept.
+# (.env, alertmanager/alertmanager.yml) are kept. Alert notifications
+# (email / Slack / Telegram): /opt/observability/alerts.sh --help.
 #
 #   From the Callio repo (installs the stack + Callio):
 #     sudo bash deploy/observability/install.sh
@@ -85,6 +86,10 @@ if [ "$STACK" != "$TARGET/.stack" ]; then
     rm -rf "$TARGET/.stack" && cp -r "$STACK" "$TARGET/.stack"
     cp "$0" "$TARGET/install.sh" && chmod +x "$TARGET/install.sh"
 fi
+# Where alerts are sent (email / Slack / Telegram): /opt/observability/alerts.sh
+cp "$STACK/alerts.sh" "$TARGET/alerts.sh" && chmod +x "$TARGET/alerts.sh"
+mkdir -p "$TARGET/alertmanager/secrets"
+$LOCAL || { chown 65534:65534 "$TARGET/alertmanager/secrets"; chmod 700 "$TARGET/alertmanager/secrets"; }
 
 # .env (kept once written)
 if [ ! -f "$ENVF" ]; then

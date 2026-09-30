@@ -42,7 +42,7 @@ services:
     command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager", "--cluster.listen-address="]
     ports: ["127.0.0.1:9093:9093"]
     volumes:
-      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./alertmanager:/etc/alertmanager:ro   # alertmanager.yml + secrets/ (alerts.sh)
       - alertmanager-data:/alertmanager
 
   grafana:

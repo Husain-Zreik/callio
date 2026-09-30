@@ -69,7 +69,7 @@ services:
       - --web.listen-address=127.0.0.1:${ALERTMANAGER_PORT:-9093}
       - --cluster.listen-address=
     volumes:
-      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./alertmanager:/etc/alertmanager:ro   # alertmanager.yml + secrets/ (alerts.sh)
       - alertmanager-data:/alertmanager
     restart: unless-stopped
 
