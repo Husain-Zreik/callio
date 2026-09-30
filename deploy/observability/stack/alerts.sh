@@ -38,6 +38,16 @@ secret() {   # name prompt
     chown 65534:65534 "$SECRETS/$1" 2>/dev/null || true   # Alertmanager runs as nobody
 }
 port() { grep -E '^ALERTMANAGER_PORT=' "$TARGET/.env" 2>/dev/null | tail -1 | cut -d= -f2- || echo 9093; }
+# Alertmanager answering /-/ready within 30 s, else its last log lines and a failure.
+wait_ready() {
+    for _ in $(seq 1 30); do
+        curl -fs "http://127.0.0.1:$(port)/-/ready" >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+    echo "Alertmanager is not answering on 127.0.0.1:$(port). Its last log lines:"
+    (cd "$TARGET" && docker compose logs --tail 20 alertmanager) || true
+    return 1
+}
 
 ACTION=write
 while [ $# -gt 0 ]; do
@@ -73,6 +83,7 @@ fi
 
 if [ "$ACTION" = test ]; then
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; end="$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ)"
+    wait_ready || exit 1
     curl -fsS -X POST "http://127.0.0.1:$(port)/api/v2/alerts" -H 'Content-Type: application/json' -d "[{
         \"labels\": {\"alertname\": \"TestNotification\", \"severity\": \"warning\", \"env\": \"$(hostname)\"},
         \"annotations\": {\"summary\": \"Test alert from $(hostname)\", \"description\": \"Sent by alerts.sh --test. If you see this, notifications work.\"},
@@ -145,6 +156,7 @@ if ! CHECK="$(cd "$TARGET" && MSYS_NO_PATHCONV=1 docker compose run --rm --no-de
 fi
 mv "$AM/alertmanager.yml.new" "$AM/alertmanager.yml"
 (cd "$TARGET" && docker compose restart alertmanager >/dev/null)
+wait_ready || exit 1
 say "alerts go to: $([ "$RECEIVER" = notify ] && echo "$(get EMAIL_TO) $(get SLACK_CHANNEL) $( [ -n "$(get TELEGRAM_CHAT_ID)" ] && echo "telegram:$(get TELEGRAM_CHAT_ID)")" || echo "Grafana only")"
 [ "$RECEIVER" = notify ] && say "check it: sudo $TARGET/alerts.sh --test"
 exit 0
