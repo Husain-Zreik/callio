@@ -1,7 +1,7 @@
 // src/core/events/handlers/MonitorEventHandler.js
 import CallRepository from '../../../persistence/CallRepository.js';
 import CallConnectionRepository from '../../../persistence/CallConnectionRepository.js';
-import { roomManager } from '../../../realtime/managers/RoomManager.js';
+import { agentConnections } from '../../agents/AgentConnections.js';
 import EventBus from '../../EventBus.js';
 import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
 import { sdpCoordinator } from '../../../media/webrtc/SDPCoordinator.js';
@@ -49,7 +49,7 @@ export class MonitorEventHandler {
                 await peerRegistry.closePeerConnection(callId, ConnectionType.MONITOR);
             }
 
-            await roomManager.detachSocketFromCall(socketId, callId).catch(() => { });
+            await agentConnections.detachSocketFromCall(socketId, callId).catch(() => { });
 
             emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: error.message, socketId });
         }
@@ -104,7 +104,7 @@ export class MonitorEventHandler {
 
             await peerRegistry.closePeerConnection(callId, ConnectionType.MONITOR);
 
-            await roomManager.detachSocketFromCall(socketId, callId).catch(() => { });
+            await agentConnections.detachSocketFromCall(socketId, callId).catch(() => { });
 
             EventBus.emit('call:monitor:ended', { callId, userId, socketId });
 

@@ -6,7 +6,7 @@ import EventBus from '../../../../core/EventBus.js';
 import { roomManager } from '../../../managers/RoomManager.js';
 import { presenceService } from '../../../../core/agents/PresenceService.js';
 import { callLifecycleLogger } from '../../../../core/calls/CallLifecycleLogger.js';
-import CallRepository from '../../../../persistence/CallRepository.js';
+import { offerDelivery } from '../../../../core/routing/OfferDelivery.js';
 import { AssignmentType } from '../../../../core/constants/CallConstants.js';
 import { callPushNotifier } from '../../../../push/CallPushNotifier.js';
 import QueueRepository from '../../../../persistence/QueueRepository.js';
@@ -47,25 +47,16 @@ export function registerCallDeliveryListeners() {
             return;
         }
 
-        // Race guard for direct assignments: an older call already ringing this
-        // agent means this one is a double-dispatch — suppress it (cleanup
-        // releases it). Transfers are deliberate and exempt. Fails open.
-        if (agentId && assignmentType !== AssignmentType.TRANSFERRED) {
-            let priorCallId = null;
-            try {
-                priorCallId = await CallRepository.getConflictingRingingCallId(agentId, callId);
-            } catch (guardErr) {
-                log.error({ callId, err: guardErr }, 'Double-assignment guard failed — failing open');
-            }
-            if (priorCallId !== null) {
-                log.warn({ callId, agentId, ringingCallId: priorCallId }, 'Agent already has a ringing call — suppressing this offer');
-                await logDelivery(callId, tenantId, agentId, {
-                    delivered: false,
-                    suppression_reason: 'prior_ringing_call',
-                    prior_call_id: priorCallId,
-                });
-                return;
-            }
+        // Whether the offer goes out at all is the core's call (OfferDelivery).
+        const verdict = await offerDelivery.check(payload);
+        if (!verdict.deliver) {
+            log.warn({ callId, agentId, ringingCallId: verdict.priorCallId }, 'Agent already has a ringing call — suppressing this offer');
+            await logDelivery(callId, tenantId, agentId, {
+                delivered: false,
+                suppression_reason: 'prior_ringing_call',
+                prior_call_id: verdict.priorCallId,
+            });
+            return;
         }
 
         roomManager.broadcastToSupervisors(tenantId, 'call:incoming:supervisor', supervisorView);

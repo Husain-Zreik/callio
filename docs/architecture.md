@@ -122,19 +122,31 @@ The one real port is the **customer channel**:
 - **Registration.** Adapters are registered in `src/channels/index.js`. `core/` and `media/`
   import no adapter.
 
-Everything else is a plain import, not a port:
+Two small ports let the core reach agents without importing their layers. The
+implementations are registered at startup:
+
+- **`agentConnections`** (`src/core/agents/AgentConnections.js`): emit to one
+  socket, cluster-wide liveness, detach a socket from a call. Registered by
+  `realtime/server.js` (RoomManager). Everything else the core tells sockets
+  goes out as an `EventBus` event that `realtime/` relays.
+- **`callNotifications`** (`src/core/calls/CallNotifications.js`): stop other
+  devices ringing when a call is answered or declined. Registered by
+  `server/bootstrap.js` (CallPushNotifier).
+
+Call policy lives in the core, and `realtime/` only relays:
+`core/routing/OfferDelivery` suppresses a direct offer to an agent who already
+has a ringing call. `core/calls/CustomerNetworkLossPolicy` gives a silent
+customer 15 s before warning the agent and 20 s before ending the call as
+`CUSTOMER_NETWORK_LOSS`.
+
+Media is a plain import, not a port, by design. It is the engine's own
+machinery, not an integration:
 
 - **Media.** The event handlers, `ChannelIngress`, `CallTerminator`, `CallCleanupService`,
   `AgentAssignmentCoordinator` and `core/ivr/` import `media/webrtc` directly: `peerRegistry`,
   `sdpCoordinator` and `iceCoordinator`. They also import `media/bridge`, `media/dtmf` and
   `media/playback`, and `IvrCoordinator` imports `@roamhq/wrtc`. Media imports the core back:
   `PeerRegistry` imports `ivrCoordinator` and `CallErrorEmitter`.
-- **Push.** `AgentEventHandler` and `RejectionEventHandler` import `callPushNotifier`.
-- **Sockets.** `core/events/CallErrorEmitter.js`, `AgentEventHandler` and `MonitorEventHandler`
-  import `realtime/managers/RoomManager`. Every other core-to-socket path is an `EventBus` event.
-- **Policy in `realtime/`.** `handlers/delivery.js` suppresses an offer to an agent who already
-  has a ringing call. `handlers/network.js` runs the customer-network-loss timers: a warning at
-  15 s, the end at 20 s.
 
 ## Process model
 
@@ -465,4 +477,4 @@ Then `server.close()` and exit.
 
 ## Known gaps
 
-- **Boundary leaks.** Listed under [Boundaries](#boundaries).
+None tracked here. The open items on a real SIP trunk are in [sip.md](sip.md#open-items-on-a-real-trunk).

@@ -6,11 +6,11 @@
  *
  * Routing:
  *   socket   provided → direct emit to that socket (socket-layer errors)
- *   socketId provided → targeted emit via roomManager (cross-worker handler errors)
+ *   socketId provided → targeted emit via agentConnections (cross-worker handler errors)
  *   neither            → broadcast to call room via EventBus (internal service errors)
  */
 import EventBus from '../EventBus.js';
-import { roomManager } from '../../realtime/managers/RoomManager.js';
+import { agentConnections } from '../agents/AgentConnections.js';
 
 export function emitCallError({ callId = null, code, message, socket = null, socketId = null }) {
     const payload = { callId, code, message };
@@ -21,7 +21,7 @@ export function emitCallError({ callId = null, code, message, socket = null, soc
     }
 
     if (socketId) {
-        roomManager.emitToSocket(socketId, 'call:error', payload);
+        agentConnections.emitToSocket(socketId, 'call:error', payload);
         return;
     }
 

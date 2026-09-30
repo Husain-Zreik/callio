@@ -5,7 +5,7 @@ import { logger } from '../../../../infra/logging/logger.js';
 
 const log = logger('realtime.state');
 
-export function registerCallStateListeners(networkLossTimers) {
+export function registerCallStateListeners() {
     EventBus.on('call:status', (data) => {
         const { tenantId } = data;
         roomManager.broadcastToTenant(tenantId, 'call:status', data);
@@ -37,16 +37,6 @@ export function registerCallStateListeners(networkLossTimers) {
     EventBus.on('call:terminated', (data) => {
         const { callId, tenantId, reason } = data;
         log.debug({ callId }, `Call terminated: reason=${reason}`);
-
-        // Cancel any pending network-loss timers so they don't fire a phantom
-        // CALL_TERMINATED event after the call has already been cleaned up.
-        const timerKey = String(callId);
-        const pendingTimers = networkLossTimers.get(timerKey);
-        if (pendingTimers) {
-            clearTimeout(pendingTimers.warnTimer);
-            clearTimeout(pendingTimers.terminateTimer);
-            networkLossTimers.delete(timerKey);
-        }
 
         roomManager.broadcastToTenant(tenantId, 'call:terminated', data);
     });

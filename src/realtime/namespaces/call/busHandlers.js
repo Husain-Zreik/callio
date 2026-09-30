@@ -6,13 +6,9 @@ import { registerCallNetworkListeners } from './handlers/network.js';
 import { registerCallIvrListeners } from './handlers/ivr.js';
 
 export default function registerCallEventBusListeners() {
-    // Shared across state (cleared on call:terminated) and
-    // network (created/cleared on customer:media:state drop/active).
-    const networkLossTimers = new Map();
-
-    registerCallStateListeners(networkLossTimers);
+    registerCallStateListeners();
     registerCallDeliveryListeners();
     registerCallMediaListeners();
-    registerCallNetworkListeners(networkLossTimers);
+    registerCallNetworkListeners();
     registerCallIvrListeners();
 }

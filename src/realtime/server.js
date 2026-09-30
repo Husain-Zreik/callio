@@ -5,6 +5,7 @@ import { handleConnection } from "./handlers/connectionHandler.js";
 import { authMiddleware } from "./middleware/authMiddleware.js";
 import { createAdapter } from "@socket.io/redis-adapter";
 import { roomManager } from "./managers/RoomManager.js";
+import { agentConnections } from "../core/agents/AgentConnections.js";
 import { config } from "../../config/envConfig.js";
 import { Server } from "socket.io";
 import { logger } from '../infra/logging/logger.js';
@@ -39,6 +40,7 @@ export function createWebSocketServer(httpServer) {
     }
 
     roomManager.setIO(io);
+    agentConnections.register(roomManager);   // the core reaches single sockets through this port
     io.use(authMiddleware);
     registerAllEventBusListeners();
 

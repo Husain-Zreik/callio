@@ -9,6 +9,9 @@ import { redisCleanupService } from '../infra/cluster/RedisCleanupService.js';
 import { storageClient } from '../infra/storage/StorageClient.js';
 import { encodingWorkerBridge } from '../media/recording/encoding/EncodingWorkerBridge.js';
 import { dtmfWorkerBridge } from '../media/dtmf/DTMFWorkerBridge.js';
+import { callNotifications } from '../core/calls/CallNotifications.js';
+import { callPushNotifier } from '../push/CallPushNotifier.js';
+import { customerNetworkLossPolicy } from '../core/calls/CustomerNetworkLossPolicy.js';
 import { callCleanupService } from '../core/calls/CallCleanupService.js';
 import { consumerEventPublisher } from '../core/events/ConsumerEventPublisher.js';
 import { ivrTerminationHandler } from '../core/ivr/IvrTerminationHandler.js';
@@ -60,7 +63,10 @@ export async function initOptionalServices() {
 // Core listeners and background loops — after Redis and the socket server
 // exist, before the HTTP listener opens. Each registers once per worker.
 export async function startCoreServices() {
+    // The core's ports to push (the socket port is registered with the socket server).
+    callNotifications.register(callPushNotifier);
     consumerEventPublisher.register();
+    customerNetworkLossPolicy.register();
     ivrTerminationHandler.register();
 
     await presenceService.clearOwnStalePresence();

@@ -269,6 +269,29 @@ try {
     await api('PUT', '/v1/tenants/demo/ivr-flows/main-menu', { ...flow.body.ivrFlow, name: 'Main menu', status: 'INACTIVE',
         structure: { nodes: [{ id: 'start', type: 'ivr_start', data: {} }], edges: [] } });
 
+    // ── 7. The customer's audio drops: the agent sees it, it recovers, then it drops for good ──
+    // core/calls/CustomerNetworkLossPolicy: warned at 15 s, ended as CUSTOMER_NETWORK_LOSS at 20 s.
+    const c7 = await meta.callIn('wacid.r.7', { from: '96181030848' });
+    const row7 = await callByProvider(c7.id);
+    const offer7 = await waitFor(() => [...a1.incoming, ...a2.incoming].find((p) => p.callId === row7.id && p.sdpOffer), 15000, 'call 7 offered');
+    const agent7 = offer7.agentId === id['agent-1'] ? a1 : a2;
+    await accept(agent7, offer7, 660);
+    await waitFor(async () => (await callRow(row7.id)).state === 'ACTIVE', 15000, 'call 7 answered');
+    await hear(await c7.customer.received);
+    const mediaState = (st) => waitFor(() => agent7.events.find((e) => e.event === 'call:customer:media:state'
+        && String(e.payload.callId) === String(row7.id) && e.payload.state === st && !e.seen && (e.seen = true)), 15000, `customer media ${st}`);
+    c7.customer.tone.set([]);
+    const drop1 = await mediaState('drop').catch(() => null);
+    c7.customer.tone.set([440]);
+    const recovered7 = await mediaState('active').catch(() => null);
+    check('the agent sees the customer’s audio drop and come back', Boolean(drop1 && recovered7));
+    c7.customer.tone.set([]);
+    const warned = await waitFor(() => agent7.events.find((e) => e.event === 'call:network:terminating' && String(e.payload.callId) === String(row7.id)), 25000, 'network terminating warning').catch(() => null);
+    const lost = await waitFor(async () => { const r = await callRow(row7.id); return r.status === 'FAILED' ? r : null; }, 12000, 'call 7 ended by network loss').catch(() => null);
+    check('a customer who stays silent: the agent is warned, then the call ends as CUSTOMER_NETWORK_LOSS',
+        Boolean(warned) && lost?.termination_reason === 'CUSTOMER_NETWORK_LOSS', `warned=${Boolean(warned)} ${lost?.status}/${lost?.termination_reason}`);
+    agent7.peer?.close(); agent7.peer = null;
+
     for (const a of [a1, a2, sup]) a.socket.close();
 } catch (err) {
     console.error('HARNESS ERROR:', err);

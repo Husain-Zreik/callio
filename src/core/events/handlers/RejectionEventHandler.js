@@ -13,7 +13,7 @@ import { callTerminator } from '../../calls/CallTerminator.js';
 import { CallDirection, CallStatus, TerminationReason, TerminatedBy } from '../../constants/CallConstants.js';
 import { emitCallError } from '../CallErrorEmitter.js';
 import { CallErrorCodes } from '../CallErrorCodes.js';
-import { callPushNotifier } from '../../../push/CallPushNotifier.js';
+import { callNotifications } from '../../calls/CallNotifications.js';
 import { queueRouter } from '../../routing/QueueRouter.js';
 import { logger } from '../../../infra/logging/logger.js';
 
@@ -46,7 +46,7 @@ export class RejectionEventHandler {
                 await callLifecycleLogger.logRejected(callId, tenantId, userId, { reason: 'agent_declined_offer' });
                 EventBus.emit('call:room:leave', { userId, callId });
                 EventBus.emit('call:offer_declined', { callId, tenantId, userId, deviceId: deviceId ?? null });
-                callPushNotifier.notifyCallResolved(callId, { resolvedAgentId: userId, tenantId })
+                callNotifications.notifyCallResolved(callId, { resolvedAgentId: userId, tenantId })
                     .catch((err) => log.error({ callId, err }, 'dismiss push failed'));
                 log.debug({ agentId: userId, callId }, 'Agent declined RING_ALL offer');
                 return;
@@ -82,7 +82,7 @@ export class RejectionEventHandler {
             const agentName = await AgentRepository.getNameById(userId);
             EventBus.emit('call:handled', { callId, userId, tenantId, agentName, deviceId: deviceId ?? null, action: 'rejected' });
             // call:handled doesn't reach a killed/backgrounded device; a push does.
-            callPushNotifier.notifyCallResolved(callId, { resolvedAgentId: userId, tenantId })
+            callNotifications.notifyCallResolved(callId, { resolvedAgentId: userId, tenantId })
                 .catch((err) => log.error({ callId, err }, 'notifyCallResolved failed'));
 
             log.info({ callId, agentId: userId }, 'Call declined by agent');

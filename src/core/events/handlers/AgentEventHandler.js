@@ -14,8 +14,8 @@ import { CallErrorCodes } from '../CallErrorCodes.js';
 import { ConnectionType, CallStatus, CallDirection, TerminationReason, TerminatedBy } from '../../constants/CallConstants.js';
 import { agentAssignmentCoordinator } from '../../routing/AgentAssignmentCoordinator.js';
 import { agentMissedCallTracker } from '../../routing/AgentMissedCallTracker.js';
-import { roomManager } from '../../../realtime/managers/RoomManager.js';
-import { callPushNotifier } from '../../../push/CallPushNotifier.js';
+import { agentConnections } from '../../agents/AgentConnections.js';
+import { callNotifications } from '../../calls/CallNotifications.js';
 import { queueRouter } from '../../routing/QueueRouter.js';
 import { IncomingCallPayload } from '../../calls/IncomingCallPayload.js';
 import { toCallView } from '../../calls/CallView.js';
@@ -221,7 +221,7 @@ export class AgentEventHandler {
                 EventBus.emit('call:offer_taken', { callId, tenantId, takenBy: userId, queueId: callQueue.id });
             }
 
-            callPushNotifier.notifyCallResolved(callId, {
+            callNotifications.notifyCallResolved(callId, {
                 resolvedAgentId: userId,
                 ringAllQueue: queueRouter.isRingAll(callQueue) ? callQueue : null,
                 tenantId,
@@ -397,7 +397,7 @@ export class AgentEventHandler {
             // refresh/ICE-recovery case), is not.
             const isDifferentSocket = previousConnectionInfo?.socketId && previousConnectionInfo.socketId !== socketId;
             const previousSocketStillLive = isDifferentSocket
-                ? await roomManager.isSocketConnected(previousConnectionInfo.socketId)
+                ? await agentConnections.isSocketConnected(previousConnectionInfo.socketId)
                 : false;
 
             // Close old AGENT and guard CUSTOMER still exists
@@ -419,7 +419,7 @@ export class AgentEventHandler {
             // only this one connection's binding changed).
             if (previousSocketStillLive) {
                 log.info({ callId, previousSocketId: previousConnectionInfo.socketId }, 'Call taken over from a still-live socket — notifying it');
-                roomManager.emitToSocket(previousConnectionInfo.socketId, 'call:connection_superseded', {
+                agentConnections.emitToSocket(previousConnectionInfo.socketId, 'call:connection_superseded', {
                     callId,
                     reason: 'switched_device',
                 });
