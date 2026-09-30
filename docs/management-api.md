@@ -14,27 +14,57 @@ stored hashed; several can be active at once so a key can be rotated without
 downtime. Every request is scoped to the calling consumer — its tenants,
 their agents, queues, channels and calls. Anything else is `404`.
 
-Rate limit: 1200 requests per minute per consumer (`429` with `Retry-After`).
+Rate limit: 1200 requests per minute per consumer, in fixed one-minute
+windows (`429` with `Retry-After` in seconds).
 
 ## Conventions
 
 - **Address entities by your own ids.** `{tenantRef}`, `{agentRef}`,
   `{queueRef}`, `{channelRef}`, `{flowRef}` are your references (1–191
-  characters). `PUT` creates or updates; you never need to store Callio's ids.
+  characters); you never need to store Callio's ids.
+- **`PUT` creates or replaces.** A field you omit is reset to its default,
+  not kept (e.g. omitting `status` sets it back to `ACTIVE`). Two exceptions:
+  a tenant's `settings` and a channel's `credentials` are kept when omitted.
+- **Responses** wrap the entity in a named key (`{ "tenant": … }`,
+  `{ "queues": [ … ] }`); fields are camelCase; linked entities are returned
+  as Callio ids (`overflowQueueId`, `inboundQueueId`, `channelId`). `DELETE`
+  returns `204` with no body.
 - Callio's numeric ids are returned in responses and events for convenience.
-- Errors: `{ "error": { "code": "invalid_request", "message": "name is required" } }`
-  with `400` (invalid), `401` (no/invalid key), `403` (consumer suspended),
-  `404` (not found / not yours), `409` (conflict, e.g. agent busy),
-  `429`, `5xx`.
+  Enum values in bodies are case-insensitive and returned uppercase.
+- Request bodies are limited to 10 MB (15 MB for audio uploads).
+
+### Errors
+
+Every error has one shape:
+
+```json
+{ "error": { "code": "invalid_request", "message": "name is required" } }
+```
+
+| Status | `code` | When |
+|---|---|---|
+| `400` | `invalid_request` | A field is missing, has the wrong type or is out of range; a `*_ref` in the body matches nothing; malformed JSON |
+| `401` | `unauthorized` | Missing or invalid API key |
+| `403` | `consumer_suspended` | The consumer is suspended |
+| `404` | `not_found` | The entity doesn't exist or isn't yours |
+| `404` | `not_enabled` | `POST /webhooks/whatsapp` when direct Meta ingress isn't configured |
+| `409` | `invalid_channel`, `channel_disabled`, `unsupported_channel`, `invalid_agent`, `agent_busy`, `invalid_customer` | `POST …/calls` — see [Outbound calls](#outbound-calls) |
+| `409` | `call_ended` | `POST /v1/calls/{id}/terminate` on a call that already ended |
+| `413` | `invalid_request` | Request body over the size limit |
+| `429` | `rate_limited` | Over the rate limit |
+| `500` | `internal_error` | Unexpected failure |
+| `503` | `storage_unavailable` | `GET /v1/calls/{id}/recording` when object storage isn't configured |
 
 ## Tenants
 
-| Method | Path | Body |
-|---|---|---|
-| `PUT` | `/v1/tenants/{tenantRef}` | `{ name, status?: ACTIVE\|SUSPENDED, settings? }` |
-| `GET` | `/v1/tenants/{tenantRef}` | — |
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `PUT` | `/v1/tenants/{tenantRef}` | `{ name, status?: ACTIVE\|SUSPENDED, settings? }` | `{ tenant }` |
+| `GET` | `/v1/tenants/{tenantRef}` | — | `{ tenant }` |
 
-`settings`:
+`tenant`: `{ id, ref, name, status, settings }`. `status` defaults to
+`ACTIVE`. A `SUSPENDED` tenant's agents can't connect. `settings` replaces
+the stored object as a whole when given, and is kept when omitted:
 
 ```json
 {
@@ -43,19 +73,36 @@ Rate limit: 1200 requests per minute per consumer (`429` with `Retry-After`).
 }
 ```
 
-`auto_offline` takes an agent offline after N consecutive missed offers from
-a `ROUND_ROBIN`/`PRIORITY` queue.
+`auto_offline` takes an agent `OFFLINE` after `missed_threshold` (default 3)
+consecutive missed offers. Counted as missed, for a call in a
+`ROUND_ROBIN`/`PRIORITY` queue: the queue's ring timeout passing it on, the
+customer hanging up while it rang that agent, or a live transfer the agent
+didn't accept in time. Also counted, whatever the queue: an IVR transfer to
+the agent not answered within the flow's `agent_ring_timeout`. Accepting a
+call resets the count.
 
 ## Agents
 
-| Method | Path | Body |
-|---|---|---|
-| `PUT` | `/v1/tenants/{t}/agents/{agentRef}` | `{ name, role?: AGENT\|SUPERVISOR }` |
-| `GET` | `/v1/tenants/{t}/agents` | — |
-| `DELETE` | `/v1/tenants/{t}/agents/{agentRef}` | — (soft delete; the agent goes OFFLINE) |
-| `PUT` | `/v1/tenants/{t}/agents/{agentRef}/availability` | `{ availability: AVAILABLE\|OFFLINE }` — also releases any stale call blocking the agent |
-| `PUT` | `/v1/tenants/{t}/agents/{agentRef}/push-tokens/{deviceId}` | `{ platform: ANDROID\|IOS\|WEB, provider: FCM\|APNS_VOIP\|ONESIGNAL, token }` |
-| `DELETE` | `/v1/tenants/{t}/agents/{agentRef}/push-tokens/{deviceId}` | — (all of that device's tokens) |
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `PUT` | `/v1/tenants/{t}/agents/{agentRef}` | `{ name, role?: AGENT\|SUPERVISOR }` | `{ agent }` |
+| `GET` | `/v1/tenants/{t}/agents` | — | `{ agents }` |
+| `DELETE` | `/v1/tenants/{t}/agents/{agentRef}` | — | `204` |
+| `PUT` | `/v1/tenants/{t}/agents/{agentRef}/availability` | `{ availability: AVAILABLE\|OFFLINE }` | `{ agent }` |
+| `PUT` | `/v1/tenants/{t}/agents/{agentRef}/push-tokens/{deviceId}` | `{ platform: ANDROID\|IOS\|WEB, provider: FCM\|APNS_VOIP\|ONESIGNAL, token }` | `{ registered: true }` |
+| `DELETE` | `/v1/tenants/{t}/agents/{agentRef}/push-tokens/{deviceId}` | — | `204` |
+
+- `agent`: `{ id, ref, name, role, availability }`. `role` is kept when
+  omitted on an existing agent and defaults to `AGENT` on a new one.
+- `DELETE` is a soft delete: the agent goes `OFFLINE` and disappears from
+  lists. A later `PUT`, or the agent's next socket connection, restores them
+  (with their queue memberships).
+- `availability`: `AVAILABLE` also releases any stale call blocking the
+  agent. An agent on a live call stays `ON_CALL`; the response then says
+  `ON_CALL`. `ON_CALL` is set by Callio only.
+- Push tokens: `token` up to 512 characters; one token per device and
+  provider (a new one replaces it). A token registered to another agent
+  moves to this one. `DELETE` removes all of that device's tokens.
 
 Agents are also created on their first socket connection (see
 [agent-protocol.md](agent-protocol.md)); `PUT` is how you set roles and names
@@ -63,11 +110,11 @@ ahead of time.
 
 ## Queues
 
-| Method | Path | Body |
-|---|---|---|
-| `PUT` | `/v1/tenants/{t}/queues/{queueRef}` | see below |
-| `GET` | `/v1/tenants/{t}/queues` | — |
-| `PUT` | `/v1/tenants/{t}/queues/{queueRef}/members` | `{ members: [{ agent_ref, priority? }] }` — replaces the list |
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `PUT` | `/v1/tenants/{t}/queues/{queueRef}` | see below | `{ queue }` |
+| `GET` | `/v1/tenants/{t}/queues` | — | `{ queues }` |
+| `PUT` | `/v1/tenants/{t}/queues/{queueRef}/members` | `{ members: [{ agent_ref, priority? }] }` — replaces the list | `{ members }` |
 
 ```json
 {
@@ -82,22 +129,38 @@ ahead of time.
 }
 ```
 
+`queue`: `{ id, ref, name, strategy, ringTimeoutSeconds, maxActiveCalls,
+maxWaitSeconds, overflowQueueId, holdAudioAssetId, status }`. `members`:
+`[{ id, ref, name, role, availability, priority }]`.
+
+| Field | Values | Omitted |
+|---|---|---|
+| `name` | required, ≤255 chars | — |
+| `strategy` | `RING_ALL`, `ROUND_ROBIN`, `PRIORITY` | `ROUND_ROBIN` |
+| `ring_timeout_seconds` | 5–600 | `null` |
+| `max_wait_seconds` | 5–86400 | `null` |
+| `overflow_queue_ref` | a queue of this tenant | `null` |
+| `max_active_calls` | 1–10000 | `null` |
+| `hold_audio_asset_id` | an audio asset id | `null` |
+| `status` | `ACTIVE`, `DISABLED` | `ACTIVE` |
+| member `priority` | 1–1000 | `1` |
+
 - `strategy`:
   - `RING_ALL` — every available member is offered the call at once; the first to accept takes it; a decline withdraws it only for that agent.
   - `ROUND_ROBIN` — one available member at a time, longest-available first.
   - `PRIORITY` — lowest `priority` member first, then by agent id.
   - With `ROUND_ROBIN` and `PRIORITY`, a decline passes the call to the next member; the customer keeps waiting. An agent who declined is not offered that call again. Once every member has declined, the call waits until someone new becomes available, its `max_wait_seconds` runs out, or the customer hangs up.
-- `ring_timeout_seconds` (5–600, `ROUND_ROBIN` / `PRIORITY`) — how long one member is offered a call before it passes to the next member. It counts as a missed offer for the tenant's auto-offline policy. A member who missed it is skipped until every other available member has had it; then a new round starts, so a lone member is offered it again. `null`: an offer rings until it is answered or the customer hangs up. `RING_ALL` rings everyone at once and ignores this.
-- `max_wait_seconds` (5–86400) — how long a call may wait unanswered after entering the queue (on arrival, or when an IVR transfers it). After that it moves to `overflow_queue_ref` and waits again there, up to 3 hops. With no overflow queue, or after 3 hops, it ends as `TIMEOUT` (`terminatedBy: SYSTEM`). `null`: no limit. Callio still ends a call that has rung unanswered for about a minute, the lifetime of a ringing WhatsApp call, in case the provider's end event is lost.
+- `ring_timeout_seconds` (`ROUND_ROBIN` / `PRIORITY`) — how long one member is offered a call before it passes to the next member. It counts as a missed offer for the tenant's auto-offline policy. A member who missed it is skipped until every other available member has had it; then a new round starts, so a lone member is offered it again. `null`: an offer rings until it is answered or the customer hangs up. `RING_ALL` ignores it.
+- `max_wait_seconds` — how long a call may wait unanswered after entering the queue (on arrival, or when an IVR transfers it). After that it moves to `overflow_queue_ref` and waits again there, up to 3 hops. With no overflow queue, or after 3 hops, it ends as `TIMEOUT` (`terminatedBy: SYSTEM`). `null`: no limit. Callio still ends a call that has rung unanswered for about a minute, the lifetime of a ringing WhatsApp call, in case the provider's end event is lost.
 - `max_active_calls` — cap on calls being handled from this queue at once (e.g. `1` for a single shared line).
 - `hold_audio_asset_id` — what customers hear while waiting after an IVR transfer.
 
 ## Channels
 
-| Method | Path | Body |
-|---|---|---|
-| `PUT` | `/v1/tenants/{t}/channels/{channelRef}` | see below |
-| `GET` | `/v1/tenants/{t}/channels` | — |
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `PUT` | `/v1/tenants/{t}/channels/{channelRef}` | see below | `{ channel }` |
+| `GET` | `/v1/tenants/{t}/channels` | — | `{ channels }` |
 
 WhatsApp line:
 
@@ -125,21 +188,36 @@ SIP line (a DID on a carrier trunk):
 }
 ```
 
-`address` is the DID in E.164 form — inbound calls to that number reach this
-channel, and outbound calls from it show it as the caller. `sip_trunk_id` is
-a trunk the Callio operator set up (`npm run sip:trunk`): a platform trunk or
-one of this consumer's own. Outbound customers are E.164 numbers or `sip:`
-URIs.
+`channel`: `{ id, ref, type, displayName, address, providerAccountId,
+sipTrunkId, inboundQueueId, recordingEnabled, status }`.
 
-Credentials are encrypted at rest and never returned. Omit `credentials` to
-keep the stored ones. A number/phone_number_id can belong to only one channel.
+| Field | Values | Omitted |
+|---|---|---|
+| `type` | `WHATSAPP`, `SIP` (required) | — |
+| `address` | required, ≤50 chars | — |
+| `display_name` | ≤255 chars | `null` |
+| `provider_account_id` | required for `WHATSAPP` (Meta `phone_number_id`) | `null` |
+| `sip_trunk_id` | required for `SIP` | `null` |
+| `credentials` | object; `null` clears them | kept |
+| `inbound_queue_ref` | a queue of this tenant | `null` |
+| `recording_enabled` | boolean | `false` |
+| `status` | `ACTIVE`, `DISABLED` | `ACTIVE` |
+
+For a SIP channel, `address` is the DID in E.164 form — inbound calls to
+that number reach this channel, and outbound calls from it show it as the
+caller. `sip_trunk_id` is a trunk the Callio operator set up
+(`npm run sip:trunk`): a platform trunk or one of this consumer's own.
+Outbound customers are E.164 numbers or `sip:` URIs.
+
+Credentials are encrypted at rest and never returned. An address or
+`provider_account_id` can belong to only one channel (`400` otherwise).
 
 ## IVR flows
 
-| Method | Path | Body |
-|---|---|---|
-| `PUT` | `/v1/tenants/{t}/ivr-flows/{flowRef}` | see below |
-| `GET` | `/v1/tenants/{t}/ivr-flows` | — |
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `PUT` | `/v1/tenants/{t}/ivr-flows/{flowRef}` | see below | `{ ivrFlow }` |
+| `GET` | `/v1/tenants/{t}/ivr-flows` | — | `{ ivrFlows }` (without `structure`) |
 
 ```json
 {
@@ -167,11 +245,26 @@ keep the stored ones. A number/phone_number_id can belong to only one channel.
 }
 ```
 
-- Selection on an inbound call: flows for that channel first, then
-  tenant-wide flows (no `channel_ref`); within each, by `trigger_priority`;
-  the first whose `trigger_condition` holds takes the call. Conditions
-  (`ALWAYS`, `ALL_AGENTS_BUSY`, `ALL_AGENTS_OFFLINE`, `ALL_AGENTS_UNAVAILABLE`)
-  are evaluated over the channel's inbound queue.
+`ivrFlow`: `{ id, ref, name, channelId, schemaVersion, triggerCondition,
+triggerPriority, timeoutSeconds, agentRingTimeout, status, structure }`.
+
+| Field | Values | Omitted |
+|---|---|---|
+| `name` | required, ≤255 chars | — |
+| `structure` | required, `{ nodes: [], edges: [] }` | — |
+| `channel_ref` | a channel of this tenant; none = tenant-wide | `null` |
+| `status` | `ACTIVE`, `INACTIVE` | `INACTIVE` |
+| `trigger_condition` | `ALWAYS`, `ALL_AGENTS_BUSY`, `ALL_AGENTS_OFFLINE`, `ALL_AGENTS_UNAVAILABLE` | `ALWAYS` |
+| `trigger_priority` | 0–10000 | `0` |
+| `timeout_seconds` | 1–120 | `10` |
+| `agent_ring_timeout` | 5–600 — how long an agent the flow transfers to may ring before the call ends as `IVR_AGENT_NO_ANSWER` | `60` |
+| `schema_version` | `1` | `1` |
+
+- Selection on an inbound call, among `ACTIVE` flows: flows for that
+  channel first, then tenant-wide flows; within each, lowest
+  `trigger_priority` first, then most recently updated. The first whose
+  `trigger_condition` holds takes the call. Conditions are evaluated over the
+  channel's inbound queue.
 - Node types: `ivr_start`, `ivr_menu` (plays `audioFileId`, waits for a key;
   edges' `sourceHandle` is the digit), `ivr_play`, `ivr_transfer`
   (`targetType: queue|agent`, `targetId` = queue/agent id; no `targetId` =
@@ -182,31 +275,71 @@ keep the stored ones. A number/phone_number_id can belong to only one channel.
 
 ## Audio assets
 
-| Method | Path | Body |
-|---|---|---|
-| `POST` | `/v1/tenants/{t}/audio-assets` | `{ name, content_base64, mime_type }` (upload, needs S3) or `{ name, storage_key, storage_provider?: S3\|LOCAL }` (register an existing object) |
-| `GET` | `/v1/tenants/{t}/audio-assets` | — (includes platform-wide defaults) |
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `POST` | `/v1/tenants/{t}/audio-assets` | upload or register — see below | `201 { audioAsset }` |
+| `GET` | `/v1/tenants/{t}/audio-assets` | — | `{ audioAssets }` (includes platform-wide defaults) |
 
-Any format ffmpeg can decode works (WAV, MP3, OGG). Maximum upload 15 MB.
+- Upload: `{ name, content_base64, mime_type }` — stored in object storage
+  (`400` if none is configured).
+- Register an existing object: `{ name, storage_key, storage_provider?: S3|LOCAL, mime_type? }`
+  (`storage_key` ≤512 chars; `storage_provider` defaults to `S3`).
+- Both take optional `ref` (your reference, unique per tenant) and
+  `duration_seconds` (0–86400).
+
+`audioAsset`: `{ id, ref, name, storageProvider, storageKey, mimeType,
+durationSeconds, platformDefault }`; `storageProvider` is lowercase (`s3`,
+`local`). Any format ffmpeg can decode works (WAV, MP3, OGG). The whole JSON
+body is limited to 15 MB, so base64 content can carry about 11 MB of audio.
 
 ## Calls
 
-| Method | Path | Body / query |
-|---|---|---|
-| `POST` | `/v1/tenants/{t}/calls` | Outbound intent — see below |
-| `GET` | `/v1/tenants/{t}/calls` | `?status&direction&agent_ref&external_ref&from&to&limit&before_id` |
-| `GET` | `/v1/calls/{callId}` | Call, legs, lifecycle events, transfers, IVR sessions, recording |
-| `PATCH` | `/v1/calls/{callId}` | `{ external_ref?, consumer_metadata? }` |
-| `POST` | `/v1/calls/{callId}/terminate` | End the call (`202`; the result arrives as `call.ended`) |
-| `GET` | `/v1/calls/{callId}/recording` | `{ url, expiresInSeconds, format, channelMap }` — short-lived download URL |
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| `POST` | `/v1/tenants/{t}/calls` | Outbound intent — see below | `201 { call }` |
+| `GET` | `/v1/tenants/{t}/calls` | `?status&direction&agent_ref&external_ref&from&to&limit&before_id` | `{ calls, nextBeforeId }` |
+| `GET` | `/v1/calls/{callId}` | — | `{ call, legs, events, transfers, ivrSessions, recording }` |
+| `PATCH` | `/v1/calls/{callId}` | `{ external_ref?, consumer_metadata? }` | `{ call }` |
+| `POST` | `/v1/calls/{callId}/terminate` | — | `202 { accepted: true }` |
+| `GET` | `/v1/calls/{callId}/recording` | — | `{ url, expiresInSeconds, format, channelMap }` |
+
+`call` is the call view described in [events.md](events.md#envelope)
+(`data.call`).
+
+- **List:** `status` is one of `INITIATED`, `RINGING`, `IN_PROGRESS`,
+  `TERMINATED`, `FAILED`; `direction` `INBOUND` or `OUTBOUND`; `from`
+  (inclusive) and `to` (exclusive) are timestamps compared with the call's
+  creation time; `limit` 1–200, default 50. Pages are newest first; pass
+  `nextBeforeId` as `before_id` for the next page. `nextBeforeId` is `null`
+  only when the page is empty.
+- **Detail:** `legs` — `[{ type: AGENT|CUSTOMER|MONITOR, agentId, deviceId,
+  state, connectedAt, disconnectedAt }]`; `events` — the lifecycle log,
+  `[{ type, agentId, occurredAt, durationSeconds, metadata }]`; `recording` —
+  `{ id, status, durationSeconds, format, channelMap, completedAt }` or
+  `null`. `transfers` and `ivrSessions` are returned as stored, with
+  snake_case fields:
+  - `transfers`: `[{ id, from_agent_id, to_agent_id, to_queue_id,
+    initiated_by_agent_id, initiated_by_type, transferred_at, accepted_at,
+    acceptance_duration_seconds }]`
+  - `ivrSessions`: `[{ id, ivr_flow_id, completed, outcome, duration,
+    started_at, ended_at, inputs: [{ ivr_session_id, node_name, input,
+    pressed_at }] }]`
+- **PATCH:** `external_ref` ≤191 chars; `consumer_metadata` an object. An
+  omitted field is left unchanged.
+- **Terminate:** `409 call_ended` if the call already ended. The result
+  arrives as `call.ended`: `COMPLETED` if it was `IN_PROGRESS`, `CANCELLED`
+  otherwise, with `terminatedBy: AGENT`.
+- **Recording:** a short-lived download URL. `404` until the recording has
+  completed; `503 storage_unavailable` without object storage.
 
 ### Outbound calls
 
 Outbound starts on your backend, because consent to call a customer is yours
-to check:
+to check.
+
+`POST /v1/tenants/biz-123/calls`
 
 ```json
-POST /v1/tenants/biz-123/calls
 {
   "channel_ref": "whatsapp-main",
   "agent_ref": "user-7",
@@ -214,24 +347,46 @@ POST /v1/tenants/biz-123/calls
   "external_ref": "crm-call-42",
   "consumer_metadata": { "crm_contact_id": 991 }
 }
-→ 201 { "call": { "callId": 88, "status": "INITIATED", ... } }
 ```
+
+`201`:
+
+```json
+{ "call": { "callId": 88, "status": "INITIATED" } }
+```
+
+(abridged — the full call view.)
+
+- `customer.address` is required (≤191 chars); `customer.address_type`
+  (`E164`, `WHATSAPP_USER`, `SIP_URI`) is inferred when omitted;
+  `customer.name` ≤255 chars; `external_ref` ≤191 chars.
+- An unknown `channel_ref` is `400`; an unknown `agent_ref` is `404`.
+- `409` codes: `invalid_channel` / `invalid_agent` (not this tenant's),
+  `channel_disabled` (channel not `ACTIVE`), `unsupported_channel` (the
+  channel type can't place outbound calls), `agent_busy` (the agent already
+  has an active call), `invalid_customer` (the address isn't valid for the
+  channel).
 
 Give `callId` to that agent's client, which sends
 `call:start { callId, sdpOffer }` over its socket; Callio then dials the
-customer. An intent not started within 2 minutes is cancelled.
-`customer.address_type` (`E164`, `WHATSAPP_USER`) is inferred when omitted.
-
-List responses page newest first; pass the returned `nextBeforeId` as
-`before_id` for the next page.
+customer. An intent not started within 2 minutes ends as `CANCELLED`
+(`terminatedBy: SYSTEM`). When an outbound call ends, the agent goes
+`OFFLINE`, not `AVAILABLE`.
 
 ## Webhooks in
 
 | Method | Path | Auth |
 |---|---|---|
-| `POST` | `/v1/webhooks/whatsapp/forward` | API key — forward Meta's WhatsApp webhook payload (the whole envelope, or a single `{ value }`) if your Meta app's webhook must keep pointing at your own backend. Only payloads for your own channels are accepted. |
-| `GET`/`POST` | `/webhooks/whatsapp` | Meta's own verification and `X-Hub-Signature-256` — point a Meta app's webhook straight at Callio. |
+| `POST` | `/v1/webhooks/whatsapp/forward` | API key — forward Meta's WhatsApp webhook payload (the whole envelope, or a single `{ value }`) if your Meta app's webhook must keep pointing at your own backend. Only payloads for your own channels are processed. |
+| `GET` | `/webhooks/whatsapp` | Meta's subscription check: with `hub.mode=subscribe` and `hub.verify_token` equal to the configured verify token, replies with `hub.challenge` as text; otherwise `403`. |
+| `POST` | `/webhooks/whatsapp` | Meta posts directly, signed with `X-Hub-Signature-256` — point a Meta app's webhook straight at Callio. `401` on a bad signature, `404 not_enabled` when no app secret is configured. |
 
-## Health
+Both `POST`s answer `200 { received: n }` (n = call-related changes in the
+payload) before processing, or `503` while the worker is shutting down so
+Meta redelivers.
+
+## Health and metrics
 
 `GET /health` (probe) and `GET /v1/health` (diagnostics) — no authentication.
+`GET /metrics` is Prometheus metrics for the operator (bearer
+`METRICS_TOKEN`), not part of this API.

@@ -1,5 +1,5 @@
 // src/http/v1/managementRoutes.js
-// Management API — provisioning (PLATFORM_ARCHITECTURE.md §3A). Consumers
+// Management API — provisioning (docs/management-api.md). Consumers
 // address their entities by their own references; every route is scoped to
 // the calling consumer's tenants.
 import TenantRepository from '../../persistence/TenantRepository.js';

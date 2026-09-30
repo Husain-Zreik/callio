@@ -15,7 +15,7 @@
 #
 # host networking for the same reason as any SIP/RTP workload: SDP embeds
 # real IPs/ports, and Docker's bridge NAT breaks that unless carefully
-# worked around. Firewall rules (see RUNBOOK.md), not Docker port mappings,
+# worked around. Firewall rules (see docs/sip.md), not Docker port mappings,
 # are what actually restrict access here.
 #
 # rtpengine.conf's `interface` value: if this host has a real public IP

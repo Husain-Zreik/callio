@@ -1,5 +1,5 @@
 // src/core/routing/AutoOfflinePolicy.js
-// The tenant's auto-offline policy (tenants.auto_offline_*): an agent who
+// The tenant's auto-offline policy (tenants.settings.auto_offline): an agent who
 // misses N consecutive offers is taken offline, so calls stop going to
 // someone who isn't there. A miss is an offer that rang out — the queue's
 // ring timeout, or the customer giving up while it rang that agent.

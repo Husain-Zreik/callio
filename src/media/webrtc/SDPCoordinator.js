@@ -1,6 +1,7 @@
 // src/media/webrtc/SDPCoordinator.js
 // SDP offer/answer creation and processing for all connection types.
-// Singleton — import `sdpCoordinator` directly instead of going through CallManager.
+// Singleton — import `sdpCoordinator` directly (ChannelIngress, the call event
+// handlers, AgentAssignmentCoordinator, IvrTransferHandler).
 import CallConnectionRepository from '../../persistence/CallConnectionRepository.js';
 import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
 import { audioCoordinator } from '../bridge/AudioCoordinator.js';
@@ -16,7 +17,7 @@ const log = logger('media.webrtc.SDPCoordinator');
 class SDPCoordinator {
 
     /**
-     * @param {Function|null} callEventHandler - Redis event callback (CallManager.handleCallEvent).
+     * @param {Function|null} callEventHandler - Redis event callback (callEventHandler.handleCallEvent).
      *   Pass when this is an AGENT offer that needs Redis subscription (inbound call, transfer).
      *   Omit for CUSTOMER offers.
      * @param {object} [options.sdpProfile] - the channel adapter's SDP rewrites; CUSTOMER leg only.

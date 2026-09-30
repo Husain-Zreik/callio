@@ -1,6 +1,6 @@
 // src/core/events/ConsumerEventPublisher.js
-// Turns call-domain events into consumer-facing events (PLATFORM_ARCHITECTURE.md
-// §3B) and writes them to the webhook_deliveries outbox. Delivery happens in
+// Turns call-domain events into consumer-facing events (docs/events.md)
+// and writes them to the webhook_deliveries outbox. Delivery happens in
 // the outbox dispatcher, never inline — a slow or failing consumer can't hold
 // up a call.
 import EventBus from '../EventBus.js';

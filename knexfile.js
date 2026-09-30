@@ -1,5 +1,5 @@
 // knexfile.js — Knex CLI config for Callio's own database. See
-// migrations/README.md for the data model.
+// docs/data-model.md for the data model.
 //
 // Reuses config/envConfig.js for connection details, same as every other
 // file in this repo — never read process.env directly. Unlike

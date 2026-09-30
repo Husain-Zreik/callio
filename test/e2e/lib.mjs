@@ -132,6 +132,9 @@ export async function hear(listener, ms = 3000, settleMs = 2000) {
 
 // ── Fake Meta Graph API + customer simulation ─────────────────────────────────
 
+// Outbound calls to this number fail at the Graph API.
+export const UNREACHABLE_NUMBER = '96181030899';
+
 export function fakeMeta({ callioUrl, apiKey, phoneNumberId, port = 3990 }) {
     const customers = new Map();
     const calls = [];
@@ -181,6 +184,10 @@ export function fakeMeta({ callioUrl, apiKey, phoneNumberId, port = 3990 }) {
             return;
         }
         if (body.action === 'connect') {
+            // A number Meta refuses to call (e.g. not on WhatsApp).
+            if (String(body.to).replace(/\D/g, '') === UNREACHABLE_NUMBER) {
+                return reply(400, { error: { message: 'Recipient is not a valid WhatsApp user', code: 138006 } });
+            }
             const id = `wacid.out.${++outbound}`;
             reply(200, { messaging_product: 'whatsapp', calls: [{ id }] });
             const customer = newPeer(440);

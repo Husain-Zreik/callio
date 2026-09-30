@@ -1,5 +1,5 @@
 // src/core/calls/CustomerLookup.js
-// Optional pre-ring enrichment hook (PLATFORM_ARCHITECTURE.md §3). If the
+// Optional pre-ring enrichment hook (docs/events.md#lookup-hook-optional-synchronous). If the
 // consumer set consumers.lookup_url, Callio asks it about an inbound caller
 // before ringing anyone. Bounded by a short timeout: a slow or failing
 // consumer delays a call by at most LOOKUP_TIMEOUT_MS, never drops it.

@@ -1,5 +1,5 @@
 // src/realtime/middleware/authMiddleware.js
-// Agent socket authentication (PLATFORM_ARCHITECTURE.md §3C). The consumer's
+// Agent socket authentication (docs/agent-protocol.md). The consumer's
 // backend signs a short-lived HS256 JWT with one of its signing keys:
 //   header  { alg: "HS256", kid }
 //   payload { iss: <consumer slug>, sub: <agent_ref>, tnt: <tenant_ref>,

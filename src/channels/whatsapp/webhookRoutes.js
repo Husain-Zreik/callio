@@ -1,5 +1,6 @@
 // src/channels/whatsapp/webhookRoutes.js
-// WhatsApp Calling ingress (PLATFORM_ARCHITECTURE.md §3D).
+// WhatsApp Calling ingress (docs/architecture.md#channel-ingress,
+// docs/management-api.md#webhooks-in).
 //   GET  /webhooks/whatsapp          Meta's subscription verification
 //   POST /webhooks/whatsapp          Meta posts directly; X-Hub-Signature-256 verified
 //   POST /v1/webhooks/whatsapp/forward  a consumer forwards Meta's payload

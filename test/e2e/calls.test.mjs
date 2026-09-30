@@ -1,12 +1,13 @@
 // Core call flows with real WebRTC media on both legs: agent auth, inbound
 // routing and bridging, agent hang-up, outbound intent → call:start → dial,
-// API terminate, call detail, consumer events, isolation.
+// API terminate, call detail, consumer events, a dial the provider refuses,
+// isolation.
 // Run through run.mjs (npm run test:e2e), which passes <seed.json> <callio-port>.
 import { readFileSync } from 'fs';
 import { io } from 'socket.io-client';
 import {
     testDb, sleep, makeChecks, waitFor, newPeer, hear, gathered, fakeMeta, eventReceiver,
-    connectAgent, accept, nextIncoming, api as makeApi,
+    connectAgent, accept, nextIncoming, api as makeApi, UNREACHABLE_NUMBER,
 } from './lib.mjs';
 
 const seed = JSON.parse(readFileSync(process.argv[2], 'utf8'));
@@ -148,6 +149,26 @@ try {
     const endedEvent = receiver.events.find((e) => e.callId === outId && e.type === 'call.ended');
     check("events carry the consumer's refs", endedEvent?.body?.tenant_ref === 'demo'
         && endedEvent?.body?.data?.call?.externalRef === 'crm-call-42' && endedEvent?.body?.data?.call?.agentRef === 'agent-2');
+
+    // ── Outbound the provider refuses to dial ──
+    const refusedIntent = await api('POST', '/v1/tenants/demo/calls', {
+        channel_ref: 'whatsapp-main', agent_ref: 'agent-2', customer: { address: `+${UNREACHABLE_NUMBER}` },
+    });
+    check('an outbound intent to an unreachable number is created', refusedIntent.status === 201, `HTTP ${refusedIntent.status}`);
+    const refusedId = refusedIntent.body.call.callId;
+    a2.peer = newPeer(880);
+    await a2.peer.pc.setLocalDescription(await a2.peer.pc.createOffer());
+    await gathered(a2.peer.pc);
+    a2.errors.length = 0;
+    a2.socket.emit('call:start', { callId: refusedId, sdpOffer: a2.peer.pc.localDescription.sdp });
+    const refusedRow = await waitFor(async () => { const r = await callRow(refusedId); return r.status === 'FAILED' ? r : null; }, 15000, 'refused outbound failed');
+    check('a dial the provider refuses ends FAILED / PROVIDER_TRIGGER_FAILED / PROVIDER',
+        refusedRow.termination_reason === 'PROVIDER_TRIGGER_FAILED' && refusedRow.terminated_by === 'PROVIDER',
+        `${refusedRow.termination_reason}/${refusedRow.terminated_by}`);
+    check('the agent is told why (call:error PROVIDER_TRIGGER_FAILED)', a2.errors.some((e) => e.callId === refusedId && e.code === 'PROVIDER_TRIGGER_FAILED'),
+        JSON.stringify(a2.errors));
+    await waitFor(async () => (await availability('agent-2')) === 'OFFLINE', 5000, 'agent-2 offline after the failed dial');
+    a2.peer.close(); a2.peer = null;
 
     // ── Isolation ──
     const foreign = await meta.post({ metadata: { phone_number_id: '999999' }, calls: [{ id: 'x', event: 'terminate' }] });

@@ -5,11 +5,11 @@
   connects to, receiving every SIP message as an event and deciding what to
   do entirely in JS.
 
-  admin's secret is a literal here, not an env substitution — same
-  reasoning as the FreeSWITCH ESL password in the superseded milestone:
-  verify this image's entrypoint actually supports env-var substitution in
-  this file before relying on it; otherwise hand-edit this to match .env's
-  DRACHTIO_SECRET before starting the container.
+  The admin secret here is a placeholder, not the one in use: drachtio-server
+  takes DRACHTIO_SECRET from its environment (deploy/sip-gateway/.env, via
+  docker-compose.yml's env_file), which overrides the secret attribute below.
+  Callio's DRACHTIO_SECRET must equal that value. Never commit a real secret
+  here. See docs/sip.md.
 
   Bound to loopback: the Node app connects locally, same-host assumption as
   the rest of this deployment. If Node ends up on a different host, change
@@ -22,12 +22,12 @@
   caught by actually running the container, not a hypothetical one.
 -->
 <drachtio>
-  <admin port="9022" secret="5f92f108b2e645ad2fd454966ca4913e75e2564cb9909cfd">127.0.0.1</admin>
+  <admin port="9022" secret="CHANGE_ME">127.0.0.1</admin>
 
   <sip>
     <contacts>
       <!-- Listens for the trunk's SIP traffic. Add ;transport=tls,5061 here
-           too if the provider requires SIP/TLS (see RUNBOOK.md checklist). -->
+           too if the provider requires SIP/TLS (see docs/sip.md). -->
       <contact>sip:*:5060;transport=udp,tcp</contact>
     </contacts>
   </sip>

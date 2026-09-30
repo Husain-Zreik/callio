@@ -1,6 +1,6 @@
 // src/push/CallPushNotifier.js
 // Wakes agents' devices for calls. The single place that decides which
-// push goes to which device (PLATFORM_ARCHITECTURE.md §3E):
+// push goes to which device (docs/agent-protocol.md#push):
 //   ANDROID  FCM data message, silent        type=call.incoming / call.cancelled
 //   IOS      APNs VoIP (CallKit rings)        type=call.incoming / call.cancelled
 //            + FCM visible alert              type=call.incoming.alert

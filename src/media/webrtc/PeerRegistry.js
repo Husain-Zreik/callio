@@ -2,7 +2,8 @@
 // Registry of all active WebRTC peer connections.
 // Owns the peerConnections Map, all peer lifecycle operations,
 // and the connectionReady/trackReceived event wiring from PeerEventManager.
-// Singleton — import `peerRegistry` everywhere instead of going through CallManager.
+// Singleton — import `peerRegistry` directly (SDPCoordinator, the call event
+// handlers, CallTerminator, CallCleanupService, shutdown).
 import wrtc from '@roamhq/wrtc';
 import CallConnectionRepository from '../../persistence/CallConnectionRepository.js';
 import CallRepository from '../../persistence/CallRepository.js';
@@ -30,7 +31,7 @@ class PeerRegistry {
         // callId -> { frontend?: Timeout, whatsapp?: Timeout }
         this._iceStallTimers = new Map();
 
-        // Wire peer lifecycle events directly — no roundtrip through CallManager.
+        // Wire peer lifecycle events from PeerEventManager directly.
         peerEventManager.on('connectionReady', (data) => this._onConnectionReady(data));
         peerEventManager.on('trackReceived', ({ callId, connectionType, track, stream }) => {
             if (connectionType === ConnectionType.MONITOR) {

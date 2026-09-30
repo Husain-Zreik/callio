@@ -24,7 +24,8 @@ import { logger } from '../infra/logging/logger.js';
 
 const log = logger('server.shutdown');
 
-// Checked by callWebhookController before processing a new incoming-call webhook.
+// Checked by the WhatsApp webhook route (channels/whatsapp/webhookRoutes.js),
+// which answers 503 instead of taking a new incoming-call webhook.
 // Live ES module binding — importers see updates made to this value below, not a
 // stale copy taken at import time.
 //

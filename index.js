@@ -1,7 +1,7 @@
 // Entry point — wires the application together and starts the HTTP/WebSocket server.
 // Keep this file as an orchestrator only: no business logic, no service implementation.
 // Init sequences → src/server/bootstrap.js  |  Shutdown → src/server/shutdown.js
-// HTTP → src/http/  |  Agent sockets → src/realtime/  (layout: PLATFORM_ARCHITECTURE.md §7)
+// HTTP → src/http/  |  Agent sockets → src/realtime/  (layout: CLAUDE.md → Layout; how it fits: docs/architecture.md)
 
 // Logging first: the log files open and console.* (libraries) is bridged
 // into the logger before any other import can write a line.

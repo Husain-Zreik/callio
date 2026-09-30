@@ -1,7 +1,8 @@
 // src/media/bridge/AudioCoordinator.js
 //
-// Central coordinator for all audio concerns — the SINGLE entry point
-// CallManager uses for every audio operation.
+// Central coordinator for all audio concerns — the single entry point for
+// every audio operation (called by PeerRegistry, SDPCoordinator and the
+// connection/monitor event handlers in core/events/handlers).
 //
 // No audio business logic lives here; each method delegates to the
 // appropriate sub-manager and returns.

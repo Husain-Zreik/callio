@@ -85,6 +85,9 @@ export const TerminationReason = Object.freeze({
     // Meta/provider-level failure (call:terminate status=FAILED or statuses
     // entry with status=FAILED). Always paired with CallStatus.FAILED.
     PROVIDER_ERROR: 'PROVIDER_ERROR',
+    // Outbound: dialling the customer through the channel failed before the
+    // provider accepted the call. Always paired with CallStatus.FAILED.
+    PROVIDER_TRIGGER_FAILED: 'PROVIDER_TRIGGER_FAILED',
     // IVR transferred the call to an agent but the agent did not accept within
     // the configured ring timeout (default 60 s, per-flow via ivr_flows.agent_ring_timeout).
     IVR_AGENT_NO_ANSWER: 'IVR_AGENT_NO_ANSWER',

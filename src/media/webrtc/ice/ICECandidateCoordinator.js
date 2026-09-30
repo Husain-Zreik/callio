@@ -3,7 +3,8 @@
  * ICECandidateCoordinator
  *
  * Central coordinator for all ICE candidate management (both inbound and outbound).
- * Provides a clean API to CallManager, hiding internal buffering and dispatching complexity.
+ * Used by SDPCoordinator, PeerRegistry, PeerEventManager and the call event handlers
+ * (core/events/handlers), hiding internal buffering and dispatching complexity.
  * This is the single entry point for all ICE-related operations.
  */
 

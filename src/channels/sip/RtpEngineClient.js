@@ -1,7 +1,6 @@
 // src/channels/sip/RtpEngineClient.js
 // rtpengine's "ng" control protocol: bencoded dictionaries over UDP, each
-// request prefixed with a cookie the reply echoes. Promoted from
-// deploy/sip-gateway/test/rtpengine-ng-client.js.
+// request prefixed with a cookie the reply echoes.
 //
 // rtpengine is the SIP channel's media converter: it relays the carrier's
 // plain RTP to and from a WebRTC session (ICE + DTLS-SRTP) that Callio's

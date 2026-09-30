@@ -1,5 +1,5 @@
 // src/core/events/handlers/InitiationEventHandler.js
-// Outbound calls, in two steps (PLATFORM_ARCHITECTURE.md §5.2):
+// Outbound calls, in two steps (docs/architecture.md#outbound-call):
 //   1. createOutboundIntent — the consumer's backend asks for a call (it owns
 //      consent) → a calls row in INITIATED, bound to one agent.
 //   2. handleCallStart — that agent's client connects its media leg with

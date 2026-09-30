@@ -36,7 +36,7 @@ class SipGateway {
                 const key = String(reason);
                 if (key !== this._lastError) {
                     this._lastError = key;
-                    log.error(`drachtio connection to ${drachtio.host}:${drachtio.port} failed: ${reason} — check that the gateway is running and DRACHTIO_SECRET matches drachtio.conf.xml`);
+                    log.error(`drachtio connection to ${drachtio.host}:${drachtio.port} failed: ${reason} — check that the gateway is running and DRACHTIO_SECRET equals DRACHTIO_SECRET in deploy/sip-gateway/.env`);
                 }
                 return;
             }

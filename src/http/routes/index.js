@@ -1,5 +1,5 @@
 // src/http/routes/index.js
-// Every HTTP surface Callio exposes (PLATFORM_ARCHITECTURE.md §3):
+// Every HTTP surface Callio exposes (docs/architecture.md#integration-surfaces):
 //   /health, /v1/health            probes (unauthenticated)
 //   /metrics                       Prometheus (METRICS_TOKEN)
 //   channel ingress                each customer channel's own webhooks, e.g.

@@ -1,20 +1,20 @@
-// SIP OPTIONS reachability probe — checks whether the SIP trunk is actually
-// reachable and responding, without placing a real call. Run directly on the
-// server (must originate from here, not from an arbitrary machine, since the
-// trunk's firewall only expects/allows traffic to flow between it and this
-// server's IP): node options-ping.js
+// SIP OPTIONS reachability probe: checks that a carrier's SIP signalling
+// address answers, without placing a call. No dependencies.
 //
-// Any SIP response (200 OK, or even a 4xx) confirms the trunk is reachable
-// and processing SIP traffic from this server. No response within the
-// timeout means either a firewall/routing problem, or the trunk isn't
-// listening the way expected — worth checking both directions (this
-// server's outbound firewall rules, and the provider's own side) if it times
-// out repeatedly.
-'use strict';
+//   TRUNK_IP=<carrier signalling IP> [TRUNK_PORT=5060] [LOCAL_PORT=15070] node options-ping.js
+//
+// Run it on the gateway server itself: an IP-authenticated trunk only talks
+// to the address it knows. Stop drachtio first or keep LOCAL_PORT off 5060.
+// Any SIP response (200, or even a 4xx) means the carrier is reachable and
+// processing SIP from this host; a timeout means a firewall/routing problem
+// on either side, or the wrong signalling address.
+import dgram from 'node:dgram';
 
-const dgram = require('node:dgram');
-
-const TRUNK_IP = process.env.TRUNK_IP || '185.231.78.58';
+const TRUNK_IP = process.env.TRUNK_IP;
+if (!TRUNK_IP) {
+    console.error('Set TRUNK_IP to the carrier SIP signalling address.');
+    process.exit(1);
+}
 const TRUNK_PORT = Number(process.env.TRUNK_PORT || 5060);
 const LOCAL_PORT = Number(process.env.LOCAL_PORT || 15070);
 const TIMEOUT_MS = 5000;
