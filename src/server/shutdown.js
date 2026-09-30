@@ -21,6 +21,7 @@ import dbPool from '../../config/dbConnection.js';
 import { outboxDispatcher } from '../outbox/OutboxDispatcher.js';
 import { queueTimeoutService } from '../core/routing/QueueTimeoutService.js';
 import { callCleanupService } from '../core/calls/CallCleanupService.js';
+import { retentionService } from '../core/calls/RetentionService.js';
 import { logger } from '../infra/logging/logger.js';
 
 const log = logger('server.shutdown');
@@ -192,6 +193,7 @@ export async function shutdown(server, io) {
         // 6. Stop background jobs (Redis reaper, outbox dispatcher lease)
         await redisCleanupService.stop();
         queueTimeoutService.stop();
+        retentionService.stop();
         await outboxDispatcher.stop();
         for (const channel of customerChannels.all()) {
             await Promise.resolve(channel.stop?.()).catch((err) => log.warn({ err }, `${channel.type} channel stop failed`));

@@ -68,7 +68,6 @@ export function toConsumerCallView(call, { tenantRef = null, agentRef = null, ag
             ringing: call.ringing_duration ?? 0,
             call: call.call_duration ?? 0,
             queue: call.queue_duration ?? 0,
-            onHold: call.on_hold_duration ?? 0,
         },
         failureDetails: parseJson(call.failure_details),
         consumerMetadata: parseJson(call.consumer_metadata),

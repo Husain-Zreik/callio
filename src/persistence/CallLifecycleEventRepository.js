@@ -2,7 +2,8 @@
 import connection from '../../config/dbConnection.js';
 
 class CallLifecycleEventRepository {
-    async insert(callId, agentId, eventType, durationSeconds, metadata, occurredAt = null) {
+    // tenantId: the call's tenant, so per-tenant reads (reports) don't join calls.
+    async insert(callId, agentId, eventType, durationSeconds, metadata, occurredAt = null, tenantId = null) {
         const meta = metadata && Object.keys(metadata).length > 0
             ? JSON.stringify(metadata)
             : null;
@@ -12,9 +13,9 @@ class CallLifecycleEventRepository {
         // so NOW() here would record commit order, not logical event order.
         await connection.execute(
             `INSERT INTO call_lifecycle_events
-                (call_id, agent_id, event_type, occurred_at, duration_seconds, metadata, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-            [callId, agentId ?? null, eventType, occurredAt ?? new Date(), durationSeconds ?? null, meta]
+                (call_id, tenant_id, agent_id, event_type, occurred_at, duration_seconds, metadata, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+            [callId, tenantId ?? null, agentId ?? null, eventType, occurredAt ?? new Date(), durationSeconds ?? null, meta]
         );
     }
 

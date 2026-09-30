@@ -120,6 +120,8 @@ try {
         JSON.stringify(mainLive));
     await meta.hangUp(cB.id);
     await waitFor(async () => (await callRow(rowB.id)).status === 'TERMINATED', 10000, 'call B ended');
+    const endedB = await callRow(rowB.id);
+    check('a call that waited in the queue has its queue time (durations.queue)', endedB.queue_duration >= 1, `queue_duration=${endedB.queue_duration}`);
 
     const from = new Date(Date.now() - 3600_000).toISOString();
     const rep = await api('GET', `${T}/reports/calls?from=${from}&interval=hour&service_level_seconds=30`);

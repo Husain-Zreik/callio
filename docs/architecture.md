@@ -181,6 +181,7 @@ Every worker runs these background loops:
 | `OutboxDispatcher` | poll | Yes, Redis lease |
 | `QueueTimeoutService` | 2 s | Yes, lock `callio:queue-timeouts:lock` |
 | `RedisCleanupService`: stale ownership keys | 5 min | Yes, lock `cleanup:lock` |
+| `RetentionService`: old call detail, SDP, finished webhook deliveries, expired recordings ([data-model.md → Retention](data-model.md#retention)) | 1 h (`RETENTION_SWEEP_SECONDS`) | Yes, key `callio:retention:swept` with that TTL |
 | `CallCleanupService`: stuck calls, expired outbound intents, stale recordings, orphaned local peers, IVR agent ring timeout | 30 s | No lock. Every worker scans, and `CallTerminator`'s guarded commit applies side effects once. The peer reconcile is per worker by design. |
 
 ## Inbound call

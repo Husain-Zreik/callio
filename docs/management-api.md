@@ -97,9 +97,13 @@ the stored object as a whole when given, and is kept when omitted:
 ```json
 {
   "auto_offline": { "enabled": true, "missed_threshold": 3 },
-  "recording": { "storage_limit_bytes": 5368709120 }
+  "recording": { "storage_limit_bytes": 5368709120, "retention_days": 90 }
 }
 ```
+
+`recording.retention_days` deletes this tenant's recordings that many days
+after they were made (`0` keeps them; default: the deployment's
+`RECORDING_RETENTION_DAYS`, which keeps them unless set).
 
 `auto_offline` takes an agent `OFFLINE` after `missed_threshold` (default 3)
 consecutive missed offers. Counted as missed, for a call in a

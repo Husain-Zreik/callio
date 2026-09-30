@@ -182,6 +182,14 @@ export const config = {
             webrtcInterface: process.env.RTPENGINE_WEBRTC_INTERFACE || null,
         },
     },
+    // How long call data is kept (core/calls/RetentionService). 0 days = keep.
+    retention: {
+        sweepSeconds: Math.max(10, Number(process.env.RETENTION_SWEEP_SECONDS ?? 3600) || 3600),
+        callDetailDays: Math.max(0, Number(process.env.CALL_DETAIL_RETENTION_DAYS ?? 180) || 0),
+        sdpHours: Math.max(0, Number(process.env.CALL_SDP_RETENTION_HOURS ?? 24) || 0),
+        webhookDeliveryDays: Math.max(0, Number(process.env.WEBHOOK_DELIVERY_RETENTION_DAYS ?? 30) || 0),
+        recordingDays: Math.max(0, Number(process.env.RECORDING_RETENTION_DAYS ?? 0) || 0),
+    },
     call: {
         recordingStorageLimitGb: parseInt(process.env.RECORDING_STORAGE_LIMIT_GB || "1", 10) || 1,
         // A live call transferred to an agent who doesn't accept within this

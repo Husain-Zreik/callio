@@ -29,8 +29,7 @@ class ReportRepository {
         const [rows] = await connection.execute(
             `SELECT e.agent_id, e.event_type, COUNT(*) AS n
              FROM call_lifecycle_events e
-             JOIN calls c ON c.id = e.call_id
-             WHERE c.tenant_id = ? AND e.occurred_at >= ? AND e.occurred_at < ? AND e.agent_id IS NOT NULL
+             WHERE e.tenant_id = ? AND e.occurred_at >= ? AND e.occurred_at < ? AND e.agent_id IS NOT NULL
                AND e.event_type IN ('inbound_accepted', 'inbound_follow_up', 'inbound_rejected', 'inbound_offer_missed',
                                     'ivr_agent_missed', 'outbound_initiated', 'outbound_accepted')
              GROUP BY e.agent_id, e.event_type`,

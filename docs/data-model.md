@@ -38,6 +38,7 @@ consumer's migration system touch this database.
 | `20260925000016_create_webhook_deliveries_table.js` | `webhook_deliveries` |
 | `20260928000001_add_queue_timing_to_calls.js` | `calls.queued_at`, `offered_at`, `overflow_count` + two timeout-scan indexes |
 | `20260930000001_add_event_dedupe_and_idempotency_keys.js` | `webhook_deliveries.dedupe_key` + `(consumer_id, id)` index; `api_idempotency_keys` |
+| `20260930120000_add_history_indexes_and_lifecycle_tenant.js` | `calls` `(tenant_id, created_at)` and `(tenant_id, ended_at)`; `call_lifecycle_events.tenant_id` (backfilled) + `(tenant_id, occurred_at)`; `agent_push_tokens` unique `(provider, token)`, `is_active` dropped |
 
 ## Overview
 
@@ -147,7 +148,8 @@ Unique (`consumer_id`, `external_ref`); `status` `ACTIVE` / `SUSPENDED`.
 
 One row per (`agent_id`, `device_id`, `provider`), unique. `platform`
 `ANDROID` / `IOS` / `WEB`; `provider` `FCM` / `APNS_VOIP` / `ONESIGNAL`;
-`is_active`, `last_seen_at`. `device_id` is also written to
+`last_seen_at`. A token is unique per `provider` (one device): registering it
+for another device or agent moves it. `device_id` is also written to
 `call_connections.device_id` to know which device answered.
 
 ### audio_assets
@@ -234,7 +236,7 @@ whose `trigger_condition` holds wins.
 | `queued_at` | When the call entered its current queue (arrival, IVR transfer, overflow); `max_wait_seconds` counts from here. |
 | `offered_at` | When the current offer to `agent_id` started; NULL while nobody is offered it and once the agent starts answering. `ring_timeout_seconds` counts from here. On an `IN_PROGRESS` call it marks a transfer waiting for its target. |
 | `overflow_count` | Overflows so far; `src/core/routing/QueueTimeoutService.js` stops at 3 so overflow loops end. |
-| `ringing_duration`, `call_duration`, `queue_duration`, `on_hold_duration` | Seconds. |
+| `ringing_duration`, `call_duration`, `queue_duration` | Seconds. `queue_duration`: entering the queue → an agent answering (or the end), set when the call ends. `on_hold_duration` is unused (there is no hold yet). |
 | `failure_details` | JSON `{ errors: [{ code, title, details, source }], provider_callback_data }`. |
 
 Indexes: (`tenant_id`, `status`, `created_at`), (`tenant_id`, `external_ref`),
@@ -259,8 +261,11 @@ leg now.
 
 ### call_lifecycle_events
 
-`event_type` string (64), validated in code; `agent_id`, `occurred_at`,
+`event_type` string (64), validated in code; `tenant_id` (the call's, for
+per-tenant reads such as the reports), `agent_id`, `occurred_at`,
 `duration_seconds`, `metadata`. Written by `src/core/calls/CallLifecycleLogger.js`.
+Deleted with the rest of a call's detail after the retention period (see
+[Retention](#retention)).
 
 ### call_transfer_logs
 
@@ -284,9 +289,10 @@ storage under `storage_key`.
 
 | Column | Notes |
 |---|---|
-| `status` | Lowercase: `recording` → `processing` → `completed`, or `failed` (including stale `recording`/`processing` rows swept by `src/core/calls/CallCleanupService.js`). `pending_deletion` / `purged` exist in the enum but are not set yet. |
+| `status` | Lowercase: `recording` → `processing` → `completed`, or `failed` (including stale `recording`/`processing` rows swept by `src/core/calls/CallCleanupService.js`). `purged`: removed from storage by the retention job (`storage_key` cleared, `purged_at` set). `pending_deletion` is not set yet. |
 | `error_message`, `started_at`, `completed_at`, `duration_seconds`, `file_size_bytes` | |
-| `retained_until`, `scheduled_purge_at`, `purged_at`, `deletion_requested_by_ref`, `deletion_requested_at` | Retention columns; not used by the code yet. |
+| `purged_at` | When the retention job removed it. |
+| `retained_until`, `scheduled_purge_at`, `deletion_requested_by_ref`, `deletion_requested_at` | Not used yet. |
 
 Only `completed` recordings count toward the tenant quota and can be fetched
 through the API.
@@ -309,6 +315,21 @@ One row per (`consumer_id`, `idempotency_key`): `request_hash` (SHA-256 of
 method, path and body), `status` `IN_PROGRESS` / `COMPLETED`,
 `response_status`, `response_body`, `expires_at` (24 h; expired rows are
 purged as keys are used). Written by `src/http/v1/idempotency.js`.
+
+## Retention
+
+`src/core/calls/RetentionService.js` removes old data. One sweep runs per
+`RETENTION_SWEEP_SECONDS` (1 h) across all workers, in bounded batches. A
+value of `0` keeps that data.
+
+| Data | Removed after | Setting |
+|---|---|---|
+| A call's `call_lifecycle_events`, `call_connections`, `call_transfer_logs`, `ivr_sessions` (+ inputs) | the call ended 180 days ago | `CALL_DETAIL_RETENTION_DAYS` |
+| `call_connections.local_sdp` / `remote_sdp` / `ice_candidates` (cleared, row kept) | the call ended 24 h ago | `CALL_SDP_RETENTION_HOURS` |
+| `webhook_deliveries` that are `DELIVERED` or `FAILED` (never `PENDING`) | 30 days | `WEBHOOK_DELIVERY_RETENTION_DAYS` |
+| `call_recordings`: the stored object, then `status = purged` | never by default | `RECORDING_RETENTION_DAYS`, or a tenant's `settings.recording.retention_days` |
+
+The `calls` rows, the call record itself, are kept.
 
 ## Reference: migrating from the old midlr schema
 

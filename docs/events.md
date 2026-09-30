@@ -84,7 +84,7 @@ const ok = crypto.timingSafeEqual(Buffer.from(v1), Buffer.from(expected))
       "endedAt": "2026-09-25T10:05:12.000Z",
       "terminationReason": "COMPLETED",
       "terminatedBy": "CUSTOMER",
-      "durations": { "ringing": 6, "call": 306, "queue": 0, "onHold": 0 },
+      "durations": { "ringing": 6, "call": 306, "queue": 12 },
       "failureDetails": null,
       "consumerMetadata": { "crm_contact_id": 991 },
       "createdAt": "2026-09-25T10:00:00.000Z"
@@ -135,6 +135,9 @@ Management API returns), plus the extra fields below.
   to its queue (inbound) — it keeps ringing agents — or ends as
   `TIMEOUT` / `SYSTEM` (outbound calls, calls without a queue).
 - `terminatedBy`: `AGENT`, `CUSTOMER`, `PROVIDER`, `SYSTEM`.
+- `durations` (seconds): `ringing`; `call`, the customer talking to an agent;
+  `queue`, from entering the queue to an agent answering (or to the end when
+  nobody did), `0` for a call that never waited in a queue.
 - `status`: `INITIATED`, `RINGING`, `IN_PROGRESS`, `TERMINATED`, `FAILED`.
 - `customer.addressType`: `E164`, `WHATSAPP_USER` (a WhatsApp user reachable
   without a phone number), `SIP_URI`.

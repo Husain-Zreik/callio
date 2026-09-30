@@ -311,7 +311,7 @@ class CallLifecycleLogger {
                 }
             }
 
-            await CallLifecycleEventRepository.insert(callId, agentId, eventType, durationSeconds, metadata, occurredAt);
+            await CallLifecycleEventRepository.insert(callId, agentId, eventType, durationSeconds, metadata, occurredAt, tenantId);
         } catch (err) {
             log.error({ callId, err }, `#insert(${eventType}) failed`);
         }

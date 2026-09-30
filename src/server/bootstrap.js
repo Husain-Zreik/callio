@@ -12,6 +12,7 @@ import { dtmfWorkerBridge } from '../media/dtmf/DTMFWorkerBridge.js';
 import { callNotifications } from '../core/calls/CallNotifications.js';
 import { callPushNotifier } from '../push/CallPushNotifier.js';
 import { customerNetworkLossPolicy } from '../core/calls/CustomerNetworkLossPolicy.js';
+import { retentionService } from '../core/calls/RetentionService.js';
 import { callCleanupService } from '../core/calls/CallCleanupService.js';
 import { consumerEventPublisher } from '../core/events/ConsumerEventPublisher.js';
 import { ivrTerminationHandler } from '../core/ivr/IvrTerminationHandler.js';
@@ -73,6 +74,7 @@ export async function startCoreServices() {
     redisCleanupService.start();
     callCleanupService.start();
     queueTimeoutService.start();
+    retentionService.start();
     outboxDispatcher.start();
 
     // Channels that hold a connection to their provider (SIP's drachtio) take

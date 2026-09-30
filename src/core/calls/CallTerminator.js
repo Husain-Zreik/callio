@@ -73,6 +73,10 @@ class CallTerminator {
         if (!call) return;
         const callId = call.id;
 
+        // Before call:terminated: the consumer's call.ended is built from the row.
+        await CallRepository.fillQueueDuration(callId)
+            .catch((err) => log.warn({ callId, err }, 'Setting queue_duration failed'));
+
         EventBus.emit('call:terminated', {
             callId,
             tenantId: call.tenant_id,

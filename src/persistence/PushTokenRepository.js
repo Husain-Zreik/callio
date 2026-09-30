@@ -3,18 +3,19 @@
 import connection from '../../config/dbConnection.js';
 
 class PushTokenRepository {
-    // Upsert the token for (agent, device, provider). A token moving to a new
-    // agent (shared device, account switch) is removed from its previous owner.
+    // Upsert the token for (agent, device, provider). A token is unique per
+    // provider (one device): a token moving to another agent (shared device,
+    // account switch) or device id leaves its previous row first.
     async register(agentId, { deviceId, platform, provider, token }) {
         await connection.execute(
-            `DELETE FROM agent_push_tokens WHERE provider = ? AND token = ? AND agent_id != ?`,
-            [provider, token, agentId]
+            `DELETE FROM agent_push_tokens WHERE provider = ? AND token = ? AND NOT (agent_id = ? AND device_id = ?)`,
+            [provider, token, agentId, deviceId]
         );
         await connection.execute(
-            `INSERT INTO agent_push_tokens (agent_id, device_id, platform, provider, token, is_active, last_seen_at, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 1, NOW(), NOW(), NOW())
+            `INSERT INTO agent_push_tokens (agent_id, device_id, platform, provider, token, last_seen_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, NOW(), NOW(), NOW())
              ON DUPLICATE KEY UPDATE
-                 platform = VALUES(platform), token = VALUES(token), is_active = 1,
+                 platform = VALUES(platform), token = VALUES(token),
                  last_seen_at = NOW(), updated_at = NOW()`,
             [agentId, deviceId, platform, provider, token]
         );
@@ -45,7 +46,7 @@ class PushTokenRepository {
              FROM agent_push_tokens p
              JOIN agents a ON a.id = p.agent_id
              JOIN tenants t ON t.id = a.tenant_id
-             WHERE p.agent_id IN (${placeholders}) AND p.provider = ? AND p.is_active = 1 ${extra}`,
+             WHERE p.agent_id IN (${placeholders}) AND p.provider = ? ${extra}`,
             params
         );
         return rows;

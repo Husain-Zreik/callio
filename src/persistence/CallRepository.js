@@ -417,6 +417,22 @@ class CallRepository {
         }
     }
 
+    // Time in the queue, for a call that entered one: queued_at → an agent's
+    // first answer (inbound_accepted), or → the end when nobody answered. Set
+    // once when the call ends (CallTerminator.settle); an IVR call's
+    // answered_at is the IVR picking up, so it can't be used here.
+    async fillQueueDuration(callId) {
+        await connection.execute(
+            `UPDATE calls c
+             SET c.queue_duration = GREATEST(0, TIMESTAMPDIFF(SECOND, c.queued_at, COALESCE(
+                     (SELECT MIN(e.occurred_at) FROM call_lifecycle_events e
+                       WHERE e.call_id = c.id AND e.event_type = 'inbound_accepted' AND e.occurred_at >= c.queued_at),
+                     c.ended_at, NOW())))
+             WHERE c.id = ? AND c.queued_at IS NOT NULL`,
+            [callId]
+        );
+    }
+
     async updateDuration(callId, field, value = 0) {
         const validFields = ['ringing_duration', 'call_duration', 'queue_duration', 'on_hold_duration'];
         if (!validFields.includes(field)) {
