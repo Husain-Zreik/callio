@@ -60,14 +60,14 @@ export async function resolveAgent(tenant, agentRef) {
     return agent;
 }
 
-async function resolveQueueRef(tenant, queueRef, field) {
+export async function resolveQueueRef(tenant, queueRef, field) {
     if (queueRef == null) return null;
     const queue = await QueueRepository.findByExternalRef(tenant.id, ref(queueRef, field));
     if (!queue) throw badRequest(`${field} does not match a queue`);
     return queue;
 }
 
-async function resolveChannelRef(tenant, channelRef, field) {
+export async function resolveChannelRef(tenant, channelRef, field) {
     if (channelRef == null) return null;
     const channel = await ChannelRepository.findByExternalRef(tenant.id, ref(channelRef, field));
     if (!channel) throw badRequest(`${field} does not match a channel`);

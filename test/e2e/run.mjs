@@ -17,6 +17,23 @@ const require = createRequire(import.meta.url);
 const mysql = require('mysql2/promise');
 const Redis = require('ioredis');
 
+// One run at a time: every run recreates the same database and uses the same
+// ports, so two at once break each other. The lock is a listening port, so
+// the OS frees it however this process ends (crash, kill). A second run waits.
+const LOCK_PORT = Number(process.env.TEST_LOCK_PORT || 3899);
+const lock = net.createServer();
+for (let waited = 0; ; waited++) {
+    const taken = await new Promise((resolve) => {
+        lock.once('error', (err) => resolve(err.code === 'EADDRINUSE'));
+        lock.listen(LOCK_PORT, '127.0.0.1', () => resolve(false));
+    });
+    if (!taken) break;
+    if (waited === 0) console.log(`[e2e] another test run is in progress (port ${LOCK_PORT}) — waiting for it to finish`);
+    if (waited >= 180) { console.log('[e2e] gave up waiting after 15 minutes'); process.exit(1); }
+    await new Promise((r) => setTimeout(r, 5000));
+}
+lock.unref();
+
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
 const work = mkdtempSync(join(tmpdir(), 'callio-e2e-'));

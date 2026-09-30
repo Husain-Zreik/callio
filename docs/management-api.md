@@ -74,6 +74,7 @@ Some errors add `details` (for `in_use`: what is using the entity).
 | `404` | `not_enabled` | `POST /webhooks/whatsapp` when direct Meta ingress isn't configured |
 | `409` | `invalid_channel`, `channel_disabled`, `unsupported_channel`, `invalid_agent`, `agent_busy`, `invalid_customer` | `POST …/calls` — see [Outbound calls](#outbound-calls) |
 | `409` | `call_ended` | `POST /v1/calls/{id}/terminate` on a call that already ended |
+| `409` | `call_active`, `recording_in_progress` | [Deleting data](#deleting-data) before the call ended or its recording was saved |
 | `409` | `idempotency_key_in_use` | A request with this `Idempotency-Key` is still running |
 | `409` | `in_use` | A `DELETE` of something still in use — see [Deleting](#deleting) |
 | `409` | `last_key`, `kid_taken` | Revoking your last active API or signing key; a `kid` that exists — see [Keys](#keys) |
@@ -81,7 +82,7 @@ Some errors add `details` (for `in_use`: what is using the entity).
 | `422` | `idempotency_key_reused` | The `Idempotency-Key` was used with a different request |
 | `429` | `rate_limited` | Over the rate limit |
 | `500` | `internal_error` | Unexpected failure |
-| `503` | `storage_unavailable` | `GET /v1/calls/{id}/recording` when object storage isn't configured |
+| `503` | `storage_unavailable` | `GET /v1/calls/{id}/recording` when object storage isn't configured; deleting data when a recording file can't be deleted |
 
 ## Tenants
 
@@ -439,11 +440,13 @@ removed from storage; an object you registered by `storage_key` is left alone.
 | Method | Path | Body / query | Response |
 |---|---|---|---|
 | `POST` | `/v1/tenants/{t}/calls` | Outbound intent — see below | `201 { call }` |
-| `GET` | `/v1/tenants/{t}/calls` | `?status&direction&agent_ref&external_ref&from&to&limit&before_id` | `{ calls, nextBeforeId }` |
+| `GET` | `/v1/tenants/{t}/calls` | `?status&direction&agent_ref&external_ref&customer&channel_ref&queue_ref&from&to&limit&before_id` | `{ calls, nextBeforeId }` |
 | `GET` | `/v1/calls/{callId}` | — | `{ call, legs, events, transfers, ivrSessions, recording }` |
 | `PATCH` | `/v1/calls/{callId}` | `{ external_ref?, consumer_metadata? }` | `{ call }` |
 | `POST` | `/v1/calls/{callId}/terminate` | — | `202 { accepted: true }` |
 | `GET` | `/v1/calls/{callId}/recording` | — | `{ url, expiresInSeconds, format, channelMap }` |
+| `DELETE` | `/v1/calls/{callId}` | — | `204` — see [Deleting data](#deleting-data) |
+| `POST` | `/v1/tenants/{t}/customers/erase` | `{ address }` | `{ callsErased, recordingsDeleted, activeCallsSkipped }` |
 
 `call` is the call view described in [events.md](events.md#envelope)
 (`data.call`).
@@ -451,7 +454,10 @@ removed from storage; an object you registered by `storage_key` is left alone.
 - **List:** `status` is one of `INITIATED`, `RINGING`, `IN_PROGRESS`,
   `TERMINATED`, `FAILED`; `direction` `INBOUND` or `OUTBOUND`; `from`
   (inclusive) and `to` (exclusive) are ISO 8601 timestamps compared with the
-  call's creation time (`400` if one doesn't parse); `limit` 1–200, default 50. Pages are newest first; pass
+  call's creation time (`400` if one doesn't parse); `customer` is the
+  customer's address — a phone number with or without `+` or `00`, or a SIP
+  URI; `channel_ref` / `queue_ref` pick one line or queue (`400` if the ref
+  matches nothing); `limit` 1–200, default 50. Pages are newest first; pass
   `nextBeforeId` as `before_id` for the next page. `nextBeforeId` is `null`
   only when the page is empty.
 - **Detail:** `legs` — `[{ type: AGENT|CUSTOMER|MONITOR, agentId, deviceId,
@@ -471,6 +477,29 @@ removed from storage; an object you registered by `storage_key` is left alone.
   outbound intent the agent hasn't started yet ends straight away.
 - **Recording:** a short-lived download URL. `404` until the recording has
   completed; `503 storage_unavailable` without object storage.
+
+### Deleting data
+
+For a customer's request to delete their data, or your own cleanup. Both
+touch ended calls only, delete the recording files from storage first, and
+remove the events Callio sent about those calls (they carry the customer too).
+Callio's own retention also removes old detail and recordings on a schedule —
+see the tenant `settings` above.
+
+- **`DELETE /v1/calls/{callId}`** — the call and everything about it: legs,
+  lifecycle log, transfers, IVR sessions and key presses, the recording, and
+  its events (`GET /v1/events` no longer lists them). `409 call_active` while
+  the call hasn't ended.
+- **`POST /v1/tenants/{t}/customers/erase { address }`** — every ended call of
+  the tenant with this customer address (same forms as the `customer` filter)
+  keeps its row for your history and reports, but without the customer: the
+  address, name, `external_ref`, `consumer_metadata` and provider details are
+  cleared, and its lifecycle log, IVR key presses, SDP, recording and events
+  are deleted. `activeCallsSkipped` counts the customer's calls still in
+  progress — erase again once they've ended. Safe to repeat.
+- Either answers `409 recording_in_progress` while a recording is still being
+  saved (try again in a minute), and `503 storage_unavailable` when a
+  recording file can't be deleted; nothing is changed then.
 
 ### Outbound calls
 

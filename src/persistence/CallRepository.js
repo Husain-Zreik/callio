@@ -92,12 +92,15 @@ class CallRepository {
 
     // Management API listing. Filters: status, agentId, externalRef, direction,
     // from/to (created_at). Keyset pagination on id, newest first.
-    async listForTenant(tenantId, { status, agentId, externalRef, direction, from, to, beforeId, limit = 50 } = {}) {
+    async listForTenant(tenantId, { status, agentId, externalRef, customerAddress, channelId, queueId, direction, from, to, beforeId, limit = 50 } = {}) {
         const where = ['tenant_id = ?'];
         const params = [tenantId];
         if (status) { where.push('status = ?'); params.push(status); }
         if (agentId) { where.push('agent_id = ?'); params.push(agentId); }
         if (externalRef) { where.push('external_ref = ?'); params.push(externalRef); }
+        if (customerAddress) { where.push('customer_address = ?'); params.push(customerAddress); }
+        if (channelId) { where.push('channel_id = ?'); params.push(channelId); }
+        if (queueId) { where.push('queue_id = ?'); params.push(queueId); }
         if (direction) { where.push('direction = ?'); params.push(direction); }
         if (from) { where.push('created_at >= ?'); params.push(new Date(from)); }
         if (to) { where.push('created_at < ?'); params.push(new Date(to)); }

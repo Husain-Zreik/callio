@@ -242,9 +242,9 @@ try {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ customer_name: 'Blocked Caller', external_ref: 'contact-blocked', action: 'reject' }));
     });
-    await new Promise((r) => lookupServer.listen(3998, '127.0.0.1', r));
+    await new Promise((r) => lookupServer.listen(3997, '127.0.0.1', r));
     const [{ event_webhook_url: savedWebhookUrl }] = await q("SELECT event_webhook_url FROM consumers WHERE slug = 'dev'");
-    await q("UPDATE consumers SET lookup_url = 'http://127.0.0.1:3998/lookup', event_webhook_url = NULL WHERE slug = 'dev'");
+    await q("UPDATE consumers SET lookup_url = 'http://127.0.0.1:3997/lookup', event_webhook_url = NULL WHERE slug = 'dev'");
     try {
         const blocked = await meta.callIn('wacid.lookup.1', { from: '96181030849' });
         const blockedRow = await waitFor(async () => {
@@ -261,6 +261,46 @@ try {
         await q('UPDATE consumers SET lookup_url = NULL, event_webhook_url = ? WHERE slug = ?', [savedWebhookUrl, 'dev']);
         lookupServer.close();
     }
+
+    // ── Call list filters ──
+    const byCustomer = await api('GET', '/v1/tenants/demo/calls?customer=96181030841');
+    check('?customer= finds a contact\'s calls, with or without the +', byCustomer.status === 200
+        && byCustomer.body.calls.some((c) => c.callId === inCall.id)
+        && byCustomer.body.calls.every((c) => c.customer.address === '+96181030841'), `n=${byCustomer.body.calls?.length}`);
+    const byChannel = await api('GET', '/v1/tenants/demo/calls?channel_ref=whatsapp-main&queue_ref=main');
+    check('?channel_ref= and ?queue_ref= filter by line and queue', byChannel.status === 200
+        && byChannel.body.calls.some((c) => c.callId === inCall.id), `n=${byChannel.body.calls?.length}`);
+    const badRef = await api('GET', '/v1/tenants/demo/calls?channel_ref=no-such-line');
+    const badStatus = await api('GET', '/v1/tenants/demo/calls?status=CANCELLED');
+    check('an unknown channel_ref or a status calls never have is a 400', badRef.status === 400 && badStatus.status === 400,
+        `${badRef.status}/${badStatus.status}`);
+
+    // ── Deleting a call ──
+    const liveIntent = await api('POST', '/v1/tenants/demo/calls', { channel_ref: 'whatsapp-main', agent_ref: 'agent-2', customer: { address: '+96181030844' } });
+    const delLive = await api('DELETE', `/v1/calls/${liveIntent.body.call.callId}`);
+    check('a call that has not ended cannot be deleted (409 call_active)', delLive.status === 409 && delLive.body.error?.code === 'call_active', `HTTP ${delLive.status}`);
+    await api('POST', `/v1/calls/${liveIntent.body.call.callId}/terminate`);
+    const delOut = await api('DELETE', `/v1/calls/${outId}`);
+    const goneOut = await api('GET', `/v1/calls/${outId}`);
+    const [{ n: outDeliveries }] = await q("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE call_id = ? OR JSON_EXTRACT(payload, '$.data.call.callId') = ?", [outId, outId]);
+    const [{ n: outEvents }] = await q('SELECT COUNT(*) AS n FROM call_lifecycle_events WHERE call_id = ?', [outId]);
+    check('DELETE /v1/calls/{id} removes the call, its detail and the events sent about it',
+        delOut.status === 204 && goneOut.status === 404 && Number(outDeliveries) === 0 && Number(outEvents) === 0,
+        `delete=${delOut.status} get=${goneOut.status} deliveries=${outDeliveries} events=${outEvents}`);
+
+    // ── Erasing a customer ──
+    const erase = await api('POST', '/v1/tenants/demo/customers/erase', { address: '+96181030841' });
+    const erasedRow = await callRow(inCall.id);
+    const [{ n: inEvents }] = await q('SELECT COUNT(*) AS n FROM call_lifecycle_events WHERE call_id = ?', [inCall.id]);
+    const [{ n: inDeliveries }] = await q('SELECT COUNT(*) AS n FROM webhook_deliveries WHERE call_id = ?', [inCall.id]);
+    check('erasing a customer anonymises their calls and removes the detail and events about them',
+        erase.status === 200 && erase.body.callsErased >= 1 && erasedRow && erasedRow.customer_address === null
+        && erasedRow.customer_name === null && Number(inEvents) === 0 && Number(inDeliveries) === 0,
+        `${JSON.stringify(erase.body)} address=${erasedRow?.customer_address} events=${inEvents} deliveries=${inDeliveries}`);
+    const afterErase = await api('GET', '/v1/tenants/demo/calls?customer=%2B96181030841');
+    const keptCall = await api('GET', `/v1/calls/${inCall.id}`);
+    check('the anonymised call stays in the history, without the customer', afterErase.body.calls.length === 0
+        && keptCall.status === 200 && keptCall.body.call.customer.address === null && keptCall.body.call.status === 'TERMINATED');
 
     // ── Isolation ──
     const foreign = await meta.post({ metadata: { phone_number_id: '999999' }, calls: [{ id: 'x', event: 'terminate' }] });

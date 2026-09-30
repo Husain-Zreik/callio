@@ -17,12 +17,34 @@ import { EventTypes } from '../../core/events/EventTypes.js';
 import { toConsumerCallView } from '../../core/calls/CallView.js';
 import { CallStatus, TerminationReason, TerminatedBy } from '../../core/constants/CallConstants.js';
 import { callTerminator } from '../../core/calls/CallTerminator.js';
+import { callErasure, ErasureError } from '../../core/calls/CallErasure.js';
 import { HttpError, badRequest, notFound } from '../errors.js';
 import { requireString, oneOf, optionalObject, optionalInt, optionalTimestamp, ref } from './validate.js';
 import { config } from '../../../config/envConfig.js';
-import { resolveTenant, resolveAgent } from './managementRoutes.js';
+import { resolveTenant, resolveAgent, resolveChannelRef, resolveQueueRef } from './managementRoutes.js';
 
 const ACTIVE = new Set([CallStatus.INITIATED, CallStatus.RINGING, CallStatus.IN_PROGRESS]);
+// The values calls.status can hold (CallStatus also has CANCELLED, which is a
+// termination reason in the database, never a status).
+const STORED_STATUSES = [CallStatus.INITIATED, CallStatus.RINGING, CallStatus.IN_PROGRESS, CallStatus.TERMINATED, CallStatus.FAILED];
+
+async function erasing(run) {
+    try {
+        return await run();
+    } catch (err) {
+        if (err instanceof ErasureError) throw new HttpError(err.code === 'storage_unavailable' ? 503 : 409, err.code, err.message);
+        throw err;
+    }
+}
+
+// ?customer= a phone number as the API stores it (E.164), with or without
+// the "+" or a 00 prefix; anything else (a SIP URI) matches exactly.
+function customerQuery(value) {
+    if (value == null || value === '') return null;
+    const s = String(value).trim().slice(0, 191);
+    const digits = /^(\+|00)?\d{5,15}$/.test(s.replace(/[\s-]/g, '')) ? s.replace(/[^\d]/g, '').replace(/^00/, '') : null;
+    return digits ? `+${digits}` : s;
+}
 
 // A call the calling consumer owns, with its tenant.
 async function ownedCall(request) {
@@ -81,10 +103,13 @@ export default async function callRoutes(fastify) {
         let agentId = null;
         if (q.agent_ref) agentId = (await resolveAgent(tenant, q.agent_ref)).id;
         const calls = await CallRepository.listForTenant(tenant.id, {
-            status: q.status ? oneOf(q, 'status', Object.values(CallStatus)) : null,
+            status: q.status ? oneOf(q, 'status', STORED_STATUSES) : null,
             direction: q.direction ? oneOf(q, 'direction', ['INBOUND', 'OUTBOUND']) : null,
             agentId,
             externalRef: q.external_ref ?? null,
+            customerAddress: customerQuery(q.customer),
+            channelId: q.channel_ref ? (await resolveChannelRef(tenant, q.channel_ref, 'channel_ref')).id : null,
+            queueId: q.queue_ref ? (await resolveQueueRef(tenant, q.queue_ref, 'queue_ref')).id : null,
             from: optionalTimestamp(q, 'from'),
             to: optionalTimestamp(q, 'to'),
             beforeId: optionalInt(q, 'before_id', { min: 1 }),
@@ -168,6 +193,20 @@ export default async function callRoutes(fastify) {
             });
         }
         return reply.code(202).send({ accepted: true });
+    });
+
+    // Deletes an ended call and everything about it, recording included.
+    fastify.delete('/calls/:callId', async (request, reply) => {
+        const { call, tenant } = await ownedCall(request);
+        await erasing(() => callErasure.deleteCall(tenant.id, call.id));
+        return reply.code(204).send();
+    });
+
+    // Erases one customer's personal data from the tenant's ended calls.
+    fastify.post('/tenants/:tenantRef/customers/erase', async (request) => {
+        const tenant = await resolveTenant(request);
+        const address = customerQuery(requireString(request.body ?? {}, 'address', { max: 191 }));
+        return erasing(() => callErasure.eraseCustomer(tenant.id, address));
     });
 
     // A short-lived download URL for the call's recording.

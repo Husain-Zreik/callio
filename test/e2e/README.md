@@ -22,6 +22,11 @@ npm run test:e2e -- routing     # suites whose file name contains "routing"
 
 ## What `run.mjs` does
 
+**One run at a time.** Every run recreates the same database and uses the
+same ports, so `run.mjs` holds a lock (listening on `TEST_LOCK_PORT`, 3899)
+for the whole run. A second run prints that it is waiting and starts when the
+first ends (up to 15 minutes). The OS frees the lock however a run ends.
+
 Before any suite:
 
 1. **Logging rules over `src/`** (outside `src/infra/logging/`): fails on
@@ -54,6 +59,7 @@ After each suite it scans that suite's Callio log for
 | `TEST_DB_HOST` / `PORT` / `USERNAME` / `PASSWORD` / `DATABASE` | `127.0.0.1` / `33306` / `root` / `callio` / `callio_test` | Matches the compose file. |
 | `TEST_REDIS_HOST` / `PORT` / `DB` | `127.0.0.1` / `36379` / `15` | |
 | `TEST_CALLIO_PORT` | `3901` | |
+| `TEST_LOCK_PORT` | `3899` | The one-run-at-a-time lock. |
 | `TEST_DRACHTIO_SECRET` | `CHANGE_ME` | drachtio admin secret of the local SIP gateway. |
 | `TEST_LOG_LEVEL` | `debug` | Callio's `LOG_LEVEL` during the suites. |
 
