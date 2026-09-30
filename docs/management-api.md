@@ -392,6 +392,44 @@ A delete is refused with `409 in_use` while something depends on it.
 flows are deleted with it. An audio file Callio stored itself (an upload) is
 removed from storage; an object you registered by `storage_key` is left alone.
 
+## Reports
+
+| Method | Path | Query | Response |
+|---|---|---|---|
+| `GET` | `/v1/tenants/{t}/reports/calls` | `from`, `to`, `interval` (`hour`\|`day`), `utc_offset_minutes`, `service_level_seconds`, `queue_ref`, `channel_ref` | `{ totals, buckets: [{ start, … }] }` |
+| `GET` | `/v1/tenants/{t}/reports/agents` | `from`, `to` | `{ agents: [{ agentRef, … }] }` |
+| `GET` | `/v1/tenants/{t}/reports/live` | — | `{ at, liveCalls, inIvr, queues: [{ queueRef, … }] }` |
+
+- `from` / `to`: ISO 8601; default the last 24 hours. At most 7 days with
+  `interval=hour` (the default), 93 days with `day`.
+- **Calls** counts the calls created in the window, as totals and per bucket.
+  Buckets start on the hour or day in `utc_offset_minutes` (default `0`, a
+  fixed offset — no daylight saving). Each has:
+
+  | Field | Meaning |
+  |---|---|
+  | `inbound` | Inbound calls |
+  | `answered` | An agent answered (an IVR picking up doesn't count) |
+  | `abandoned` | Ended unanswered because the customer hung up |
+  | `missed` | Ended unanswered for any other reason (timeout, rejected, failure) |
+  | `inProgress` | Not answered and not over yet |
+  | `outbound`, `outboundConnected` | Outbound calls, and those the customer answered |
+  | `serviceLevelPercent` | Answered within `service_level_seconds` (default 20) of entering the queue, out of the calls that entered a queue and are answered or over; `null` without any |
+  | `avgWaitSeconds`, `maxWaitSeconds` | Queue entry → an agent answering, over answered calls |
+  | `talkSeconds`, `avgTalkSeconds` | Customer ⇄ agent time, answered inbound and connected outbound |
+
+  `queue_ref` / `channel_ref` narrow it to one queue or line.
+- **Agents**: per agent, over lifecycle events in the window — `answered`,
+  `transfersReceived`, `declined`, `missed` (rang out), `outbound`,
+  `outboundConnected` — and `talkSeconds` / `avgTalkSeconds` for calls that
+  ended in the window, credited to the agent the call ended with. Also
+  `name`, `role`, current `availability` (`null` for a deleted agent, who is
+  listed only if they have activity).
+- **Live**: right now. Per queue: `waiting` (calls not yet answered, IVR not
+  included), `longestWaitSeconds`, `onCall`, and its members by
+  `agents: { available, onCall, offline }`. `liveCalls` and `inIvr` are for the
+  whole tenant.
+
 ## Calls
 
 | Method | Path | Body / query | Response |

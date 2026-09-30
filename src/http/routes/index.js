@@ -12,6 +12,7 @@ import callRoutes from '../v1/callRoutes.js';
 import eventRoutes from '../v1/eventRoutes.js';
 import pushCredentialRoutes from '../v1/pushCredentialRoutes.js';
 import keyRoutes from '../v1/keyRoutes.js';
+import reportRoutes from '../v1/reportRoutes.js';
 import { apiKeyAuth } from '../auth/apiKeyAuth.js';
 import { idempotencyPreHandler, idempotencyOnSend } from '../v1/idempotency.js';
 import { httpErrorHandler } from '../errors.js';
@@ -36,5 +37,6 @@ export default async function registerRoutes(fastify) {
         await v1.register(eventRoutes);
         await v1.register(pushCredentialRoutes);
         await v1.register(keyRoutes);
+        await v1.register(reportRoutes);
     }, { prefix: '/v1' });
 }

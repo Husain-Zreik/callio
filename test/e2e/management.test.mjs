@@ -2,14 +2,15 @@
 // assets — refused (409 in_use, with what uses it) while something depends on
 // them, including a live call; history kept after. Rotating API keys and
 // agent-token signing keys: issue, switch over, revoke (not the last one);
-// a revoked signing key's sockets are disconnected.
+// a revoked signing key's sockets are disconnected. Reports: calls over time,
+// agents, the queues right now.
 // Run through run.mjs (npm run test:e2e), which passes <seed.json> <callio-port>.
 import { readFileSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import jwt from 'jsonwebtoken';
 import { io } from 'socket.io-client';
-import { testDb, makeChecks, waitFor, fakeMeta, wav, api as makeApi } from './lib.mjs';
+import { testDb, makeChecks, waitFor, sleep, fakeMeta, wav, connectAgent, accept, nextIncoming, api as makeApi } from './lib.mjs';
 
 const seed = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const PORT = Number(process.argv[3] || 3901);
@@ -88,6 +89,56 @@ try {
     check('an unused IVR flow is deleted', fDel.status === 204, `HTTP ${fDel.status}`);
     const kept = await callRow(row1.id);
     check('call history is kept', kept?.status === 'TERMINATED' && kept.channel_address != null);
+
+    // ── Reports ──
+    await api('PUT', `${T}/queues/main`, { name: 'Main queue', strategy: 'ROUND_ROBIN' });
+    await api('PUT', `${T}/queues/main/members`, { members: [{ agent_ref: 'agent-1' }] });
+    const agent = await connectAgent(CALLIO, seed, 'agent-1');
+    const availability = async () => (await q("SELECT availability FROM agents WHERE external_ref = 'agent-1'"))[0]?.availability;
+    agent.socket.emit('agent:availability:set', { availability: 'AVAILABLE' });
+    await waitFor(async () => (await availability()) === 'AVAILABLE', 5000, 'agent-1 available');
+
+    const cA = await meta.callIn('wacid.m.2', { from: '96181030872' });
+    const rowA = await callByProvider(cA.id);
+    await accept(agent, await nextIncoming(agent, rowA.id), 880);
+    await waitFor(async () => (await callRow(rowA.id)).status === 'IN_PROGRESS', 10000, 'call A answered');
+    await sleep(2200);
+    await meta.hangUp(cA.id);
+    await waitFor(async () => (await callRow(rowA.id)).status === 'TERMINATED', 10000, 'call A ended');
+    agent.peer?.close(); agent.peer = null;
+
+    await waitFor(async () => (await availability()) === 'AVAILABLE', 8000, 'agent-1 released');
+    agent.socket.emit('agent:availability:set', { availability: 'OFFLINE' });
+    await waitFor(async () => (await availability()) === 'OFFLINE', 5000, 'agent-1 offline');
+    const cB = await meta.callIn('wacid.m.3', { from: '96181030873' });
+    const rowB = await callByProvider(cB.id);
+    await sleep(1200);
+    const liveNow = await api('GET', `${T}/reports/live`);
+    const mainLive = liveNow.body?.queues?.find((x) => x.queueRef === 'main');
+    check('the live report shows the waiting call and the queue’s agents',
+        liveNow.status === 200 && mainLive?.waiting === 1 && mainLive.longestWaitSeconds >= 1 && mainLive.agents.offline === 1 && liveNow.body.liveCalls >= 1,
+        JSON.stringify(mainLive));
+    await meta.hangUp(cB.id);
+    await waitFor(async () => (await callRow(rowB.id)).status === 'TERMINATED', 10000, 'call B ended');
+
+    const from = new Date(Date.now() - 3600_000).toISOString();
+    const rep = await api('GET', `${T}/reports/calls?from=${from}&interval=hour&service_level_seconds=30`);
+    const t = rep.body?.totals ?? {};
+    // Calls in this suite: m.1 (hung up while waiting), A (answered), B (hung up while waiting).
+    check('the calls report counts answered and abandoned calls, with wait and talk time',
+        rep.status === 200 && t.inbound === 3 && t.answered === 1 && t.abandoned === 2 && t.missed === 0
+        && t.talkSeconds >= 1 && t.avgWaitSeconds != null && t.serviceLevelPercent != null,
+        JSON.stringify(t));
+    const sum = (rep.body?.buckets ?? []).reduce((n, b) => n + b.inbound, 0);
+    check('hourly buckets add up to the totals', sum === t.inbound && rep.body.buckets.length >= 1, `buckets=${rep.body?.buckets?.length} sum=${sum}`);
+    const byQueue = await api('GET', `${T}/reports/calls?from=${from}&queue_ref=nope`);
+    const badRange = await api('GET', `${T}/reports/calls?from=2026-01-01T00:00:00Z&to=2025-01-01T00:00:00Z`);
+    check('report filters and ranges are validated', byQueue.status === 400 && badRange.status === 400, `${byQueue.status}/${badRange.status}`);
+    const agents = await api('GET', `${T}/reports/agents?from=${from}`);
+    const a1 = agents.body?.agents?.find((a) => a.agentRef === 'agent-1');
+    check('the agents report credits the answering agent', agents.status === 200 && a1?.answered === 1 && a1.talkSeconds >= 1 && a1.avgTalkSeconds >= 1,
+        JSON.stringify(a1));
+    agent.socket.close();
 
     // ── API key rotation ──
     const listed = await api('GET', '/v1/api-keys');
