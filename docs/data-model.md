@@ -38,6 +38,7 @@ consumer's migration system touch this database.
 | `20260925000016_create_webhook_deliveries_table.js` | `webhook_deliveries` |
 | `20260928000001_add_queue_timing_to_calls.js` | `calls.queued_at`, `offered_at`, `overflow_count` + two timeout-scan indexes |
 | `20260930000001_add_event_dedupe_and_idempotency_keys.js` | `webhook_deliveries.dedupe_key` + `(consumer_id, id)` index; `api_idempotency_keys` |
+| `20260930000002_add_consumer_to_calls_terminated_by.js` | `calls.terminated_by` gains `CONSUMER` |
 | `20260930120000_add_history_indexes_and_lifecycle_tenant.js` | `calls` `(tenant_id, created_at)` and `(tenant_id, ended_at)`; `call_lifecycle_events.tenant_id` (backfilled) + `(tenant_id, occurred_at)`; `agent_push_tokens` unique `(provider, token)`, `is_active` dropped |
 
 ## Overview
@@ -231,7 +232,7 @@ whose `trigger_condition` holds wins.
 | `status` | `INITIATED` / `RINGING` / `IN_PROGRESS` / `TERMINATED` / `FAILED`. |
 | `state` | Where the call is within its status: `IVR` / `QUEUE` / `ACTIVE` / `ON_HOLD`, NULL before routing. `ON_HOLD` is not set by the code. |
 | `termination_reason` | `COMPLETED`, `CANCELLED`, `REJECTED`, `BUSY`, `NO_ANSWER`, `TIMEOUT`, `AGENT_DISCONNECTED`, `AGENT_MEDIA_NOT_READY`, `SYSTEM_ERROR`, `NETWORK_ERROR`, `PROVIDER_ERROR`, `PROVIDER_TRIGGER_FAILED`, `SERVICE_MAINTENANCE`, `CUSTOMER_NETWORK_LOSS`, `IVR_AGENT_NO_ANSWER`. |
-| `terminated_by` | `AGENT` / `CUSTOMER` / `PROVIDER` / `SYSTEM`. |
+| `terminated_by` | `AGENT` (agent or supervisor) / `CONSUMER` (Management API terminate) / `CUSTOMER` / `PROVIDER` / `SYSTEM`. |
 | `ringing_at`, `answered_at`, `ended_at` | |
 | `queued_at` | When the call entered its current queue (arrival, IVR transfer, overflow); `max_wait_seconds` counts from here. |
 | `offered_at` | When the current offer to `agent_id` started; NULL while nobody is offered it and once the agent starts answering. `ring_timeout_seconds` counts from here. On an `IN_PROGRESS` call it marks a transfer waiting for its target. |

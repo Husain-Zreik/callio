@@ -18,7 +18,7 @@ import { toConsumerCallView } from '../../core/calls/CallView.js';
 import { CallStatus, TerminationReason, TerminatedBy } from '../../core/constants/CallConstants.js';
 import { callTerminator } from '../../core/calls/CallTerminator.js';
 import { HttpError, badRequest, notFound } from '../errors.js';
-import { requireString, oneOf, optionalObject, optionalInt, ref } from './validate.js';
+import { requireString, oneOf, optionalObject, optionalInt, optionalTimestamp, ref } from './validate.js';
 import { config } from '../../../config/envConfig.js';
 import { resolveTenant, resolveAgent } from './managementRoutes.js';
 
@@ -85,8 +85,8 @@ export default async function callRoutes(fastify) {
             direction: q.direction ? oneOf(q, 'direction', ['INBOUND', 'OUTBOUND']) : null,
             agentId,
             externalRef: q.external_ref ?? null,
-            from: q.from ?? null,
-            to: q.to ?? null,
+            from: optionalTimestamp(q, 'from'),
+            to: optionalTimestamp(q, 'to'),
             beforeId: optionalInt(q, 'before_id', { min: 1 }),
             limit: optionalInt(q, 'limit', { min: 1, max: 200 }) ?? 50,
         });
@@ -114,8 +114,17 @@ export default async function callRoutes(fastify) {
                 type: e.event_type, agentId: e.agent_id, occurredAt: e.occurred_at,
                 durationSeconds: e.duration_seconds, metadata: typeof e.metadata === 'string' ? JSON.parse(e.metadata) : e.metadata,
             })),
-            transfers,
-            ivrSessions,
+            transfers: transfers.map((t) => ({
+                id: t.id, fromAgentId: t.from_agent_id, toAgentId: t.to_agent_id, toQueueId: t.to_queue_id,
+                initiatedByAgentId: t.initiated_by_agent_id, initiatedByType: t.initiated_by_type,
+                transferredAt: t.transferred_at, acceptedAt: t.accepted_at,
+                acceptanceDurationSeconds: t.acceptance_duration_seconds,
+            })),
+            ivrSessions: ivrSessions.map((s) => ({
+                id: s.id, ivrFlowId: s.ivr_flow_id, completed: Boolean(s.completed), outcome: s.outcome,
+                durationSeconds: s.duration, startedAt: s.started_at, endedAt: s.ended_at,
+                inputs: s.inputs.map((i) => ({ nodeName: i.node_name, input: i.input, pressedAt: i.pressed_at })),
+            })),
             recording: recording ? {
                 id: recording.id, status: recording.status, durationSeconds: recording.duration_seconds,
                 format: recording.format, channelMap: recording.channel_map, completedAt: recording.completed_at,
@@ -144,6 +153,7 @@ export default async function callRoutes(fastify) {
             userId: null,
             tenantId: call.tenant_id,
             reason: call.status === CallStatus.IN_PROGRESS ? 'api_terminated' : 'cancelled',
+            requestedBy: TerminatedBy.CONSUMER,
         });
         // An outbound intent the agent hasn't started has no media and no
         // worker listening yet: end it here, as its expiry would. Guarded on
@@ -151,7 +161,7 @@ export default async function callRoutes(fastify) {
         if (!subscribers && call.status === CallStatus.INITIATED) {
             await callTerminator.end(call.id, {
                 reason: TerminationReason.CANCELLED,
-                terminatedBy: TerminatedBy.AGENT,
+                terminatedBy: TerminatedBy.CONSUMER,
                 onlyIfStatus: CallStatus.INITIATED,
                 provider: 'none',
                 source: 'api_cancelled_intent',

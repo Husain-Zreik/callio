@@ -4,6 +4,8 @@
 // isolation.
 // Run through run.mjs (npm run test:e2e), which passes <seed.json> <callio-port>.
 import { readFileSync } from 'fs';
+import http from 'http';
+import { createHmac } from 'crypto';
 import { io } from 'socket.io-client';
 import {
     testDb, sleep, makeChecks, waitFor, newPeer, hear, gathered, fakeMeta, eventReceiver,
@@ -90,7 +92,7 @@ try {
     check('after the switch the customer hears the new device', custHearsPhone.dominant() === 660, `tone=${custHearsPhone.dominant()}`);
     a1.peer.close(); a1.peer = a1b.peer;
 
-    a1b.socket.emit('call:terminate', { callId: inCall.id });
+    a1b.socket.emit('call:terminate', { callId: inCall.id, reason: 'customer_network_loss' }); // not a reason a client may pick
     await waitFor(async () => (await callRow(inCall.id)).status === 'TERMINATED', 10000, 'inbound ended');
     await sleep(1500);
     const ended = await callRow(inCall.id);
@@ -128,7 +130,8 @@ try {
 
     const term = await api('POST', `/v1/calls/${outId}/terminate`);
     check('Management API accepts a terminate request', term.status === 202, `HTTP ${term.status}`);
-    await waitFor(async () => (await callRow(outId)).status === 'TERMINATED', 10000, 'outbound ended');
+    const outEnded = await waitFor(async () => { const r = await callRow(outId); return r.status === 'TERMINATED' ? r : null; }, 10000, 'outbound ended');
+    check('an API hang-up is recorded as the consumer hang-up (terminated_by CONSUMER)', outEnded.terminated_by === 'CONSUMER', outEnded.terminated_by);
     await waitFor(async () => (await availability('agent-2')) === 'OFFLINE', 5000, 'agent-2 offline');
     check('outbound call ended; agent goes OFFLINE after an outbound call', true);
     a2.peer.close(); a2.peer = null;
@@ -192,7 +195,8 @@ try {
     const cancelIntent = await api('POST', `/v1/calls/${firstTry.body.call.callId}/terminate`);
     const cancelled = await waitFor(async () => { const r = await callRow(firstTry.body.call.callId); return r.status === 'TERMINATED' ? r : null; }, 5000, 'intent cancelled');
     check('terminating an outbound intent the agent never started ends it CANCELLED at once',
-        cancelIntent.status === 202 && cancelled.termination_reason === 'CANCELLED', `${cancelled.termination_reason}`);
+        cancelIntent.status === 202 && cancelled.termination_reason === 'CANCELLED' && cancelled.terminated_by === 'CONSUMER',
+        `${cancelled.termination_reason}/${cancelled.terminated_by}`);
 
     // ── Reading events back ──
     const listed = await api('GET', `/v1/events?call_id=${outId}`);
@@ -218,6 +222,45 @@ try {
     check('events need the consumer\'s key', foreignEvent.status === 401);
     const [{ n: endedRows }] = await q("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE call_id = ? AND event_type = 'call.ended'", [outId]);
     check('a once-per-call event has exactly one outbox row', Number(endedRows) === 1, `rows=${endedRows}`);
+
+    // ── Bad input is a 400, not a 500 ──
+    const badDate = await api('GET', '/v1/tenants/demo/calls?from=yesterday');
+    check('an unparseable date on the call list is a 400', badDate.status === 400 && /from/.test(badDate.body.error?.message), `HTTP ${badDate.status}`);
+    const assetBody = { name: 'Dup', storage_provider: 'LOCAL', storage_key: 'dup.wav', ref: 'dup-ref' };
+    const firstAsset = await api('POST', '/v1/tenants/demo/audio-assets', assetBody);
+    const dupAsset = await api('POST', '/v1/tenants/demo/audio-assets', assetBody);
+    check('a second audio asset with the same ref is a 400', firstAsset.status === 201 && dupAsset.status === 400,
+        `${firstAsset.status}/${dupAsset.status}`);
+
+    // ── Lookup hook: signed even without an event URL; reject ends the call unrung ──
+    const lookups = [];
+    const lookupServer = http.createServer(async (req, res) => {
+        let raw = '';
+        for await (const chunk of req) raw += chunk;
+        const [, t, v1] = /t=(\d+),v1=([a-f0-9]+)/.exec(String(req.headers['x-callio-signature'] || '')) || [];
+        lookups.push({ body: JSON.parse(raw), signed: Boolean(v1) && v1 === createHmac('sha256', seed.webhook_secret).update(`${t}.${raw}`).digest('hex') });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ customer_name: 'Blocked Caller', external_ref: 'contact-blocked', action: 'reject' }));
+    });
+    await new Promise((r) => lookupServer.listen(3998, '127.0.0.1', r));
+    const [{ event_webhook_url: savedWebhookUrl }] = await q("SELECT event_webhook_url FROM consumers WHERE slug = 'dev'");
+    await q("UPDATE consumers SET lookup_url = 'http://127.0.0.1:3998/lookup', event_webhook_url = NULL WHERE slug = 'dev'");
+    try {
+        const blocked = await meta.callIn('wacid.lookup.1', { from: '96181030849' });
+        const blockedRow = await waitFor(async () => {
+            const [r] = await q("SELECT * FROM calls WHERE provider_call_id = 'wacid.lookup.1'");
+            return r?.status === 'TERMINATED' ? r : null;
+        }, 10000, 'looked-up call rejected');
+        check('the lookup hook is called and signed, even with no event URL', lookups.length === 1 && lookups[0].signed
+            && lookups[0].body.customer?.address === '+96181030849', JSON.stringify(lookups[0] ?? null));
+        check('a lookup reject ends the call REJECTED / SYSTEM, with the lookup’s name and ref', blockedRow.termination_reason === 'REJECTED'
+            && blockedRow.terminated_by === 'SYSTEM' && blockedRow.customer_name === 'Blocked Caller' && blockedRow.external_ref === 'contact-blocked',
+            `${blockedRow.termination_reason}/${blockedRow.terminated_by} ${blockedRow.customer_name}`);
+        void blocked;
+    } finally {
+        await q('UPDATE consumers SET lookup_url = NULL, event_webhook_url = ? WHERE slug = ?', [savedWebhookUrl, 'dev']);
+        lookupServer.close();
+    }
 
     // ── Isolation ──
     const foreign = await meta.post({ metadata: { phone_number_id: '999999' }, calls: [{ id: 'x', event: 'terminate' }] });

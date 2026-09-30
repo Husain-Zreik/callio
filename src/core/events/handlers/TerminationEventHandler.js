@@ -13,7 +13,7 @@ const log = logger('core.events.TerminationEventHandler');
 export class TerminationEventHandler {
 
     async handleCallTerminated(data, _attempt = 0) {
-        const { callId, userId, reason } = data;
+        const { callId, userId, reason, requestedBy } = data;
         const isSystemFailed = reason === 'system_failed';
         const isCustomerNetworkLoss = reason === 'customer_network_loss';
 
@@ -58,10 +58,12 @@ export class TerminationEventHandler {
                     : (!call.answered_at && (call.status === CallStatus.RINGING || call.status === CallStatus.INITIATED))
                         ? TerminationReason.NO_ANSWER
                         : TerminationReason.COMPLETED,
-                terminatedBy: TerminatedBy.AGENT,
+                // requestedBy is set by the Management API route; a socket's
+                // hang-up is an agent's or a supervisor's.
+                terminatedBy: requestedBy === TerminatedBy.CONSUMER ? TerminatedBy.CONSUMER : TerminatedBy.AGENT,
                 provider: 'end',
                 media: 'local',
-                source: 'agent_or_api',
+                source: requestedBy === TerminatedBy.CONSUMER ? 'api' : 'agent',
             });
         } catch (error) {
             const isDeadlock = error.code === 'ER_LOCK_DEADLOCK' || error.errno === 1213;

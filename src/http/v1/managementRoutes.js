@@ -305,9 +305,11 @@ export default async function managementRoutes(fastify) {
         const tenant = await resolveTenant(request);
         const body = request.body ?? {};
         const name = requireString(body, 'name');
+        const assetRef = body.ref != null ? ref(body.ref, 'audio asset') : null;
         let storageKey = requireString(body, 'storage_key', { max: 512, optional: true });
         let storageProvider = oneOf(body, 'storage_provider', ['S3', 'LOCAL'], { optional: true, fallback: 'S3' }).toLowerCase();
         let size = null;
+        let uploaded = false;
 
         if (body.content_base64) {
             if (!storageClient.isInitialized) throw badRequest('Object storage is not configured — register an existing storage_key instead');
@@ -318,18 +320,27 @@ export default async function managementRoutes(fastify) {
             await storageClient.uploadFile(storageKey, buffer, mime);
             storageProvider = 's3';
             size = buffer.length;
+            uploaded = true;
         }
         if (!storageKey) throw badRequest('storage_key or content_base64 is required');
 
-        const asset = await IvrRepository.createAudioAsset(tenant.id, {
-            external_ref: body.ref != null ? ref(body.ref, 'audio asset') : null,
-            name,
-            storage_provider: storageProvider,
-            storage_key: storageKey,
-            mime_type: requireString(body, 'mime_type', { max: 100, optional: true }),
-            duration_seconds: optionalInt(body, 'duration_seconds', { min: 0, max: 86400 }),
-            file_size_bytes: size,
-        });
+        let asset;
+        try {
+            asset = await IvrRepository.createAudioAsset(tenant.id, {
+                external_ref: assetRef,
+                name,
+                storage_provider: storageProvider,
+                storage_key: storageKey,
+                mime_type: requireString(body, 'mime_type', { max: 100, optional: true }),
+                duration_seconds: optionalInt(body, 'duration_seconds', { min: 0, max: 86400 }),
+                file_size_bytes: size,
+            });
+        } catch (err) {
+            if (err.code !== 'ER_DUP_ENTRY') throw err;
+            // Don't leave the file we just stored behind.
+            if (uploaded) await storageClient.deleteFile(storageKey).catch(() => {});
+            throw badRequest('Another audio asset already uses this ref');
+        }
         return reply.code(201).send({ audioAsset: audioView(asset) });
     });
 

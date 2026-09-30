@@ -31,13 +31,14 @@ class CustomerLookup {
                 channel_address: channelAddress,
                 customer: { address: customerAddress, address_type: customerAddressType, name: customerName ?? null },
             });
-            const webhook = await ConsumerRepository.getWebhookConfig(consumer.id);
+            const secret = await ConsumerRepository.getWebhookSecret(consumer.id);
             const headers = { 'Content-Type': 'application/json' };
-            if (webhook?.secret) headers['X-Callio-Signature'] = signPayload(webhook.secret, body);
+            if (secret) headers['X-Callio-Signature'] = signPayload(secret, body);
 
             const response = await axios.post(consumer.lookup_url, body, {
                 headers,
                 timeout: LOOKUP_TIMEOUT_MS,
+                maxRedirects: 0,           // like event delivery: a redirect is a failed lookup
                 validateStatus: (status) => status >= 200 && status < 300,
             });
             const data = response.data ?? {};

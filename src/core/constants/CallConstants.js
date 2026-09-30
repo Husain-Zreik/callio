@@ -98,6 +98,7 @@ export const TerminatedBy = Object.freeze({
     SYSTEM: 'SYSTEM',     // our infrastructure caused the failure (agent disconnect, cleanup, IVR error)
     CUSTOMER: 'CUSTOMER', // the customer caused it (hang-up, rejected, no answer)
     PROVIDER: 'PROVIDER', // the channel provider (Meta, SIP carrier) reported a failure
+    CONSUMER: 'CONSUMER', // the consumer's backend ended it (Management API terminate)
 });
 
 export const InitiatorType = Object.freeze({

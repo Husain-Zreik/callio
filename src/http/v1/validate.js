@@ -45,3 +45,12 @@ export function ref(value, what) {
     if (!s || s.length > 191) throw badRequest(`${what} reference must be 1-191 characters`);
     return s;
 }
+
+// An optional ISO 8601 date-time (query or body); null when absent.
+export function optionalTimestamp(obj, field) {
+    const value = obj?.[field];
+    if (value == null || value === '') return null;
+    const date = new Date(String(value));
+    if (Number.isNaN(date.getTime())) throw badRequest(`${field} must be an ISO 8601 date-time`);
+    return date;
+}

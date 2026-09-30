@@ -70,6 +70,14 @@ class ConsumerRepository {
         };
     }
 
+    // The secret that signs everything Callio sends the consumer (events and
+    // the lookup hook), whether or not an event URL is set.
+    async getWebhookSecret(consumerId) {
+        const [rows] = await connection.execute('SELECT event_webhook_secret FROM consumers WHERE id = ? LIMIT 1', [consumerId]);
+        const encrypted = rows[0]?.event_webhook_secret;
+        return encrypted ? decryptSecret(encrypted) : null;
+    }
+
     async getPushCredentials(consumerId) {
         const [rows] = await connection.execute('SELECT push_credentials FROM consumers WHERE id = ?', [consumerId]);
         return rows[0]?.push_credentials ? decryptJson(rows[0].push_credentials) : null;

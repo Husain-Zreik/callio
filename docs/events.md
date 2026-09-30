@@ -134,7 +134,8 @@ Management API returns), plus the extra fields below.
   A live call transferred to an agent who doesn't accept it in time goes back
   to its queue (inbound) — it keeps ringing agents — or ends as
   `TIMEOUT` / `SYSTEM` (outbound calls, calls without a queue).
-- `terminatedBy`: `AGENT`, `CUSTOMER`, `PROVIDER`, `SYSTEM`.
+- `terminatedBy`: `AGENT` (an agent or supervisor), `CONSUMER` (your backend,
+  `POST /v1/calls/{id}/terminate`), `CUSTOMER`, `PROVIDER`, `SYSTEM`.
 - `durations` (seconds): `ringing`; `call`, the customer talking to an agent;
   `queue`, from entering the queue to an agent answering (or to the end when
   nobody did), `0` for a call that never waited in a queue.
@@ -162,8 +163,9 @@ X-Callio-Signature: t=…,v1=…
 }
 ```
 
-The signature is computed as for events, with the webhook secret; it is sent
-only when the consumer has both a webhook secret and an `event_webhook_url`. Reply `2xx` within 1.5 seconds with any of:
+The signature is computed as for events, with the same webhook secret (a
+consumer with a `lookup_url` gets one even without an `event_webhook_url`).
+Redirects are not followed. Reply `2xx` within 1.5 seconds with any of:
 
 ```json
 {

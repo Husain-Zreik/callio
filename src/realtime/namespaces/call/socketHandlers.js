@@ -213,7 +213,9 @@ export default function registerCallSocketListeners(socket) {
                 userId: socket.user?.id,
                 tenantId: socket.tenant?.id,
                 socketId: socket.id,
-                reason: defaultReason ?? data?.reason ?? null,
+                // The only reason a client may give: it gave up reconnecting its
+                // media. Anything else would let a client pick the call's outcome.
+                reason: defaultReason ?? (data?.reason === 'system_failed' ? 'system_failed' : null),
             });
             roomManager.leaveCallRoom(socket, callId);
         } catch (error) {

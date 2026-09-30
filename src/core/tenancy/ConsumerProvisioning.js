@@ -13,7 +13,8 @@ const token = (bytes) => randomBytes(bytes).toString('base64url');
 export async function createConsumer({ name, slug, eventWebhookUrl = null, lookupUrl = null, pushCredentials = null }) {
     if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(slug)) throw new Error('slug must be 2-63 lowercase letters, digits or dashes');
 
-    const webhookSecret = eventWebhookUrl ? token(32) : null;
+    // Signs events and lookup requests, so either URL needs it.
+    const webhookSecret = (eventWebhookUrl || lookupUrl) ? token(32) : null;
     const [result] = await connection.execute(
         `INSERT INTO consumers (name, slug, status, event_webhook_url, event_webhook_secret, lookup_url, push_credentials, created_at, updated_at)
          VALUES (?, ?, 'ACTIVE', ?, ?, ?, ?, NOW(), NOW())`,

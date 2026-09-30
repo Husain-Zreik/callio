@@ -534,7 +534,7 @@ class IvrCoordinator {
             await this.stopSession(callId, outcomeMap[action] ?? 'hung_up', timing);
             // serverListeners' 'call:ivr_terminated' handler runs the full teardown
             // (customerChannels.terminate + terminateCallIfNotTerminated + closePeerConnection).
-            EventBus.emit('call:ivr_terminated', { callId, action });
+            EventBus.emit('call:ivr_terminated', { callId, action, tenantId: callMeta.tenantId ?? null });
         }
     }
 }

@@ -206,7 +206,7 @@ class IvrTransferHandler {
             EventBus.emit('call:ivr_replay', { callId });
         } else {
             await stopSession('hung_up');
-            EventBus.emit('call:ivr_terminated', { callId, action: 'hangup' });
+            EventBus.emit('call:ivr_terminated', { callId, action: 'hangup', tenantId });
         }
     }
 

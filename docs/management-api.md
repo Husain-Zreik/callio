@@ -368,8 +368,8 @@ triggerPriority, timeoutSeconds, agentRingTimeout, status, structure }`.
   (`400` if none is configured).
 - Register an existing object: `{ name, storage_key, storage_provider?: S3|LOCAL, mime_type? }`
   (`storage_key` ≤512 chars; `storage_provider` defaults to `S3`).
-- Both take optional `ref` (your reference, unique per tenant) and
-  `duration_seconds` (0–86400).
+- Both take optional `ref` (your reference, unique per tenant — `400` if
+  another asset has it) and `duration_seconds` (0–86400).
 
 `audioAsset`: `{ id, ref, name, storageProvider, storageKey, mimeType,
 durationSeconds, platformDefault }`; `storageProvider` is lowercase (`s3`,
@@ -450,28 +450,25 @@ removed from storage; an object you registered by `storage_key` is left alone.
 
 - **List:** `status` is one of `INITIATED`, `RINGING`, `IN_PROGRESS`,
   `TERMINATED`, `FAILED`; `direction` `INBOUND` or `OUTBOUND`; `from`
-  (inclusive) and `to` (exclusive) are timestamps compared with the call's
-  creation time; `limit` 1–200, default 50. Pages are newest first; pass
+  (inclusive) and `to` (exclusive) are ISO 8601 timestamps compared with the
+  call's creation time (`400` if one doesn't parse); `limit` 1–200, default 50. Pages are newest first; pass
   `nextBeforeId` as `before_id` for the next page. `nextBeforeId` is `null`
   only when the page is empty.
 - **Detail:** `legs` — `[{ type: AGENT|CUSTOMER|MONITOR, agentId, deviceId,
   state, connectedAt, disconnectedAt }]`; `events` — the lifecycle log,
   `[{ type, agentId, occurredAt, durationSeconds, metadata }]`; `recording` —
   `{ id, status, durationSeconds, format, channelMap, completedAt }` or
-  `null`. `transfers` and `ivrSessions` are returned as stored, with
-  snake_case fields:
-  - `transfers`: `[{ id, from_agent_id, to_agent_id, to_queue_id,
-    initiated_by_agent_id, initiated_by_type, transferred_at, accepted_at,
-    acceptance_duration_seconds }]`
-  - `ivrSessions`: `[{ id, ivr_flow_id, completed, outcome, duration,
-    started_at, ended_at, inputs: [{ ivr_session_id, node_name, input,
-    pressed_at }] }]`
+  `null`; `transfers` — `[{ id, fromAgentId, toAgentId, toQueueId,
+  initiatedByAgentId, initiatedByType, transferredAt, acceptedAt,
+  acceptanceDurationSeconds }]`; `ivrSessions` — `[{ id, ivrFlowId,
+  completed, outcome, durationSeconds, startedAt, endedAt, inputs: [{
+  nodeName, input, pressedAt }] }]`.
 - **PATCH:** `external_ref` ≤191 chars; `consumer_metadata` an object. An
   omitted field is left unchanged.
 - **Terminate:** `409 call_ended` if the call already ended. The result
   arrives as `call.ended`: `COMPLETED` if it was `IN_PROGRESS`, `CANCELLED`
-  otherwise, with `terminatedBy: AGENT`. An outbound intent the agent hasn't
-  started yet ends straight away.
+  otherwise, with `terminatedBy: CONSUMER` (your backend ended it). An
+  outbound intent the agent hasn't started yet ends straight away.
 - **Recording:** a short-lived download URL. `404` until the recording has
   completed; `503 storage_unavailable` without object storage.
 
