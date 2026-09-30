@@ -49,7 +49,10 @@
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
+    "@callio/agent-sdk": "file:sdk/agent-js",
     "nodemon": "^3.1.10",
+    "react": "^18.3.1",
+    "react-test-renderer": "^18.3.1",
     "socket.io-client": "^4.8.1"
   },
   "overrides": {

@@ -1,0 +1,23 @@
+{
+  "name": "@callio/agent-react",
+  "version": "0.1.0",
+  "description": "React bindings for @callio/agent-sdk: a provider and hooks for agent and supervisor screens.",
+  "type": "module",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "peerDependencies": {
+    "@callio/agent-sdk": "^0.2.0",
+    "react": ">=18"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
