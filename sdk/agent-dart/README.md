@@ -76,6 +76,56 @@ monitor.stop();
 `monitor.agentStream` / `monitor.customerStream`, `monitor.mode`,
 `monitor.state`, `monitor.ended`. A reconnect ends monitoring.
 
+## The native call screen (`package:callio_agent/native_calls.dart`)
+
+The phone's own call UI: full-screen incoming call and ConnectionService on
+Android, CallKit on iOS (via `flutter_callkit_incoming`). Import it only if you
+want it; `callio_agent.dart` doesn't use it.
+
+```dart
+import 'package:callio_agent/native_calls.dart';
+
+// In the app, once the agent is connected:
+final native = CallioNativeCalls(
+  agent,
+  style: const NativeCallStyle(appName: 'Acme Support'),
+  ringPolicy: NativeRingPolicy.whenInBackground,   // or .always
+  appInForeground: () => WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
+);
+await native.attach();
+```
+
+- A ringing call shows the native screen (keyed by Callio's `callUuid`); when
+  the call ends anywhere (answered elsewhere, withdrawn, hung up) the screen goes.
+- Accept / Decline / End on the native screen act on the call: accept answers
+  it, decline rejects it, end hangs up. Once answered the native call is marked
+  connected.
+- A tap that comes before the SDK knows the call (the app woke up from a push
+  and is still connecting, or was launched by the Accept tap) is kept for
+  `pendingFor` (45 s) and applied when the call arrives.
+
+In the push handler (Android: FCM data messages, including the background
+isolate):
+
+```dart
+@pragma('vm:entry-point')
+Future<void> onBackgroundMessage(RemoteMessage message) async {
+  await CallioBackground.handlePush(message.data);   // null → not a Callio call push
+}
+```
+
+`handlePush` shows the screen for `call.incoming` and dismisses it for
+`call.cancelled`. When the user declines while the app isn't running,
+`CallioBackground.declineCall(url:, deviceId:, getToken:, callId:)` connects,
+sends the reject and disconnects, so the call moves on to the next agent right
+away instead of waiting for the ring timeout.
+
+Android setup: `USE_FULL_SCREEN_INTENT`, `POST_NOTIFICATIONS` (asked at runtime
+on Android 13+), `RECORD_AUDIO`, `FOREGROUND_SERVICE` /
+`FOREGROUND_SERVICE_PHONE_CALL` / `FOREGROUND_SERVICE_MICROPHONE` in the
+manifest; see the `flutter_callkit_incoming` docs. iOS (PushKit VoIP pushes and
+CallKit) comes next.
+
 ## What it handles
 
 - Resync on every connect: ringing calls ring, calls on this device reconnect
@@ -90,4 +140,5 @@ monitor.stop();
 ## Testing
 
 `flutter test` drives the SDK through the protocol with a scripted gateway and
-fake WebRTC (`test/fakes.dart`).
+fake WebRTC (`test/fakes.dart`), and the native layer with a fake call screen
+(`test/native_test.dart`).
