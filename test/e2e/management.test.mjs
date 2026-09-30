@@ -1,10 +1,14 @@
 // Management API housekeeping: deleting queues, channels, IVR flows and audio
 // assets — refused (409 in_use, with what uses it) while something depends on
-// them, including a live call; history kept after.
+// them, including a live call; history kept after. Rotating API keys and
+// agent-token signing keys: issue, switch over, revoke (not the last one);
+// a revoked signing key's sockets are disconnected.
 // Run through run.mjs (npm run test:e2e), which passes <seed.json> <callio-port>.
 import { readFileSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import jwt from 'jsonwebtoken';
+import { io } from 'socket.io-client';
 import { testDb, makeChecks, waitFor, fakeMeta, wav, api as makeApi } from './lib.mjs';
 
 const seed = JSON.parse(readFileSync(process.argv[2], 'utf8'));
@@ -84,6 +88,52 @@ try {
     check('an unused IVR flow is deleted', fDel.status === 204, `HTTP ${fDel.status}`);
     const kept = await callRow(row1.id);
     check('call history is kept', kept?.status === 'TERMINATED' && kept.channel_address != null);
+
+    // ── API key rotation ──
+    const listed = await api('GET', '/v1/api-keys');
+    const seedKey = listed.body.apiKeys.find((k) => k.revokedAt == null);
+    check('API keys are listed without secrets', listed.status === 200 && seedKey && !JSON.stringify(listed.body).includes(seed.api_key)
+        && seedKey.prefix === seed.api_key.slice(0, 16), JSON.stringify(listed.body.apiKeys[0]));
+    const idem = { 'Idempotency-Key': 'rotate-1' };
+    const k1 = await api('POST', '/v1/api-keys', { name: 'rotated', expires_in_days: 30 }, idem);
+    const k2 = await api('POST', '/v1/api-keys', { name: 'rotated', expires_in_days: 30 }, idem);
+    check('a new API key is shown once, and a retried POST is never replayed (the secret is not stored)',
+        k1.status === 201 && /^ck_dev_/.test(k1.body.apiKey.key) && k1.body.apiKey.expiresAt
+        && k2.status === 201 && k2.body.apiKey.key !== k1.body.apiKey.key && !k2.headers.get('idempotent-replayed'),
+        `${k1.status}/${k2.status}`);
+    const withNew = makeApi(CALLIO, k1.body.apiKey.key);
+    const revokeSeed = await withNew('DELETE', `/v1/api-keys/${seedKey.id}`);
+    const seedAfter = await api('GET', '/v1/api-keys');
+    check('the old key is revoked with the new one, and stops working', revokeSeed.status === 204 && seedAfter.status === 401,
+        `${revokeSeed.status}/${seedAfter.status}`);
+    await withNew('DELETE', `/v1/api-keys/${k2.body.apiKey.id}`);
+    const last = await withNew('DELETE', `/v1/api-keys/${k1.body.apiKey.id}`);
+    check('the last active API key cannot be revoked', last.status === 409 && last.body.error.code === 'last_key', `${last.status}`);
+    await q('UPDATE consumer_api_keys SET revoked_at = NULL WHERE id = ?', [seedKey.id]);   // later suites use it
+
+    // ── Signing key rotation ──
+    const sk = await api('POST', '/v1/signing-keys', {});
+    check('a new signing key gets the next kid and its secret once', sk.status === 201 && sk.body.signingKey.kid === 'k2' && sk.body.signingKey.secret,
+        JSON.stringify(sk.body));
+    const dup = await api('POST', '/v1/signing-keys', { kid: 'k2' });
+    check('a kid is never reused', dup.status === 409 && dup.body.error.code === 'kid_taken', `${dup.status}`);
+    const tokenK2 = jwt.sign({ iss: 'dev', sub: 'agent-1', tnt: 'demo', name: 'agent-1' }, sk.body.signingKey.secret,
+        { algorithm: 'HS256', keyid: 'k2', expiresIn: '10m' });
+    const connectWith = (token) => new Promise((resolve) => {
+        const s = io(CALLIO, { transports: ['websocket'], auth: { token, device_id: 'k2-device', protocol: 1 }, reconnection: false });
+        s.on('connect', () => resolve({ s, ok: true }));
+        s.on('connect_error', (e) => { s.close(); resolve({ ok: false, error: e.message }); });
+    });
+    const onK2 = await connectWith(tokenK2);
+    check('an agent connects with a token signed by the new key', onK2.ok, onK2.error);
+    const dropped = new Promise((resolve) => onK2.s?.on('disconnect', resolve));
+    const revokeK2 = await api('DELETE', '/v1/signing-keys/k2');
+    const reason = await Promise.race([dropped, new Promise((r) => setTimeout(() => r('still connected'), 5000))]);
+    check('revoking a signing key disconnects the sockets it signed', revokeK2.status === 204 && reason === 'io server disconnect', `${revokeK2.status} ${reason}`);
+    const again2 = await connectWith(tokenK2);
+    check('and its tokens are refused from then on', !again2.ok && /signing key/i.test(again2.error ?? ''), again2.error);
+    const lastSk = await api('DELETE', '/v1/signing-keys/k1');
+    check('the last signing key cannot be revoked', lastSk.status === 409 && lastSk.body.error.code === 'last_key', `${lastSk.status}`);
 } catch (err) {
     console.error('HARNESS ERROR:', err);
     exitCode = 1;

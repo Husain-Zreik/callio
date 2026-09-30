@@ -3,9 +3,11 @@
 // HTTP concern, not a socket one.
 import registerCallSocketHandlers from "./call/socketHandlers.js";
 import registerCallBusHandlers from "./call/busHandlers.js";
+import { registerSigningKeyListeners } from "../handlers/signingKeys.js";
 
 export function registerAllEventBusListeners() {
     registerCallBusHandlers();
+    registerSigningKeyListeners();
 }
 
 export function registerAllSocketListeners(socket) {

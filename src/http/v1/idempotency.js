@@ -7,6 +7,9 @@
 //   - same key while the first is still running: 409 idempotency_key_in_use;
 //   - same key, different method/path/body: 422 idempotency_key_reused.
 // A 5xx isn't stored, so the retry runs again. Keys are per consumer.
+// A route whose response carries a secret (issuing an API or signing key)
+// opts out with `config: { idempotent: false }`: responses are stored in
+// plain JSON, and a secret must not be.
 import { createHash } from 'crypto';
 import IdempotencyKeyRepository from '../../persistence/IdempotencyKeyRepository.js';
 import { sendError } from '../errors.js';
@@ -36,6 +39,7 @@ function purgeExpiredNowAndThen() {
 // preHandler, after apiKeyAuth (request.consumer is set).
 export async function idempotencyPreHandler(request, reply) {
     if (request.method !== 'POST' || !request.consumer) return;
+    if (request.routeOptions?.config?.idempotent === false) return;
     const key = request.headers[HEADER];
     if (key == null) return;
     if (typeof key !== 'string' || !key.length || key.length > 255) {

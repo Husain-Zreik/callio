@@ -104,6 +104,17 @@ class RoomManager {
         socket.join(`supervisors:${tenantId}`);
     }
 
+    // Every socket authenticated with one consumer signing key, so revoking the
+    // key can end them (disconnectSigningKey).
+    joinSigningKeyRoom(socket, consumerId, kid) {
+        socket.join(`signing-key:${consumerId}:${kid}`);
+    }
+
+    // Cluster-wide through the Redis adapter.
+    disconnectSigningKey(consumerId, kid) {
+        this.io?.in(`signing-key:${consumerId}:${kid}`).disconnectSockets(true);
+    }
+
     joinCallRoom(socket, callId) {
         socket.join(`call:${callId}`);
     }

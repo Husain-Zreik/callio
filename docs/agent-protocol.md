@@ -26,8 +26,9 @@ const socket = io('https://callio.example.com', {
 
 ### The agent token
 
-The consumer's backend signs a short-lived HS256 JWT with a signing key issued
-to it by the Callio operator (`consumer_signing_keys`):
+The consumer's backend signs a short-lived HS256 JWT with one of its signing
+keys (`consumer_signing_keys`; issued with the consumer, rotated through
+`/v1/signing-keys` — [management-api.md → Keys](management-api.md#keys)):
 
 | Where | Field | Value |
 |---|---|---|
@@ -61,7 +62,10 @@ A rejected connection fails with `connect_error` and the message
 | `Unsupported protocol version <n> (server speaks 1)` |
 | `internal error` |
 
-The token is only checked when the socket connects. Give the client a way to
+The token is only checked when the socket connects. Revoking its signing key
+ends the socket: the server disconnects it (socket.io reason
+`io server disconnect`, which the client doesn't retry by itself), on every
+worker; the app has to reconnect with a token signed by a current key. Give the client a way to
 fetch a fresh one for every reconnect (e.g. `auth: (cb) => getToken().then((token) => cb({ token, ... }))`
 with socket.io-client) — a token captured once expires under a long session.
 

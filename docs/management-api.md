@@ -9,9 +9,9 @@ calls, call history and control. Base path `/v1`, JSON in and out.
 Authorization: Bearer ck_<slug>_<secret>
 ```
 
-API keys are issued by the Callio operator (`npm run consumer:create`) and
-stored hashed; several can be active at once so a key can be rotated without
-downtime. Every request is scoped to the calling consumer — its tenants,
+The first API key comes with the consumer (`npm run consumer:create`); more
+are issued and revoked through [Keys](#keys). Keys are stored hashed; several
+can be active at once, so a key is rotated without downtime. Every request is scoped to the calling consumer — its tenants,
 their agents, queues, channels and calls. Anything else is `404`.
 
 Rate limit: 1200 requests per minute per consumer, in fixed one-minute
@@ -48,7 +48,10 @@ UUID per logical request). If the request is retried with the same key:
 | Same key, different method, path or body | `422 idempotency_key_reused` |
 | The first request failed with `5xx` | The retry runs normally (a `5xx` isn't stored) |
 
-Keys are per consumer and kept for 24 hours. A request without the header
+Keys are per consumer and kept for 24 hours. `POST /v1/api-keys` and
+`POST /v1/signing-keys` are never replayed (the stored response would hold the
+new secret): a retry issues another key; revoke the one you don't use. A
+request without the header
 behaves as before. A key whose first request never finished (the worker
 died) can be reused after 2 minutes.
 
@@ -73,6 +76,7 @@ Some errors add `details` (for `in_use`: what is using the entity).
 | `409` | `call_ended` | `POST /v1/calls/{id}/terminate` on a call that already ended |
 | `409` | `idempotency_key_in_use` | A request with this `Idempotency-Key` is still running |
 | `409` | `in_use` | A `DELETE` of something still in use — see [Deleting](#deleting) |
+| `409` | `last_key`, `kid_taken` | Revoking your last active API or signing key; a `kid` that exists — see [Keys](#keys) |
 | `413` | `invalid_request` | Request body over the size limit |
 | `422` | `idempotency_key_reused` | The `Idempotency-Key` was used with a different request |
 | `429` | `rate_limited` | Over the rate limit |
@@ -131,6 +135,30 @@ call resets the count.
 Agents are also created on their first socket connection (see
 [agent-protocol.md](agent-protocol.md)); `PUT` is how you set roles and names
 ahead of time.
+
+## Keys
+
+Your API keys and agent-token signing keys. To rotate: issue the new key,
+move over to it, then revoke the old one.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `GET` | `/v1/api-keys` | — | `{ apiKeys }` |
+| `POST` | `/v1/api-keys` | `{ name?, expires_in_days? }` (1–3650) | `201 { apiKey }` with `key` — the only time it is shown |
+| `DELETE` | `/v1/api-keys/{id}` | — | `204` |
+| `GET` | `/v1/signing-keys` | — | `{ signingKeys }` |
+| `POST` | `/v1/signing-keys` | `{ kid? }` (default: the next `k<n>`) | `201 { signingKey: { kid, secret } }` — the only time the secret is shown |
+| `DELETE` | `/v1/signing-keys/{kid}` | — | `204` |
+
+- `apiKey`: `{ id, name, prefix, createdAt, lastUsedAt, expiresAt,
+  revokedAt }`; `prefix` is the key's first 16 characters, to tell keys apart.
+  `signingKey` in a list: `{ kid, createdAt, revokedAt }`.
+- A revoked API key stops working at once. A revoked signing key's tokens
+  are refused at once on the worker that revoked it and within a minute on
+  the others, and every agent socket that connected with one of its tokens is
+  disconnected.
+- Your last active key of a kind can't be revoked (`409 last_key`); a `kid`
+  that exists, revoked or not, is `409 kid_taken` — kids are never reused.
 
 ## Push credentials
 

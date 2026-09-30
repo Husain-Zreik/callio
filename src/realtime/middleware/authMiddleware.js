@@ -32,6 +32,12 @@ async function signingSecret(consumerId, kid) {
     return secret;
 }
 
+// A revoked key stops working on this worker at once; other workers' caches
+// expire within SECRET_CACHE_TTL_MS.
+export function forgetSigningSecret(consumerId, kid) {
+    secretCache.delete(`${consumerId}:${kid}`);
+}
+
 export class AgentAuthError extends Error {}
 
 /**
@@ -71,7 +77,7 @@ export async function authenticateAgentToken(token) {
     });
     if (!agent) throw new AgentAuthError("Agent could not be resolved");
 
-    return { consumer, tenant, agent };
+    return { consumer, tenant, agent, kid };
 }
 
 export async function authMiddleware(socket, next) {
@@ -81,7 +87,7 @@ export async function authMiddleware(socket, next) {
             throw new AgentAuthError(`Unsupported protocol version ${protocol} (server speaks ${AGENT_PROTOCOL_VERSION})`);
         }
 
-        const { tenant, agent } = await authenticateAgentToken(socket.handshake.auth?.token);
+        const { consumer, tenant, agent, kid } = await authenticateAgentToken(socket.handshake.auth?.token);
 
         socket.user = {
             id: agent.id,
@@ -99,6 +105,7 @@ export async function authMiddleware(socket, next) {
         socket.connectionPurpose = socket.handshake.auth?.purpose || "session";
 
         roomManager.joinTenantRoom(socket, tenant.id);
+        roomManager.joinSigningKeyRoom(socket, consumer.id, kid);
         roomManager.joinUserRoom(socket, agent.id);
         if (agent.role === AgentRole.SUPERVISOR) roomManager.joinSupervisorRoom(socket, tenant.id);
 
