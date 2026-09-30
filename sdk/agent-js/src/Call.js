@@ -58,7 +58,8 @@ export class Call extends Emitter {
         if (!this.data.sdpOffer) throw new Error('The call has no offer yet');
         this._setState('connecting');
         try {
-            const pc = this._newPeer();
+            // Candidates Callio sent while the call rang belong to this leg: keep them.
+            const pc = this._newPeer({ keepRemoteCandidates: true });
             await this._attachMicrophone(pc, stream);
             await pc.setRemoteDescription({ type: 'offer', sdp: this.data.sdpOffer });
             await this._flushRemote();
@@ -112,14 +113,16 @@ export class Call extends Emitter {
 
     // ── Media ─────────────────────────────────────────────────────────────────
 
-    _newPeer() {
+    // A new leg. Callio's buffered candidates are for the previous leg and are
+    // dropped — except on accept, where they arrived for this one while ringing.
+    _newPeer({ keepRemoteCandidates = false } = {}) {
         this._closePeer();
         const RTCPeerConnection = this.agent.webrtc.RTCPeerConnection;
         const pc = new RTCPeerConnection({ iceServers: this.agent.iceServers });
         this.pc = pc;
         this._bound = false;
         this._pendingLocal = [];
-        this._pendingRemote = [];
+        if (!keepRemoteCandidates) this._pendingRemote = [];
 
         pc.onicecandidate = (e) => {
             if (!e.candidate || pc !== this.pc) return;

@@ -1,0 +1,20 @@
+name: callio_agent
+description: "Callio agent SDK for Flutter: take calls routed by Callio (WhatsApp, SIP) over WebRTC — availability, devices, transfer, supervisor board and monitoring, native call UI."
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_callkit_incoming: ^3.1.6
+  flutter_webrtc: ^1.6.2+hotfix.3
+  socket_io_client: ^3.1.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0

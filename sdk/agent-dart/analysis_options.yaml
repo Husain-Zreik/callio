@@ -1,0 +1,6 @@
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    # `'key': ?value` needs Dart 3.8; the package supports apps on Dart 3.5+.
+    use_null_aware_elements: false
