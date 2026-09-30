@@ -37,6 +37,7 @@ consumer's migration system touch this database.
 | `20260925000015_create_call_recordings_table.js` | `call_recordings` |
 | `20260925000016_create_webhook_deliveries_table.js` | `webhook_deliveries` |
 | `20260928000001_add_queue_timing_to_calls.js` | `calls.queued_at`, `offered_at`, `overflow_count` + two timeout-scan indexes |
+| `20260930000001_add_event_dedupe_and_idempotency_keys.js` | `webhook_deliveries.dedupe_key` + `(consumer_id, id)` index; `api_idempotency_keys` |
 
 ## Overview
 
@@ -78,6 +79,7 @@ consumer ─┬─ api keys, signing keys, webhook_deliveries
 | `ivr_sessions`, `ivr_session_inputs` | IVR runs and their DTMF input. |
 | `call_recordings` | Stereo recordings and their lifecycle. |
 | `webhook_deliveries` | Outbox of events for consumers, delivered with retries (`src/outbox/OutboxDispatcher.js`). |
+| `api_idempotency_keys` | `Idempotency-Key`s of Management API POSTs and the responses to replay, for 24 h. |
 
 ## Conventions
 
@@ -295,6 +297,18 @@ through the API.
 `event_type`, `payload`, `status` `PENDING` / `DELIVERED` / `FAILED`,
 `attempts`, `next_attempt_at`, `last_response_status`, `last_error`,
 `delivered_at`. See `docs/events.md`.
+
+`dedupe_key` (unique, nullable) is `<call_id>:<event_type>` for the events a
+call has at most once (`call.created`, `call.answered`, `call.ended`): the
+unique key, not a flag set before the write, keeps several workers from
+writing one twice. The same rows serve `GET /v1/events`.
+
+### api_idempotency_keys
+
+One row per (`consumer_id`, `idempotency_key`): `request_hash` (SHA-256 of
+method, path and body), `status` `IN_PROGRESS` / `COMPLETED`,
+`response_status`, `response_body`, `expires_at` (24 h; expired rows are
+purged as keys are used). Written by `src/http/v1/idempotency.js`.
 
 ## Reference: migrating from the old midlr schema
 

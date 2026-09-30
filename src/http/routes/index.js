@@ -9,7 +9,9 @@ import { handleWorkerHealth, handleHealth } from '../controllers/healthControlle
 import { handleMetrics } from '../controllers/metricsController.js';
 import managementRoutes from '../v1/managementRoutes.js';
 import callRoutes from '../v1/callRoutes.js';
+import eventRoutes from '../v1/eventRoutes.js';
 import { apiKeyAuth } from '../auth/apiKeyAuth.js';
+import { idempotencyPreHandler, idempotencyOnSend } from '../v1/idempotency.js';
 import { httpErrorHandler } from '../errors.js';
 import { customerChannels } from '../../core/channels/CustomerChannels.js';
 
@@ -25,7 +27,10 @@ export default async function registerRoutes(fastify) {
     await fastify.register(async (v1) => {
         v1.setErrorHandler(httpErrorHandler);
         v1.addHook('preHandler', apiKeyAuth);
+        v1.addHook('preHandler', idempotencyPreHandler);
+        v1.addHook('onSend', idempotencyOnSend);
         await v1.register(managementRoutes);
         await v1.register(callRoutes);
+        await v1.register(eventRoutes);
     }, { prefix: '/v1' });
 }

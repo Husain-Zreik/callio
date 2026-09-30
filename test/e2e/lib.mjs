@@ -293,14 +293,14 @@ export async function nextIncoming(agent, callId, timeoutMs = 10000, predicate =
 }
 
 export function api(callioUrl, apiKey) {
-    return async (method, path, body) => {
+    return async (method, path, body, headers = {}) => {
         const res = await fetch(`${callioUrl}${path}`, {
             method,
-            headers: { Authorization: `Bearer ${apiKey}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+            headers: { Authorization: `Bearer ${apiKey}`, ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers },
             body: body ? JSON.stringify(body) : undefined,
         });
         const text = await res.text();
-        return { status: res.status, body: text ? JSON.parse(text) : null };
+        return { status: res.status, body: text ? JSON.parse(text) : null, headers: res.headers };
     };
 }
 

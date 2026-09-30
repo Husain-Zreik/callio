@@ -170,6 +170,55 @@ try {
     await waitFor(async () => (await availability('agent-2')) === 'OFFLINE', 5000, 'agent-2 offline after the failed dial');
     a2.peer.close(); a2.peer = null;
 
+    // ── Idempotency-Key ──
+    const intentBody = { channel_ref: 'whatsapp-main', agent_ref: 'agent-2', customer: { address: '+96181030842' } };
+    const idem = { 'Idempotency-Key': `e2e-${Date.now()}` };
+    const firstTry = await api('POST', '/v1/tenants/demo/calls', intentBody, idem);
+    const retry = await api('POST', '/v1/tenants/demo/calls', intentBody, idem);
+    check('a retried POST with the same Idempotency-Key returns the first response, not a second call',
+        firstTry.status === 201 && retry.status === 201 && retry.body.call?.callId === firstTry.body.call?.callId
+        && retry.headers.get('idempotent-replayed') === 'true',
+        `first=${firstTry.body.call?.callId} retry=${retry.body.call?.callId}`);
+    const [{ n: intentsMade }] = await q("SELECT COUNT(*) AS n FROM calls WHERE customer_address = '+96181030842'");
+    check('only one call was created for the key', Number(intentsMade) === 1, `calls=${intentsMade}`);
+    const reused = await api('POST', '/v1/tenants/demo/calls', { ...intentBody, customer: { address: '+96181030843' } }, idem);
+    check('the same key with a different request is refused (422 idempotency_key_reused)',
+        reused.status === 422 && reused.body.error?.code === 'idempotency_key_reused', `HTTP ${reused.status}`);
+    const badKey = { 'Idempotency-Key': `e2e-bad-${Date.now()}` };
+    const invalid1 = await api('POST', '/v1/tenants/demo/calls', { channel_ref: 'whatsapp-main' }, badKey);
+    const invalid2 = await api('POST', '/v1/tenants/demo/calls', { channel_ref: 'whatsapp-main' }, badKey);
+    check('a 4xx is replayed for the same key too', invalid1.status === 400 && invalid2.status === 400
+        && invalid2.headers.get('idempotent-replayed') === 'true', `${invalid1.status}/${invalid2.status}`);
+    const cancelIntent = await api('POST', `/v1/calls/${firstTry.body.call.callId}/terminate`);
+    const cancelled = await waitFor(async () => { const r = await callRow(firstTry.body.call.callId); return r.status === 'TERMINATED' ? r : null; }, 5000, 'intent cancelled');
+    check('terminating an outbound intent the agent never started ends it CANCELLED at once',
+        cancelIntent.status === 202 && cancelled.termination_reason === 'CANCELLED', `${cancelled.termination_reason}`);
+
+    // ── Reading events back ──
+    const listed = await api('GET', `/v1/events?call_id=${outId}`);
+    const listedTypes = (listed.body.events ?? []).map((e) => e.type);
+    check('GET /v1/events lists a call\'s events, newest first', listed.status === 200
+        && ['call.created', 'call.answered', 'call.ended'].every((t) => listedTypes.includes(t)) && listedTypes[0] === 'call.ended',
+        listedTypes.join(','));
+    const endedListed = listed.body.events.find((e) => e.type === 'call.ended');
+    check('each listed event carries the exact webhook body and its delivery state',
+        endedListed.body.event_id === endedEvent.eventId && endedListed.body.data?.call?.externalRef === 'crm-call-42'
+        && endedListed.delivery.status === 'DELIVERED', JSON.stringify(endedListed.delivery));
+    const one = await api('GET', `/v1/events/${endedListed.eventId}`);
+    check('GET /v1/events/{eventId} returns one event', one.status === 200 && one.body.event?.eventId === endedListed.eventId);
+    const page = await api('GET', `/v1/events?limit=1`);
+    const page2 = await api('GET', `/v1/events?limit=1&before_id=${page.body.nextBeforeId}`);
+    check('events page with before_id', page.body.events.length === 1 && page2.body.events.length === 1
+        && page2.body.events[0].eventId !== page.body.events[0].eventId);
+    const before = receiver.events.filter((e) => e.eventId === endedListed.eventId).length;
+    const redo = await api('POST', `/v1/events/${endedListed.eventId}/redeliver`);
+    await waitFor(() => receiver.events.filter((e) => e.eventId === endedListed.eventId).length > before, 10000, 'redelivered event');
+    check('POST /v1/events/{eventId}/redeliver sends the same event again', redo.status === 202);
+    const foreignEvent = await fetch(`${CALLIO}/v1/events/${endedListed.eventId}`, { headers: { Authorization: 'Bearer ck_wrong' } });
+    check('events need the consumer\'s key', foreignEvent.status === 401);
+    const [{ n: endedRows }] = await q("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE call_id = ? AND event_type = 'call.ended'", [outId]);
+    check('a once-per-call event has exactly one outbox row', Number(endedRows) === 1, `rows=${endedRows}`);
+
     // ── Isolation ──
     const foreign = await meta.post({ metadata: { phone_number_id: '999999' }, calls: [{ id: 'x', event: 'terminate' }] });
     check('webhooks for a line nobody owns are ignored', foreign === 200);

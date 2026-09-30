@@ -15,7 +15,8 @@ import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
 import { storageClient } from '../../infra/storage/StorageClient.js';
 import { EventTypes } from '../../core/events/EventTypes.js';
 import { toConsumerCallView } from '../../core/calls/CallView.js';
-import { CallStatus } from '../../core/constants/CallConstants.js';
+import { CallStatus, TerminationReason, TerminatedBy } from '../../core/constants/CallConstants.js';
+import { callTerminator } from '../../core/calls/CallTerminator.js';
 import { HttpError, badRequest, notFound } from '../errors.js';
 import { requireString, oneOf, optionalObject, optionalInt, ref } from './validate.js';
 import { config } from '../../../config/envConfig.js';
@@ -138,12 +139,24 @@ export default async function callRoutes(fastify) {
     fastify.post('/calls/:callId/terminate', async (request, reply) => {
         const { call } = await ownedCall(request);
         if (!ACTIVE.has(call.status)) throw new HttpError(409, 'call_ended', `Call is already ${call.status}`);
-        await redisPubSubService.publishCallEvent(call.id, EventTypes.CALL_TERMINATED, {
+        const subscribers = await redisPubSubService.publishCallEvent(call.id, EventTypes.CALL_TERMINATED, {
             callId: call.id,
             userId: null,
             tenantId: call.tenant_id,
             reason: call.status === CallStatus.IN_PROGRESS ? 'api_terminated' : 'cancelled',
         });
+        // An outbound intent the agent hasn't started has no media and no
+        // worker listening yet: end it here, as its expiry would. Guarded on
+        // INITIATED, so a call:start that got in first wins.
+        if (!subscribers && call.status === CallStatus.INITIATED) {
+            await callTerminator.end(call.id, {
+                reason: TerminationReason.CANCELLED,
+                terminatedBy: TerminatedBy.AGENT,
+                onlyIfStatus: CallStatus.INITIATED,
+                provider: 'none',
+                source: 'api_cancelled_intent',
+            });
+        }
         return reply.code(202).send({ accepted: true });
     });
 

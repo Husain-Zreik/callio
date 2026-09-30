@@ -8,7 +8,6 @@ import CallRepository from '../../persistence/CallRepository.js';
 import AgentRepository from '../../persistence/AgentRepository.js';
 import TenantRepository from '../../persistence/TenantRepository.js';
 import OutboxRepository from '../../persistence/OutboxRepository.js';
-import { redisBaseService } from '../../infra/redis/RedisBaseService.js';
 import { toConsumerCallView } from '../calls/CallView.js';
 import { logger } from '../../infra/logging/logger.js';
 
@@ -18,9 +17,15 @@ export const API_VERSION = '2026-09-25';
 
 // Events that describe a one-time transition of a call. Several workers can
 // observe the same transition (e.g. a terminate handled by the webhook worker
-// and by the worker owning the media), so these are written at most once.
+// and by the worker owning the media), so these are written at most once:
+// the outbox row's unique dedupe_key decides, so a write that fails leaves
+// nothing behind and the next attempt (or another worker) can still make it.
 const ONCE_PER_CALL = new Set(['call.created', 'call.answered', 'call.ended']);
-const ONCE_TTL_SECONDS = 86400 * 2;
+
+// A failed outbox write is retried after these delays (ms) before the event
+// is given up — a lost event is one the consumer never hears about.
+const WRITE_RETRY_DELAYS_MS = [200, 1000, 3000];
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 class ConsumerEventPublisher {
     constructor() {
@@ -32,12 +37,27 @@ class ConsumerEventPublisher {
         return tenant ? { consumerId: tenant.consumer_id, tenantRef: tenant.external_ref } : null;
     }
 
+    // Writes an event to the outbox, retrying transient failures.
+    async #enqueue(event, logFields) {
+        for (let attempt = 0; ; attempt++) {
+            try {
+                return await OutboxRepository.enqueue(event);
+            } catch (err) {
+                if (attempt >= WRITE_RETRY_DELAYS_MS.length) {
+                    log.error({ ...logFields, eventType: event.eventType, err, attempts: attempt + 1 }, 'Event lost: the outbox write kept failing');
+                    return null;
+                }
+                log.warn({ ...logFields, eventType: event.eventType, err, attempt: attempt + 1 }, 'Outbox write failed — retrying');
+                await sleep(WRITE_RETRY_DELAYS_MS[attempt]);
+            }
+        }
+    }
+
     async publishForCall(callId, eventType, data = {}) {
         try {
-            if (ONCE_PER_CALL.has(eventType)) {
-                const first = await redisBaseService.setnx(`callio:events:${callId}:${eventType}`, '1', ONCE_TTL_SECONDS);
-                if (!first) return null;
-            }
+            const dedupeKey = ONCE_PER_CALL.has(eventType) ? `${callId}:${eventType}` : null;
+            // Cheap early exit for the common duplicate; the unique key is what guarantees it.
+            if (dedupeKey && await OutboxRepository.existsByDedupeKey(dedupeKey)) return null;
 
             const call = await CallRepository.findById(callId);
             if (!call) return null;
@@ -59,14 +79,14 @@ class ConsumerEventPublisher {
                     ...data,
                 },
             };
-            const eventId = await OutboxRepository.enqueue({
+            return await this.#enqueue({
                 consumerId: ctx.consumerId,
                 tenantId: call.tenant_id,
                 callId,
                 eventType,
                 payload,
-            });
-            return eventId;
+                dedupeKey,
+            }, { callId });
         } catch (err) {
             log.error({ callId, err }, `Failed to publish ${eventType}`);
             return null;
@@ -79,7 +99,7 @@ class ConsumerEventPublisher {
             if (!agent) return null;
             const ctx = await this.#tenantContext(agent.tenant_id);
             if (!ctx) return null;
-            return OutboxRepository.enqueue({
+            return await this.#enqueue({
                 consumerId: ctx.consumerId,
                 tenantId: agent.tenant_id,
                 eventType: 'agent.availability.changed',
@@ -90,7 +110,7 @@ class ConsumerEventPublisher {
                     tenant_ref: ctx.tenantRef,
                     data: { agent_ref: agent.external_ref, agent_id: agent.id, availability, ...extra },
                 },
-            });
+            }, { agentId });
         } catch (err) {
             log.error({ agentId, err }, 'Failed to publish availability');
             return null;

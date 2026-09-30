@@ -32,6 +32,25 @@ windows (`429` with `Retry-After` in seconds).
 - Callio's numeric ids are returned in responses and events for convenience.
   Enum values in bodies are case-insensitive and returned uppercase.
 - Request bodies are limited to 10 MB (15 MB for audio uploads).
+- **Retry `POST`s safely with an `Idempotency-Key`** — see
+  [Idempotency](#idempotency). `PUT`, `PATCH`, `GET` and `DELETE` are
+  idempotent already.
+
+### Idempotency
+
+Send `Idempotency-Key: <any unique string, 1–255 chars>` on a `POST` (e.g. a
+UUID per logical request). If the request is retried with the same key:
+
+| Situation | Response |
+|---|---|
+| The first request finished with `2xx` or `4xx` | That same status and body again, with `Idempotent-Replayed: true`. Nothing runs twice |
+| The first request is still running | `409 idempotency_key_in_use`, `Retry-After: 1` |
+| Same key, different method, path or body | `422 idempotency_key_reused` |
+| The first request failed with `5xx` | The retry runs normally (a `5xx` isn't stored) |
+
+Keys are per consumer and kept for 24 hours. A request without the header
+behaves as before. A key whose first request never finished (the worker
+died) can be reused after 2 minutes.
 
 ### Errors
 
@@ -50,7 +69,9 @@ Every error has one shape:
 | `404` | `not_enabled` | `POST /webhooks/whatsapp` when direct Meta ingress isn't configured |
 | `409` | `invalid_channel`, `channel_disabled`, `unsupported_channel`, `invalid_agent`, `agent_busy`, `invalid_customer` | `POST …/calls` — see [Outbound calls](#outbound-calls) |
 | `409` | `call_ended` | `POST /v1/calls/{id}/terminate` on a call that already ended |
+| `409` | `idempotency_key_in_use` | A request with this `Idempotency-Key` is still running |
 | `413` | `invalid_request` | Request body over the size limit |
+| `422` | `idempotency_key_reused` | The `Idempotency-Key` was used with a different request |
 | `429` | `rate_limited` | Over the rate limit |
 | `500` | `internal_error` | Unexpected failure |
 | `503` | `storage_unavailable` | `GET /v1/calls/{id}/recording` when object storage isn't configured |
@@ -328,7 +349,8 @@ body is limited to 15 MB, so base64 content can carry about 11 MB of audio.
   omitted field is left unchanged.
 - **Terminate:** `409 call_ended` if the call already ended. The result
   arrives as `call.ended`: `COMPLETED` if it was `IN_PROGRESS`, `CANCELLED`
-  otherwise, with `terminatedBy: AGENT`.
+  otherwise, with `terminatedBy: AGENT`. An outbound intent the agent hasn't
+  started yet ends straight away.
 - **Recording:** a short-lived download URL. `404` until the recording has
   completed; `503 storage_unavailable` without object storage.
 
@@ -372,6 +394,36 @@ Give `callId` to that agent's client, which sends
 customer. An intent not started within 2 minutes ends as `CANCELLED`
 (`terminatedBy: SYSTEM`). When an outbound call ends, the agent goes
 `OFFLINE`, not `AVAILABLE`.
+
+## Events
+
+The events Callio sent, or is sending, to your webhook — to catch up after
+an outage, or to check a delivery. The event body and fields are described
+in [events.md](events.md).
+
+| Method | Path | Query | Response |
+|---|---|---|---|
+| `GET` | `/v1/events` | `?tenant_ref&call_id&type&status&limit&before_id` | `{ events, nextBeforeId }` |
+| `GET` | `/v1/events/{eventId}` | — | `{ event }` |
+| `POST` | `/v1/events/{eventId}/redeliver` | — | `202 { accepted: true }` |
+
+```json
+{
+  "eventId": "2f0c…",
+  "type": "call.ended",
+  "callId": 42,
+  "createdAt": "2026-09-30T10:15:03.000Z",
+  "delivery": { "status": "DELIVERED", "attempts": 1, "lastResponseStatus": 200, "deliveredAt": "2026-09-30T10:15:04.000Z" },
+  "body": { "event_id": "2f0c…", "event_type": "call.ended", "…": "exactly what the webhook POSTed" }
+}
+```
+
+- **List:** newest first; `type` is an event type (`call.ended`); `status`
+  `PENDING`, `DELIVERED` or `FAILED` (given up after the last retry); `limit`
+  1–200, default 50; pass `nextBeforeId` as `before_id` for the next page.
+- **Redeliver:** queues the event again with the same `event_id` and a fresh
+  retry schedule, whatever its status — for a `FAILED` event once your
+  endpoint is fixed.
 
 ## Webhooks in
 

@@ -9,10 +9,14 @@ reporting — without reading Callio's database.
 
 - **Written after the change, then delivered at least once.** An event is
   written to an outbox right after the change that caused it has been
-  committed, as a separate step — not in the same transaction. If that write
-  fails, the event is lost (Callio logs it). Once written, it is retried with
-  backoff (5s, 15s, 1m, 5m, 15m, 30m, then hourly) until your endpoint
+  committed, as a separate step — not in the same transaction. A failed
+  write is retried for a few seconds. Once written, the event is retried
+  with backoff (5s, 15s, 1m, 5m, 15m, 30m, then hourly) until your endpoint
   answers `2xx`, and given up after the 12th failed attempt.
+- **Missed some?** Read them back with `GET /v1/events` and have one sent
+  again with `POST /v1/events/{eventId}/redeliver`
+  ([management-api.md](management-api.md#events)).
+- `call.created`, `call.answered` and `call.ended` exist at most once per call.
 - **Any other answer is a failed attempt**, including a timeout (10 seconds)
   and a redirect: `3xx` responses are not followed.
 - **De-duplicate on `event_id`** (also in the `X-Callio-Event-Id` header). It
