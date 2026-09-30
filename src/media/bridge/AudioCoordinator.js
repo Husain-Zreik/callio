@@ -178,7 +178,7 @@ export class AudioCoordinator {
      * @param {'listen'|'whisper'|'barge'} mode
      */
     setSupervisorMode(callId, mode) {
-        this.bridgeManager.setSupervisorMode(callId, mode);
+        return this.bridgeManager.setSupervisorMode(callId, mode);
     }
 
     /**
@@ -189,7 +189,7 @@ export class AudioCoordinator {
      * @param {boolean} active
      */
     setAgentPrivate(callId, active) {
-        this.bridgeManager.setAgentPrivate(callId, active);
+        return this.bridgeManager.setAgentPrivate(callId, active);
     }
 
     // ─────────────────────────────────────────────────────────────────

@@ -146,8 +146,26 @@ try {
     sup.socket.emit('call:monitor:mode', { callId: row3.id, mode: 'barge' });
     const inBarge = await hearsSupervisor();
     check('barge: both the agent and the customer hear the supervisor', inBarge.agent && inBarge.customer, JSON.stringify(inBarge));
+
+    // Agent-private (a reply only the supervisor hears) is real only in whisper.
+    const privateAfter = (from) => a1.events.slice(from).filter((e) => e.event === 'call:agent:private:changed').map((e) => e.payload.active);
+    let mark = a1.events.length;
+    a1.errors.length = 0;
+    a1.socket.emit('call:agent:private', { callId: row3.id, active: true });
+    await sleep(1000);
+    check('agent-private outside whisper is refused and reported as off', JSON.stringify(privateAfter(mark)) === '[false]'
+        && a1.errors.some((e) => e.code === 'MONITOR_FAILED'), `changed=${JSON.stringify(privateAfter(mark))}`);
+    sup.socket.emit('call:monitor:mode', { callId: row3.id, mode: 'whisper' });
+    await sleep(800);
+    mark = a1.events.length;
+    a1.socket.emit('call:agent:private', { callId: row3.id, active: true });
+    await sleep(1000);
+    check('agent-private in whisper is on', JSON.stringify(privateAfter(mark)) === '[true]', JSON.stringify(privateAfter(mark)));
+    mark = a1.events.length;
     sup.socket.emit('call:monitor:mode', { callId: row3.id, mode: 'listen' });
     await sleep(1000);
+    check('leaving whisper ends agent-private, and the agent is told', JSON.stringify(privateAfter(mark)) === '[false]',
+        JSON.stringify(privateAfter(mark)));
 
     const agentMonitor = await new Promise((resolve) => {
         a2.socket.emit('call:monitor', { callId: row3.id, sdpOffer: sup.peer.pc.localDescription.sdp });

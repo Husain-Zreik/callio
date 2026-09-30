@@ -8,6 +8,12 @@ import { logger } from '../infra/logging/logger.js';
 
 const log = logger('persistence.ConsumerRepository');
 
+function parseEventTypes(value) {
+    if (value == null) return null;
+    const list = typeof value === 'string' ? JSON.parse(value) : value;
+    return Array.isArray(list) ? list : null;
+}
+
 export function hashApiKey(apiKey) {
     return createHash('sha256').update(String(apiKey)).digest('hex');
 }
@@ -68,6 +74,35 @@ class ConsumerRepository {
             url: row.event_webhook_url,
             secret: row.event_webhook_secret ? decryptSecret(row.event_webhook_secret) : null,
         };
+    }
+
+    // What PUT /v1/webhook manages; the secret only as "is one set".
+    async getWebhookSettings(consumerId) {
+        const [rows] = await connection.execute(
+            'SELECT event_webhook_url, lookup_url, event_types, event_webhook_secret IS NOT NULL AS has_secret FROM consumers WHERE id = ? LIMIT 1',
+            [consumerId]
+        );
+        const row = rows[0];
+        if (!row) return null;
+        return {
+            url: row.event_webhook_url ?? null,
+            lookupUrl: row.lookup_url ?? null,
+            eventTypes: parseEventTypes(row.event_types),
+            hasSecret: Boolean(Number(row.has_secret)),
+        };
+    }
+
+    async updateWebhookSettings(consumerId, { url, lookupUrl, eventTypes }) {
+        await connection.execute(
+            'UPDATE consumers SET event_webhook_url = ?, lookup_url = ?, event_types = ?, updated_at = NOW() WHERE id = ?',
+            [url, lookupUrl, eventTypes ? JSON.stringify(eventTypes) : null, consumerId]
+        );
+    }
+
+    // null = every event type.
+    async getEventTypes(consumerId) {
+        const [rows] = await connection.execute('SELECT event_types FROM consumers WHERE id = ? LIMIT 1', [consumerId]);
+        return parseEventTypes(rows[0]?.event_types);
     }
 
     // The secret that signs everything Callio sends the consumer (events and

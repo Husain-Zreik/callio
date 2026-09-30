@@ -118,8 +118,10 @@ Management API returns), plus the extra fields below.
 - `call.queued` and `call.assigned` are sent again every time the call is
   re-offered: a decline or ring timeout passing it on, an overflow, a
   transfer, or a live call going back to its queue.
-- `agent.availability.changed` is also sent, unchanged, when an agent's
-  client resyncs its availability.
+- `agent.availability.changed` is sent only when the availability actually
+  changes — not for a client resync or the same value set again.
+- You can receive only some event types: `event_types` in
+  [`PUT /v1/webhook`](management-api.md#webhook).
 
 ## Values
 

@@ -302,6 +302,43 @@ try {
     check('the anonymised call stays in the history, without the customer', afterErase.body.calls.length === 0
         && keptCall.status === 200 && keptCall.body.call.customer.address === null && keptCall.body.call.status === 'TERMINATED');
 
+    // ── Webhook settings, event subscriptions, no-change availability ──
+    const hook = await api('GET', '/v1/webhook');
+    check('GET /v1/webhook shows the URLs, every event type and that a secret is set',
+        hook.status === 200 && hook.body.webhook.url === 'http://127.0.0.1:3999/events' && hook.body.webhook.eventTypes === null
+        && hook.body.webhook.secretSet === true && !('secret' in hook.body), JSON.stringify(hook.body));
+    const badUrl = await api('PUT', '/v1/webhook', { url: 'ftp://example.com/x' });
+    const badType = await api('PUT', '/v1/webhook', { url: 'http://127.0.0.1:3999/events', event_types: ['call.exploded'] });
+    check('a non-http(s) URL or an unknown event type is a 400', badUrl.status === 400 && badType.status === 400,
+        `${badUrl.status}/${badType.status}`);
+    const availabilityRows = async () => Number((await q(
+        "SELECT COUNT(*) AS n FROM webhook_deliveries WHERE event_type = 'agent.availability.changed' AND JSON_EXTRACT(payload, '$.data.agent_ref') = 'agent-1'"))[0].n);
+    const setA1 = (availability) => api('PUT', '/v1/tenants/demo/agents/agent-1/availability', { availability });
+    await setA1('OFFLINE');
+    await sleep(500);
+    const base = await availabilityRows();
+    await setA1('AVAILABLE');
+    await setA1('AVAILABLE');
+    await sleep(1500);
+    check('setting the same availability again sends no agent.availability.changed', (await availabilityRows()) === base + 1,
+        `rows ${base} → ${await availabilityRows()}`);
+    const subscribe = await api('PUT', '/v1/webhook', { url: 'http://127.0.0.1:3999/events', event_types: ['call.ended'] });
+    await setA1('OFFLINE');
+    await setA1('AVAILABLE');
+    await sleep(1500);
+    check('with event_types, other events are not written or sent', subscribe.status === 200
+        && JSON.stringify(subscribe.body.webhook.eventTypes) === '["call.ended"]' && (await availabilityRows()) === base + 1,
+        `rows=${await availabilityRows()}`);
+    const everything = await api('PUT', '/v1/webhook', { url: 'http://127.0.0.1:3999/events' });
+    check('omitting event_types subscribes to every type again', everything.body.webhook.eventTypes === null);
+    const [{ event_webhook_secret: savedSecret }] = await q("SELECT event_webhook_secret FROM consumers WHERE slug = 'dev'");
+    const rotated = await api('POST', '/v1/webhook/secret');
+    const [{ event_webhook_secret: newSecret }] = await q("SELECT event_webhook_secret FROM consumers WHERE slug = 'dev'");
+    check('POST /v1/webhook/secret returns a new secret once and replaces the stored one',
+        rotated.status === 200 && typeof rotated.body.secret === 'string' && rotated.body.secret.length >= 32 && newSecret !== savedSecret);
+    // Later suites verify signatures with the seeded secret.
+    await q("UPDATE consumers SET event_webhook_secret = ? WHERE slug = 'dev'", [savedSecret]);
+
     // ── Isolation ──
     const foreign = await meta.post({ metadata: { phone_number_id: '999999' }, calls: [{ id: 'x', event: 'terminate' }] });
     check('webhooks for a line nobody owns are ignored', foreign === 200);

@@ -8,12 +8,40 @@ import CallRepository from '../../persistence/CallRepository.js';
 import AgentRepository from '../../persistence/AgentRepository.js';
 import TenantRepository from '../../persistence/TenantRepository.js';
 import OutboxRepository from '../../persistence/OutboxRepository.js';
+import ConsumerRepository from '../../persistence/ConsumerRepository.js';
 import { toConsumerCallView } from '../calls/CallView.js';
 import { logger } from '../../infra/logging/logger.js';
 
 const log = logger('core.events.ConsumerEventPublisher');
 
 export const API_VERSION = '2026-09-25';
+
+// Every event type Callio sends (docs/events.md#event-types). A consumer may
+// subscribe to some of them (PUT /v1/webhook event_types).
+export const EVENT_TYPES = Object.freeze([
+    'call.created', 'call.ringing', 'call.queued', 'call.assigned', 'call.answered', 'call.transferred',
+    'call.overflowed', 'call.ivr.completed', 'call.ended', 'recording.completed', 'agent.availability.changed',
+]);
+
+// A consumer's subscription, cached per worker; a change reaches the other
+// workers within a minute (this worker's entry is cleared at once).
+const SUBSCRIPTION_TTL_MS = 60_000;
+const subscriptions = new Map();   // consumerId → { types: Set|null, at }
+
+export function forgetSubscription(consumerId) {
+    subscriptions.delete(String(consumerId));
+}
+
+async function subscribed(consumerId, eventType) {
+    const key = String(consumerId);
+    let entry = subscriptions.get(key);
+    if (!entry || Date.now() - entry.at > SUBSCRIPTION_TTL_MS) {
+        const types = await ConsumerRepository.getEventTypes(consumerId);
+        entry = { types: types ? new Set(types) : null, at: Date.now() };
+        subscriptions.set(key, entry);
+    }
+    return !entry.types || entry.types.has(eventType);
+}
 
 // Events that describe a one-time transition of a call. Several workers can
 // observe the same transition (e.g. a terminate handled by the webhook worker
@@ -63,6 +91,7 @@ class ConsumerEventPublisher {
             if (!call) return null;
             const ctx = await this.#tenantContext(call.tenant_id);
             if (!ctx) return null;
+            if (!await subscribed(ctx.consumerId, eventType)) return null;
 
             const agent = call.agent_id ? await AgentRepository.findById(call.agent_id) : null;
             const payload = {
@@ -99,6 +128,7 @@ class ConsumerEventPublisher {
             if (!agent) return null;
             const ctx = await this.#tenantContext(agent.tenant_id);
             if (!ctx) return null;
+            if (!await subscribed(ctx.consumerId, 'agent.availability.changed')) return null;
             return await this.#enqueue({
                 consumerId: ctx.consumerId,
                 tenantId: agent.tenant_id,
@@ -151,9 +181,10 @@ class ConsumerEventPublisher {
         EventBus.on('call:ivr_session_closed', ({ callId, outcome, durationSeconds }) =>
             this.publishForCall(callId, 'call.ivr.completed', { outcome, duration_seconds: durationSeconds ?? null })
         );
-        EventBus.on('call:agent_availability', ({ userId, availability, reason }) =>
-            this.publishAgentAvailability(userId, availability, reason ? { reason } : {})
-        );
+        EventBus.on('call:agent_availability', ({ userId, availability, reason, changed }) => {
+            if (changed === false) return;   // a resync or the same value again
+            this.publishAgentAvailability(userId, availability, reason ? { reason } : {});
+        });
         EventBus.on('recording:completed', ({ callId, recordingId, durationSeconds }) =>
             this.publishForCall(callId, 'recording.completed', {
                 recording_id: recordingId,

@@ -165,6 +165,29 @@ move over to it, then revoke the old one.
 - Your last active key of a kind can't be revoked (`409 last_key`); a `kid`
   that exists, revoked or not, is `409 kid_taken` — kids are never reused.
 
+## Webhook
+
+Where Callio sends your events and lookup requests, which events you receive,
+and the secret that signs them ([events.md](events.md)).
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `GET` | `/v1/webhook` | — | `{ webhook: { url, lookupUrl, eventTypes, secretSet } }` |
+| `PUT` | `/v1/webhook` | `{ url?, lookup_url?, event_types? }` | `{ webhook }`, plus `secret` the first time one is created |
+| `POST` | `/v1/webhook/secret` | — | `{ secret }` — a new one, the only time it is shown |
+
+- `url` receives the events; `lookup_url` is the optional
+  [lookup hook](events.md#lookup-hook-optional-synchronous). Both must be
+  `https://` (`400` otherwise). As with every `PUT`, a URL you omit is
+  removed: without `url`, events are kept and delivered once you set one.
+- `event_types` — the event types you want, e.g. `["call.created",
+  "call.ended"]`; omitted = every type. Events of other types are not sent and
+  don't appear in `GET /v1/events`. An unknown type is a `400` that lists the
+  known ones. A change reaches every worker within a minute.
+- The first `PUT` that sets a URL creates the secret and returns it once.
+  `POST /v1/webhook/secret` replaces it at once: the next request is signed
+  with the new one, so update your side right after.
+
 ## Push credentials
 
 Your app's own push credentials. Callio pushes your agents' devices with

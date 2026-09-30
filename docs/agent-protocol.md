@@ -126,7 +126,7 @@ acting. A socket receives:
 | `call:monitor` | `{ callId, sdpOffer }` | Supervisors only, on an `IN_PROGRESS` call; one supervisor per call at a time. Offer **two** audio transceivers — see *Monitoring*. Replies `call:monitor:started`. |
 | `call:monitor:mode` | `{ callId, mode: 'listen'\|'whisper'\|'barge' }` | While monitoring. Any other mode → `MONITOR_FAILED`. |
 | `call:monitor:stop` | `{ callId }` | Ignored unless this socket is monitoring the call. |
-| `call:agent:private` | `{ callId, active }` | The agent talks privately to the monitoring supervisor (muted to the customer). Takes effect only while the supervisor is in `whisper` mode, and ends when the supervisor leaves `whisper`. |
+| `call:agent:private` | `{ callId, active }` | The agent talks privately to the monitoring supervisor (muted to the customer). Takes effect only while the supervisor is in `whisper` mode: otherwise the answer is `call:agent:private:changed { active: false }` plus `MONITOR_FAILED`. It ends when the supervisor leaves `whisper` or stops monitoring. |
 | `call:agent:muted` | `{ callId, muted }` | Informational — relayed to the call room so a supervisor sees it. |
 
 ## Server → client
@@ -158,14 +158,14 @@ acting. A socket receives:
 | `call:network:quality:customer` | `{ callId, ... }` — customer-leg quality stats. |
 | `call:dtmf` | `{ callId, digit }` — a key the customer pressed during the call. |
 | `call:agent:muted` | `{ callId, muted }` |
-| `call:agent:private:changed` | `{ callId, active }` |
+| `call:agent:private:changed` | `{ callId, active }` — the state the call is actually in: after a `call:agent:private`, and `active: false` when the supervisor leaves `whisper` or stops monitoring while it was on. |
 | `call:supervisor:mode` | `{ callId, mode }` — to the call room, so the agent sees whether a supervisor is whispering or barged in; `listen` when the supervisor leaves. |
 
 ### Agents and queues
 
 | Event | Payload |
 |---|---|
-| `call:agent_availability` | `{ tenantId, userId, availability, updatedAt, reason?, consecutiveMissed? }` — `reason: 'auto_offline_missed_calls'` with `consecutiveMissed` when the tenant's auto-offline policy took the agent offline. |
+| `call:agent_availability` | `{ tenantId, userId, availability, updatedAt, reason?, consecutiveMissed?, changed? }` — `changed: false` when it only confirms the current value (a resync, or the same value set again) — `reason: 'auto_offline_missed_calls'` with `consecutiveMissed` when the tenant's auto-offline policy took the agent offline. |
 | `call:agent_queue` | Queue snapshot — see below. |
 
 Queue snapshot:

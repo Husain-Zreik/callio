@@ -73,6 +73,7 @@ const env = {
     // Each suite's Callio output (pretty, debug) lands in <work>/<suite>.callio.log.
     LOG_LEVEL: process.env.TEST_LOG_LEVEL || 'debug', LOG_STDOUT: 'true', LOG_FORMAT: 'pretty',
     CALL_TRANSFER_TIMEOUT_SECONDS: '6',
+    WEBHOOK_ALLOW_HTTP: 'true',      // the suites' receivers are http://127.0.0.1
     RETENTION_SWEEP_SECONDS: '10',   // retention.test.mjs: a sweep every ~10 s
     ...sipEnv,
 };

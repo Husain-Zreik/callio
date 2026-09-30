@@ -40,6 +40,7 @@ consumer's migration system touch this database.
 | `20260930000001_add_event_dedupe_and_idempotency_keys.js` | `webhook_deliveries.dedupe_key` + `(consumer_id, id)` index; `api_idempotency_keys` |
 | `20260930000002_add_consumer_to_calls_terminated_by.js` | `calls.terminated_by` gains `CONSUMER` |
 | `20260930120000_add_history_indexes_and_lifecycle_tenant.js` | `calls` `(tenant_id, created_at)` and `(tenant_id, ended_at)`; `call_lifecycle_events.tenant_id` (backfilled) + `(tenant_id, occurred_at)`; `agent_push_tokens` unique `(provider, token)`, `is_active` dropped |
+| `20260930150000_add_consumer_event_types.js` | `consumers.event_types` |
 
 ## Overview
 
@@ -116,7 +117,8 @@ Only the columns that need explanation; see each migration for the full list.
 |---|---|
 | `slug` | Unique; used by the CLI scripts (`consumer:create`, `agent:token`). |
 | `status` | `ACTIVE` / `SUSPENDED`. A suspended consumer's API keys get 403 (`src/http/auth/apiKeyAuth.js`) and its agent tokens are refused (`src/realtime/middleware/authMiddleware.js`). |
-| `event_webhook_url`, `event_webhook_secret` | Where events are POSTed, and the signing secret (encrypted). |
+| `event_webhook_url`, `event_webhook_secret` | Where events are POSTed, and the signing secret (encrypted). Set by the consumer with `PUT /v1/webhook`. |
+| `event_types` | JSON array of the event types the consumer receives; `NULL` = every type. Others are never written to its outbox. |
 | `lookup_url` | Optional pre-ring customer lookup (`src/core/calls/CustomerLookup.js`); short timeout, failures never block the call. |
 | `push_credentials` | Encrypted JSON, one optional section per provider: `fcm` `{ service_account }`, `apns` `{ key_p8, key_id, team_id, bundle_id, production }`, `onesignal` `{ app_id, rest_api_key }`. Pushes to the consumer's agents use it; a provider not set falls back to the platform credentials from env (`src/push/PushCredentials.js`). Set with `PUT /v1/push-credentials/{provider}` or `npm run push:credentials`. |
 

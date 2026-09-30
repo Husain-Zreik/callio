@@ -148,3 +148,14 @@ export async function revokeSigningKeyGuarded(consumerId, kid) {
     const [[row]] = await connection.execute('SELECT revoked_at FROM consumer_signing_keys WHERE consumer_id = ? AND kid = ?', [consumerId, kid]);
     return !row || row.revoked_at ? 'not_found' : 'last_key';
 }
+
+// A new webhook secret (signs events and lookup requests), replacing the old
+// one at once. Returns the plaintext — shown to the consumer only this once.
+export async function rotateWebhookSecret(consumerId) {
+    const secret = token(32);
+    await connection.execute(
+        'UPDATE consumers SET event_webhook_secret = ?, updated_at = NOW() WHERE id = ?',
+        [encryptSecret(secret), consumerId]
+    );
+    return secret;
+}

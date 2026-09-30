@@ -294,9 +294,10 @@ export class AudioBridge {
      * call replaceTrack — only transitions into/out of 'listen' do.
      *
      * @param {'listen'|'whisper'|'barge'} mode
+     * @returns {boolean} whether this ended the agent's private reply
      */
     setSupervisorMode(mode) {
-        if (this.supervisorMode === mode) return;
+        if (this.supervisorMode === mode) return false;
 
         const prev = this.supervisorMode;
         this.supervisorMode = mode;
@@ -304,9 +305,8 @@ export class AudioBridge {
 
         // Agent whisper-back only makes sense during whisper; restore the
         // agent→customer wire when leaving whisper so the customer hears the agent.
-        if (mode !== 'whisper' && this._agentPrivate) {
-            this._resetAgentPrivate();
-        }
+        const endedPrivate = mode !== 'whisper' && this._agentPrivate;
+        if (endedPrivate) this._resetAgentPrivate();
 
         // Frontend relay (customer→agent path): needed for whisper + barge.
         const needFrontend = mode === 'whisper' || mode === 'barge';
@@ -322,6 +322,7 @@ export class AudioBridge {
         } else if (mode !== 'barge' && this._customerMixingRelay) {
             this._deactivateCustomerRelay();
         }
+        return endedPrivate;
     }
 
     /**
@@ -331,19 +332,20 @@ export class AudioBridge {
      * When inactive, restore the agent's track. Honoured only during 'whisper'.
      *
      * @param {boolean} active
+     * @returns {Promise<boolean>} the agent-private state after the call
      */
     async setAgentPrivate(active) {
-        if (this._agentPrivate === active) return;
+        if (this._agentPrivate === active) return this._agentPrivate;
 
         if (active && this.supervisorMode !== 'whisper') {
             log.debug({ callId: this.callId }, `Ignoring agent-private (supervisorMode=${this.supervisorMode})`);
-            return;
+            return this._agentPrivate;
         }
 
         const sender = this.customerConnection?.audio.getActivePlaceholderSender();
         if (!sender) {
             log.warn({ callId: this.callId }, 'No customer sender for agent-private');
-            return;
+            return this._agentPrivate;
         }
 
         if (active) {
@@ -359,6 +361,11 @@ export class AudioBridge {
             this._resetAgentPrivate();
             log.info({ callId: this.callId }, 'Agent-private off (customer hears agent again)');
         }
+        return this._agentPrivate;
+    }
+
+    get agentPrivate() {
+        return this._agentPrivate;
     }
 
     // ─────────────────────────────────────────────────────────────────

@@ -113,7 +113,9 @@ class AgentAssignmentCoordinator {
         }
 
         await AgentRepository.updateAgentAvailability(targetAgentId, availability);
-        await this._broadcastAvailability(targetAgentId, availability);
+        // Setting the same value again still confirms it to the agent's sockets,
+        // but isn't a change for the consumer (changed: false).
+        await this._broadcastAvailability(targetAgentId, availability, { changed: target.availability !== availability });
 
         if (availability === AgentAvailability.AVAILABLE) {
             await this.drainForTenant(tenantId).catch((err) =>
@@ -153,6 +155,7 @@ class AgentAssignmentCoordinator {
                 userId: targetAgentId,
                 availability,
                 updatedAt: new Date().toISOString(),
+                changed: availability !== target.availability,   // a resync is only a change after the safety net
             });
 
             if (availability === AgentAvailability.AVAILABLE) {

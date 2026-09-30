@@ -69,7 +69,7 @@ call's media over Redis. SIP needs the gateway in
    [protocol](docs/agent-protocol.md) directly, and registers push tokens
    through the API.
 
-5. **Consume events** at the webhook URL ([events.md](docs/events.md)).
+5. **Consume events** at the webhook URL ([events.md](docs/events.md)). The product can change the URL, pick the event types it wants and rotate the secret itself with `PUT /v1/webhook` ([management-api.md](docs/management-api.md#webhook)).
 
 For local development, `npm run seed:dev -- --phone-number-id <id> --whatsapp-token <token> [--sip-did +961…]`
 creates a `dev` consumer with a demo tenant, agents, a queue and channels, and

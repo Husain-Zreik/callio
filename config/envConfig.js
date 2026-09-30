@@ -182,6 +182,11 @@ export const config = {
             webrtcInterface: process.env.RTPENGINE_WEBRTC_INTERFACE || null,
         },
     },
+    // URLs a consumer sets for itself (PUT /v1/webhook) must be https:// —
+    // Callio POSTs to them. true only for local development and tests.
+    webhooks: {
+        allowHttp: process.env.WEBHOOK_ALLOW_HTTP === "true",
+    },
     // How long call data is kept (core/calls/RetentionService). 0 days = keep.
     retention: {
         sweepSeconds: Math.max(10, Number(process.env.RETENTION_SWEEP_SECONDS ?? 3600) || 3600),

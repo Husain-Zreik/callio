@@ -65,10 +65,12 @@ export class MonitorEventHandler {
         }
 
         try {
-            audioCoordinator.setSupervisorMode(callId, mode);
+            const endedPrivate = audioCoordinator.setSupervisorMode(callId, mode);
             // Confirm to the supervisor, and reflect the mode to the agent so their
             // active-call UI can show "supervisor is whispering" / "joined the call".
             EventBus.emit('call:monitor:mode:changed', { callId, mode, socketId });
+            // Leaving whisper ends the agent's private reply: tell the call room.
+            if (endedPrivate) EventBus.emit('call:agent:private:changed', { callId, active: false });
             log.info({ callId }, `Supervisor mode set to '${mode}'`);
         } catch (error) {
             log.error({ err: error }, 'Mode change failed');
@@ -85,11 +87,16 @@ export class MonitorEventHandler {
         const { callId, active, socketId } = data;
 
         try {
-            audioCoordinator.setAgentPrivate(callId, !!active);
-            // Broadcast to the call room so the agent's UI confirms and the
-            // supervisor's UI can show that the agent is replying privately.
-            EventBus.emit('call:agent:private:changed', { callId, active: !!active, socketId });
-            log.info({ callId }, `Agent-private set to ${!!active}`);
+            const now = await audioCoordinator.setAgentPrivate(callId, !!active);
+            // Broadcast the state the bridge is actually in, so the agent's UI
+            // and the supervisor's indicator never show a mute that didn't happen.
+            EventBus.emit('call:agent:private:changed', { callId, active: now, socketId });
+            if (!!active && !now) {
+                emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED,
+                    message: 'A private reply only works while a supervisor is whispering to you', socketId });
+                return;
+            }
+            log.info({ callId }, `Agent-private set to ${now}`);
         } catch (error) {
             log.error({ err: error }, 'Agent-private change failed');
             emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: error.message, socketId });
@@ -102,7 +109,10 @@ export class MonitorEventHandler {
         try {
             log.info({ callId, agentId: userId }, 'Stopping monitoring');
 
+            // Closing the monitor leg ends a private reply; the agent must hear of it.
+            const wasPrivate = Boolean(audioCoordinator.getBridge(callId)?.agentPrivate);
             await peerRegistry.closePeerConnection(callId, ConnectionType.MONITOR);
+            if (wasPrivate) EventBus.emit('call:agent:private:changed', { callId, active: false });
 
             await agentConnections.detachSocketFromCall(socketId, callId).catch(() => { });
 

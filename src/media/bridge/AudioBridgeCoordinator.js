@@ -97,18 +97,18 @@ export class AudioBridgeCoordinator {
         const bridge = this.activeBridges.get(callId);
         if (!bridge) {
             log.warn({ callId }, 'No active bridge for supervisor mode change');
-            return;
+            return false;
         }
-        bridge.setSupervisorMode(mode);
+        return bridge.setSupervisorMode(mode);
     }
 
     setAgentPrivate(callId, active) {
         const bridge = this.activeBridges.get(callId);
         if (!bridge) {
             log.warn({ callId }, 'No active bridge for agent-private change');
-            return;
+            return false;
         }
-        bridge.setAgentPrivate(active);
+        return bridge.setAgentPrivate(active);
     }
 
     // ─────────────────────────────────────────────────────────────────
