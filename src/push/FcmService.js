@@ -2,27 +2,54 @@ import admin from "firebase-admin";
 import { config } from "../../config/envConfig.js";
 import { notifyLog } from "./notificationLogger.js";
 import pushTokenRepository from "../persistence/PushTokenRepository.js";
+import { pushCredentials } from './PushCredentials.js';
 import { logger } from '../infra/logging/logger.js';
 
 const log = logger('push.FcmService');
 
 class FcmService {
     constructor() {
+        // credentials key ('platform' or '<consumerId>:<fingerprint>') → messaging, or null when unusable
+        this._clients = new Map();
+        // consumerId → its current key, to drop the Firebase app of replaced credentials
+        this._consumerKeys = new Map();
+        // The platform app is set up at startup, so a missing file is reported once, up front.
+        this._messaging(pushCredentials.platformFcm());
+    }
+
+    // One Firebase app per credential set; the platform's is the default app.
+    _messaging(cred) {
+        if (!cred) return null;
+        if (this._clients.has(cred.key)) return this._clients.get(cred.key);
+        if (cred.consumerId != null) this._retire(cred.consumerId, cred.key);
+
+        let messaging = null;
+        const name = cred.key === 'platform' ? '[DEFAULT]' : `consumer:${cred.key}`;
         try {
-            // Reuse existing default app if already initialized — prevents
-            // "app already exists" errors if the module is somehow evaluated twice.
-            const existingApp = admin.apps.find(a => a?.name === '[DEFAULT]');
-            const app = existingApp ?? admin.initializeApp({
-                credential: admin.credential.cert(config.firebase.credentialsPath),
-            });
-            this.fcm = admin.messaging(app);
-            log.info('Firebase Admin initialized');
+            const existingApp = admin.apps.find(a => a?.name === name);
+            const credential = admin.credential.cert(cred.serviceAccount ?? cred.credentialsPath);
+            const app = existingApp ?? (name === '[DEFAULT]' ? admin.initializeApp({ credential }) : admin.initializeApp({ credential }, name));
+            messaging = admin.messaging(app);
+            log.info({ source: cred.source, ...(cred.consumerId != null ? { consumerId: cred.consumerId } : {}) }, 'Firebase Admin initialized');
         } catch (error) {
-            // Missing credentials is a configuration choice (push off), anything else a fault.
-            if (/ENOENT|no such file/.test(error?.message ?? '')) log.warn(`No Firebase credentials at ${config.firebase.credentialsPath} — FCM push disabled`);
-            else log.error({ err: error }, 'Initialization error — FCM push disabled');
-            // this.fcm intentionally left undefined — sendToTokens guards against this
+            // Missing platform credentials is a configuration choice (push off), anything else a fault.
+            if (cred.source === 'platform' && /ENOENT|no such file/.test(error?.message ?? '')) {
+                log.warn(`No Firebase credentials at ${cred.credentialsPath} — FCM push without consumer credentials disabled`);
+            } else {
+                log.error({ err: error, source: cred.source, consumerId: cred.consumerId }, 'Firebase initialization error — FCM push with these credentials disabled');
+            }
         }
+        this._clients.set(cred.key, messaging);
+        return messaging;
+    }
+
+    _retire(consumerId, currentKey) {
+        const previous = this._consumerKeys.get(consumerId);
+        this._consumerKeys.set(consumerId, currentKey);
+        if (!previous || previous === currentKey) return;
+        this._clients.delete(previous);
+        const app = admin.apps.find(a => a?.name === `consumer:${previous}`);
+        app?.delete().catch((err) => log.warn({ consumerId, err }, 'Deleting a replaced Firebase app failed'));
     }
 
     /**
@@ -56,11 +83,14 @@ class FcmService {
      *   this throttling, but that path's registration was confirmed dead
      *   end-to-end (see push_notification_service.dart's own comment) and
      *   fixing that is native-entitlement work out of scope here.
+     * @param {object} [credentials] - pushCredentials' fcm section for the
+     *   agents' consumer (default: the platform's).
      */
-    async sendToTokens(tokens, { title, body, data = {}, ttlSeconds = null, silent = false }) {
+    async sendToTokens(tokens, { title, body, data = {}, ttlSeconds = null, silent = false }, credentials = pushCredentials.platformFcm()) {
         if (!tokens || tokens.length === 0) return;
 
-        if (!this.fcm) {
+        const fcm = this._messaging(credentials);
+        if (!fcm) {
             log.warn({ length: tokens.length }, 'Service not initialized — skipping notification to device(s)');
             return;
         }
@@ -112,7 +142,7 @@ class FcmService {
         };
 
         try {
-            const response = await this.fcm.sendEachForMulticast(message);
+            const response = await fcm.sendEachForMulticast(message);
             notifyLog(
                 `FCM Multicast Sent: ${response.successCount} success, ${response.failureCount} failure`,
             );

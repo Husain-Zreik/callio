@@ -134,6 +134,7 @@ export const config = {
         oneSignal: {
             appId: process.env.ONESIGNAL_APP_ID || null,
             restApiKey: process.env.ONESIGNAL_REST_API_KEY || null,
+            apiUrl: process.env.ONESIGNAL_API_URL || "https://api.onesignal.com/notifications",
             timeoutMs: parseInt(process.env.ONESIGNAL_TIMEOUT || "10000", 10) || 10000,
         },
         // Per-preset overrides — every value is env-tunable so ops can swap

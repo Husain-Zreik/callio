@@ -34,6 +34,8 @@ npm run seed:dev -- --phone-number-id <id> --whatsapp-token <token> [--sip-did +
 npm run sip:trunk -- --name <name> --host <carrier> [--cidr <source/32>]   # create/update a SIP trunk (operator)
 npm run ivr:test -- --consumer <slug> --tenant <ref> --channel <ref> [--off]   # test IVR menu on a real line (DTMF)
 npm run agent:token -- --consumer <slug> --tenant <ref> --agent <ref>   # sign a test agent token
+npm run push:credentials -- --consumer <slug> --show   # also --fcm <sa.json> | --apns <key.p8> … | --remove fcm
+npm run push:credentials -- --consumer <slug> --show | --fcm <sa.json> | --apns <key.p8> … | --remove fcm   # a consumer's push credentials
 npm run demo:agent [-- <port>]    # SDK demo page: http://localhost:5173/examples/agent.html
 
 docker compose -f test/e2e/docker-compose.yml up -d --wait            # MySQL + Redis for tests
@@ -61,7 +63,7 @@ No unit tests, no lint/format config. **Verify behaviour changes with `npm run t
 - `media/` — `webrtc/` (peers, SDP, ICE), `bridge/` (AudioBridge, monitor mixing, customer watchdogs), `dtmf/` (in-band, worker thread), `recording/` (stereo OGG/Opus, worker threads), `playback/` (IVR/queue audio).
 - `http/` — Fastify: `routes/index.js` (every surface), `v1/` Management API (`validate.js`), `auth/apiKeyAuth.js`, `errors.js`, `accessLog.js`, `controllers/` (health, metrics).
 - `realtime/` — agent gateway: `server.js` (Socket.IO, websocket only), `middleware/authMiddleware` (consumer JWT), `handlers/connectionHandler`, `namespaces/call/socketHandlers.js` (client → server), `busHandlers.js` + `handlers/*` (EventBus → socket relays, thin), `managers/RoomManager`.
-- `push/` — `CallPushNotifier` (who gets which push), `FcmService`, `ApnsVoipService`, `OneSignalService`.
+- `push/` — `CallPushNotifier` (who gets which push), `PushCredentials` (the consumer's credentials, else the platform's), `FcmService`, `ApnsVoipService`, `OneSignalService`.
 - `outbox/` — `OutboxDispatcher` (leased, signed, retried delivery of `webhook_deliveries`), `signing.js`.
 - `persistence/` — mysql2 repositories, one per aggregate (raw SQL; Knex only for migrations). DB pool: `config/dbConnection.js`.
 - `infra/` — `redis/`, `cluster/` (call ownership, orphan reaper), `storage/`, `crypto/secretBox`, `logging/`, `monitoring/`.
@@ -91,7 +93,6 @@ PM2 fork-mode workers (`WORKER_COUNT`, each on `BASE_PORT + i`) share no memory;
 - Implemented and covered by `test/e2e`: WhatsApp and SIP, inbound and outbound; queues (`RING_ALL`/`ROUND_ROBIN`/`PRIORITY`) with ring timeout, max wait, overflow and transfer timeout; IVR, transfer, monitoring, recording, push, the Management API and consumer events.
 - Dev environment `callio.pcg-ms.com` (nginx → PM2) runs on Callio's own database. Real inbound calls verified there: WhatsApp, and SIP from the carrier with two-way audio. Open: outbound SIP, carrier DTMF, a real DID (`docs/sip.md`).
 - `sdk/agent-js` — JS agent SDK (browser + Node, TypeScript types) for agents and supervisors; tested by `test/e2e/sdk.test.mjs`. React bindings and the Dart SDK are next.
-- Not yet: per-consumer push credentials (push uses platform credentials from env).
 
 ## History
 

@@ -129,6 +129,30 @@ Agents are also created on their first socket connection (see
 [agent-protocol.md](agent-protocol.md)); `PUT` is how you set roles and names
 ahead of time.
 
+## Push credentials
+
+Your app's own push credentials. Callio pushes your agents' devices with
+them: your Firebase project, your Apple key, your OneSignal app.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `GET` | `/v1/push-credentials` | — | `{ pushCredentials: { fcm, apns, onesignal } }` |
+| `PUT` | `/v1/push-credentials/fcm` | `{ service_account }` — the Firebase service account JSON, as downloaded | `{ fcm }` |
+| `PUT` | `/v1/push-credentials/apns` | `{ key_p8, key_id, team_id, bundle_id, production? }` | `{ apns }` |
+| `PUT` | `/v1/push-credentials/onesignal` | `{ app_id, rest_api_key }` | `{ onesignal }` |
+| `DELETE` | `/v1/push-credentials/{fcm\|apns\|onesignal}` | — | `204` |
+
+- Reads never return a key. They say which app is set: `fcm`
+  `{ projectId, clientEmail }`, `apns` `{ keyId, teamId, bundleId,
+  production }`, `onesignal` `{ appId }`, or `null` when not set.
+- `fcm` sends Android pushes and the iOS alert. `apns` sends the iOS VoIP
+  push (PushKit → CallKit), to topic `<bundle_id>.voip`. `key_p8` is the
+  contents of the `.p8` file; `production` is `true` for TestFlight and App
+  Store builds. `onesignal` sends web push.
+- Keys are checked when set (`400` if one doesn't parse) and stored encrypted.
+- A provider you haven't set uses the platform's credentials, if the
+  deployment has any. A change reaches every worker within a minute.
+
 ## Queues
 
 | Method | Path | Body | Response |

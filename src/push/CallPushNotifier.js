@@ -8,6 +8,9 @@
 // Pushes go out whether or not the agent also has a live socket: a web tab
 // being open says nothing about whether their phone's app is running.
 // SDP is never included — clients fetch call state (calls:sync) on open.
+// Each device is pushed with its agent's consumer's credentials
+// (PushCredentials): every consumer's app is its own Firebase project / Apple
+// bundle / OneSignal app.
 import pushTokenRepository from '../persistence/PushTokenRepository.js';
 import QueueRepository from '../persistence/QueueRepository.js';
 import CallRepository from '../persistence/CallRepository.js';
@@ -15,6 +18,7 @@ import { fcmService } from './FcmService.js';
 import { apnsVoipService } from './ApnsVoipService.js';
 import OneSignalService from './OneSignalService.js';
 import { NotificationPresets, NotificationIcons } from './notificationPresets.js';
+import { pushCredentials } from './PushCredentials.js';
 import { callUuid } from '../core/calls/CallView.js';
 import { logger } from '../infra/logging/logger.js';
 
@@ -46,6 +50,20 @@ function fcmData(data) {
     };
 }
 
+// One send per consumer the rows belong to, with that consumer's credentials
+// for `provider` (fcm / apns / onesignal).
+async function perConsumer(rows, provider, send) {
+    const groups = new Map();
+    for (const row of rows) {
+        const key = String(row.consumer_id);
+        if (!groups.has(key)) groups.set(key, { consumerId: row.consumer_id, tokens: [] });
+        groups.get(key).tokens.push(row.token);
+    }
+    await Promise.all([...groups.values()].map(async ({ consumerId, tokens }) =>
+        send(tokens, (await pushCredentials.forConsumer(consumerId))[provider])
+    ));
+}
+
 class CallPushNotifier {
     /**
      * @param {object} call      IncomingCallPayload / CallView
@@ -69,29 +87,30 @@ class CallPushNotifier {
         if (androidFcm.length) {
             // Data-only so it always reaches the app's background handler instead
             // of the OS auto-displaying (or dropping) a generic notification.
-            sends.push(fcmService.sendToTokens(androidFcm.map((t) => t.token), {
+            sends.push(perConsumer(androidFcm, 'fcm', (tokens, cred) => fcmService.sendToTokens(tokens, {
                 title, body: 'Incoming call', data: fcmData(data), ttlSeconds: RING_TTL_SECONDS, silent: true,
-            }));
+            }, cred)));
         }
         if (iosVoip.length) {
-            sends.push(apnsVoipService.sendVoipPush(iosVoip.map((t) => t.token), data));
+            sends.push(perConsumer(iosVoip, 'apns', (tokens, cred) => apnsVoipService.sendVoipPush(tokens, data, cred)));
         }
         if (iosFcm.length) {
             // A plain banner alongside the VoIP ring, so a missed/dismissed CallKit
             // screen still leaves a way back into the app.
-            sends.push(fcmService.sendToTokens(iosFcm.map((t) => t.token), {
+            sends.push(perConsumer(iosFcm, 'fcm', (tokens, cred) => fcmService.sendToTokens(tokens, {
                 title, body: 'Incoming call', data: fcmData({ ...data, type: 'call.incoming.alert' }),
                 ttlSeconds: RING_TTL_SECONDS, silent: false,
-            }));
+            }, cred)));
         }
         if (web.length) {
-            sends.push(OneSignalService.sendToSubscriptions(web.map((t) => t.token), 'Incoming call', title, data, {
+            sends.push(perConsumer(web, 'onesignal', (tokens, cred) => OneSignalService.sendToSubscriptions(tokens, 'Incoming call', title, data, {
                 icon: NotificationIcons.call,
+                credentials: cred,
                 payload: {
                     ...NotificationPresets.incomingCall,
                     buttons: [{ id: 'answer', text: 'Answer' }, { id: 'decline', text: 'Decline' }],
                 },
-            }));
+            })));
         }
         await Promise.all(sends.map((p) => p.catch((err) =>
             log.error({ callId: data.callId, err }, 'Incoming push failed')
@@ -112,12 +131,12 @@ class CallPushNotifier {
 
         const sends = [];
         if (androidFcm.length) {
-            sends.push(fcmService.sendToTokens(androidFcm.map((t) => t.token), {
+            sends.push(perConsumer(androidFcm, 'fcm', (tokens, cred) => fcmService.sendToTokens(tokens, {
                 title: '', body: '', data: fcmData(data), ttlSeconds: RING_TTL_SECONDS, silent: true,
-            }));
+            }, cred)));
         }
         if (iosVoip.length) {
-            sends.push(apnsVoipService.sendVoipPush(iosVoip.map((t) => t.token), data));
+            sends.push(perConsumer(iosVoip, 'apns', (tokens, cred) => apnsVoipService.sendVoipPush(tokens, data, cred)));
         }
         await Promise.all(sends.map((p) => p.catch((err) =>
             log.error({ callId, err }, 'Cancel push failed')

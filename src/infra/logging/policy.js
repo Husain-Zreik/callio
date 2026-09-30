@@ -52,7 +52,7 @@ export const BASE_FIELDS = Object.freeze(['time', 'level', 'msg', 'service', 'en
 export const REDACT_KEYS = Object.freeze(['token', 'accesstoken', 'access_token', 'refresh_token', 'apikey', 'api_key',
     'secret', 'appsecret', 'client_secret', 'password', 'passwd', 'authorization', 'proxy-authorization', 'cookie',
     'set-cookie', 'credential', 'credentials', 'privatekey', 'private_key', 'signingkey', 'signing_key', 'masterkey',
-    'jwt', 'x-api-key', 'x-hub-signature-256']);
+    'jwt', 'x-api-key', 'x-hub-signature-256', 'rest_api_key', 'restapikey', 'key_p8', 'keypem', 'service_account', 'serviceaccount']);
 export const REDACT_DEPTH = 4;
 export const REDACT_CENSOR = '[redacted]';
 

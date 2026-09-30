@@ -29,18 +29,23 @@ class PushTokenRepository {
     }
 
     // Active tokens for these agents from one provider, optionally one platform,
-    // optionally excluding one device (the one that just answered).
+    // optionally excluding one device (the one that just answered). Each row
+    // carries its agent's consumer_id: a push goes out with that consumer's
+    // credentials.
     async getTokens(agentIds, provider, { platform = null, excludeDeviceId = null } = {}) {
         const ids = [...new Set((agentIds || []).filter((id) => id != null))];
         if (!ids.length) return [];
         const placeholders = ids.map(() => '?').join(',');
         const params = [...ids, provider];
         let extra = '';
-        if (platform) { extra += ' AND platform = ?'; params.push(platform); }
-        if (excludeDeviceId) { extra += ' AND device_id != ?'; params.push(excludeDeviceId); }
+        if (platform) { extra += ' AND p.platform = ?'; params.push(platform); }
+        if (excludeDeviceId) { extra += ' AND p.device_id != ?'; params.push(excludeDeviceId); }
         const [rows] = await connection.execute(
-            `SELECT agent_id, device_id, platform, token FROM agent_push_tokens
-             WHERE agent_id IN (${placeholders}) AND provider = ? AND is_active = 1 ${extra}`,
+            `SELECT p.agent_id, p.device_id, p.platform, p.token, t.consumer_id
+             FROM agent_push_tokens p
+             JOIN agents a ON a.id = p.agent_id
+             JOIN tenants t ON t.id = a.tenant_id
+             WHERE p.agent_id IN (${placeholders}) AND p.provider = ? AND p.is_active = 1 ${extra}`,
             params
         );
         return rows;

@@ -88,6 +88,10 @@ agent also has a live socket: an open web tab says nothing about the phone app.
 | iOS | APNs VoIP (CallKit) + an FCM visible alert | `call.incoming`, `call.cancelled`; alert `call.incoming.alert` |
 | Web | OneSignal | `call.incoming` |
 
+- **Credentials:** each device is pushed with its agent's consumer's credentials
+  (`consumers.push_credentials`, `src/push/PushCredentials.js`), falling back per provider to the
+  platform's from env. The senders keep one Firebase app / APNs connection per credential set and
+  drop the old one when a consumer replaces its credentials.
 - **Fields:** `call_id`, `call_uuid`, `tenant_id`, `channel`, `customer_name`, `customer_address`.
   There is never any SDP: the app connects and sends `calls:sync`.
 - **Where pushes are sent from:** the `call:incoming` and `call:offer_withdrawn` relays
@@ -461,7 +465,4 @@ Then `server.close()` and exit.
 
 ## Known gaps
 
-- **Per-consumer push credentials aren't used.** Push uses platform credentials from env.
-  `consumers.push_credentials` is stored (`ConsumerRepository.getPushCredentials`) but nothing in
-  `src/push/` reads it.
 - **Boundary leaks.** Listed under [Boundaries](#boundaries).

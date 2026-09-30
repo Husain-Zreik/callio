@@ -3,7 +3,7 @@
 // webhook and push credentials.
 import { createHash } from 'crypto';
 import connection from '../../config/dbConnection.js';
-import { decryptJson, decryptSecret } from '../infra/crypto/secretBox.js';
+import { decryptJson, decryptSecret, encryptJson } from '../infra/crypto/secretBox.js';
 import { logger } from '../infra/logging/logger.js';
 
 const log = logger('persistence.ConsumerRepository');
@@ -73,6 +73,29 @@ class ConsumerRepository {
     async getPushCredentials(consumerId) {
         const [rows] = await connection.execute('SELECT push_credentials FROM consumers WHERE id = ?', [consumerId]);
         return rows[0]?.push_credentials ? decryptJson(rows[0].push_credentials) : null;
+    }
+
+    // Replace one provider's section ({ fcm | apns | onesignal }); null removes
+    // it. Read-modify-write under a row lock, so two providers set at once both
+    // survive. Returns the whole new object.
+    async setPushCredentials(consumerId, provider, section) {
+        const conn = await connection.getConnection();
+        try {
+            await conn.beginTransaction();
+            const [rows] = await conn.execute('SELECT push_credentials FROM consumers WHERE id = ? FOR UPDATE', [consumerId]);
+            const current = rows[0]?.push_credentials ? decryptJson(rows[0].push_credentials) : {};
+            const next = { ...current, [provider]: section };
+            if (section == null) delete next[provider];
+            await conn.execute('UPDATE consumers SET push_credentials = ?, updated_at = NOW() WHERE id = ?',
+                [Object.keys(next).length ? encryptJson(next) : null, consumerId]);
+            await conn.commit();
+            return next;
+        } catch (err) {
+            await conn.rollback().catch(() => { });
+            throw err;
+        } finally {
+            conn.release();
+        }
     }
 }
 

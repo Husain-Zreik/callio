@@ -1,20 +1,18 @@
 import axios from 'axios';
 import pushTokenRepository from '../persistence/PushTokenRepository.js';
 import { config } from '../../config/envConfig.js';
+import { pushCredentials } from './PushCredentials.js';
 import { logger } from '../infra/logging/logger.js';
 
 const log = logger('push.OneSignalService');
 
 class OneSignalService {
     constructor() {
-        this.appId = config.notifications.oneSignal.appId;
-        this.restApiKey = config.notifications.oneSignal.restApiKey;
-        this.apiUrl = 'https://api.onesignal.com/notifications';
-        this.isConfigured = !!(this.appId && this.restApiKey);
+        this.apiUrl = config.notifications.oneSignal.apiUrl;
         this.timeout = config.notifications.oneSignal.timeoutMs; // 10 seconds default
 
-        if (!this.isConfigured) {
-            log.warn('OneSignal not configured (ONESIGNAL_APP_ID / ONESIGNAL_REST_API_KEY) — web push disabled');
+        if (!pushCredentials.platformOneSignal()) {
+            log.warn('OneSignal not configured (ONESIGNAL_APP_ID / ONESIGNAL_REST_API_KEY) — web push without consumer credentials disabled');
         } else {
             log.info('OneSignal Service initialized');
         }
@@ -36,10 +34,13 @@ class OneSignalService {
      * @param {object} [options.payload]             ANY extra OneSignal fields, merged into the request
      *                                               (use this for ttl, sounds, channels, ios_category,
      *                                                vibration patterns, presets, etc.)
+     * @param {object} [options.credentials]         pushCredentials' onesignal section for the
+     *                                               agents' consumer (default: the platform's)
      */
     async sendToSubscriptions(subscriptionIds, title, message, data = {}, options = {}) {
+        const credentials = options.credentials === undefined ? pushCredentials.platformOneSignal() : options.credentials;
         try {
-            if (!this.isConfigured) {
+            if (!credentials) {
                 log.warn('OneSignal not configured');
                 return { success: false, message: 'OneSignal not configured', recipients: 0 };
             }
@@ -57,14 +58,14 @@ class OneSignalService {
                 priority: options.priority ?? 10,
                 ...this._expandShorthandOptions(options),
                 ...(options.payload || {}),
-                app_id: this.appId,
+                app_id: credentials.appId,
                 include_subscription_ids: idsArray,
                 headings: { en: title },
                 contents: { en: message },
                 data: data,
             };
 
-            const response = await this._postWithRetry(payload);
+            const response = await this._postWithRetry(payload, credentials.restApiKey);
 
             const responseBody = response?.data ?? {};
             const invalidIds = this._extractInvalidSubscriptionIds(responseBody);
@@ -137,7 +138,7 @@ class OneSignalService {
      */
     async sendToUsers(userIds, title, message, data = {}, options = {}) {
         try {
-            if (!this.isConfigured) {
+            if (options.credentials === undefined ? !pushCredentials.platformOneSignal() : !options.credentials) {
                 return {
                     success: false,
                     message: 'OneSignal not configured',
@@ -171,7 +172,7 @@ class OneSignalService {
         }
     }
 
-    async _postWithRetry(payload, maxRetries = 2) {
+    async _postWithRetry(payload, restApiKey, maxRetries = 2) {
         let lastError;
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
             if (attempt > 0) {
@@ -182,7 +183,7 @@ class OneSignalService {
                 return await axios.post(this.apiUrl, payload, {
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': `Key ${this.restApiKey}`,
+                        'Authorization': `Key ${restApiKey}`,
                     },
                     timeout: this.timeout,
                 });

@@ -116,7 +116,7 @@ Only the columns that need explanation; see each migration for the full list.
 | `status` | `ACTIVE` / `SUSPENDED`. A suspended consumer's API keys get 403 (`src/http/auth/apiKeyAuth.js`) and its agent tokens are refused (`src/realtime/middleware/authMiddleware.js`). |
 | `event_webhook_url`, `event_webhook_secret` | Where events are POSTed, and the signing secret (encrypted). |
 | `lookup_url` | Optional pre-ring customer lookup (`src/core/calls/CustomerLookup.js`); short timeout, failures never block the call. |
-| `push_credentials` | Encrypted JSON. **Stored but not used yet**: push sends with the platform credentials from env. |
+| `push_credentials` | Encrypted JSON, one optional section per provider: `fcm` `{ service_account }`, `apns` `{ key_p8, key_id, team_id, bundle_id, production }`, `onesignal` `{ app_id, rest_api_key }`. Pushes to the consumer's agents use it; a provider not set falls back to the platform credentials from env (`src/push/PushCredentials.js`). Set with `PUT /v1/push-credentials/{provider}` or `npm run push:credentials`. |
 
 `consumer_api_keys`: `key_hash` unique, `key_prefix` for identifying a key in
 logs/UI, `expires_at` / `revoked_at`, `last_used_at` updated on use.

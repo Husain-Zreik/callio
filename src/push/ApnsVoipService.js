@@ -1,5 +1,5 @@
 import apn from "@parse/node-apn";
-import { config } from "../../config/envConfig.js";
+import { pushCredentials } from "./PushCredentials.js";
 import pushTokenRepository from "../persistence/PushTokenRepository.js";
 import { callUuid } from "../core/calls/CallView.js";
 import { logger } from '../infra/logging/logger.js';
@@ -13,17 +13,29 @@ const log = logger('push.ApnsVoipService');
 // native iOS side (PKPushRegistryDelegate) expects to receive.
 class ApnsVoipService {
     constructor() {
-        const { apnsKeyPath, apnsKeyId, apnsTeamId, production } = config.apple;
-        if (!apnsKeyId || !apnsTeamId) {
-            log.warn('APNS_KEY_ID/APNS_TEAM_ID not configured — VoIP push sending disabled');
-            this.provider = null;
-            return;
+        // credentials key → { provider, bundleId }, or null when unusable
+        this._clients = new Map();
+        // consumerId → its current key, to shut down the provider of replaced credentials
+        this._consumerKeys = new Map();
+        if (!pushCredentials.platformApns()) {
+            log.warn('APNS_KEY_ID/APNS_TEAM_ID not configured — VoIP push without consumer credentials disabled');
+        } else {
+            this._client(pushCredentials.platformApns());
         }
+    }
 
+    // One APNs provider (HTTP/2 connection) per credential set.
+    _client(cred) {
+        if (!cred) return null;
+        if (this._clients.has(cred.key)) return this._clients.get(cred.key);
+        if (cred.consumerId != null) this._retire(cred.consumerId, cred.key);
+
+        let client = null;
         try {
-            this.provider = new apn.Provider({
-                token: { key: apnsKeyPath, keyId: apnsKeyId, teamId: apnsTeamId },
-                production,
+            const provider = new apn.Provider({
+                // key: a .p8 file path (platform) or the key itself (consumer).
+                token: { key: cred.keyPem ?? cred.keyPath, keyId: cred.keyId, teamId: cred.teamId },
+                production: cred.production,
                 // Default is 5000ms — too slow for a live call ring: if Apple
                 // hasn't responded by then it's already an anomaly, and every
                 // ms spent waiting on a stalled request is ms not spent on a
@@ -32,21 +44,33 @@ class ApnsVoipService {
                 // worst-case all-timeouts path from ~16s to ~8.5s.
                 requestTimeout: 2500,
             });
-            log.info(`Provider initialized (production=${production})`);
+            client = { provider, bundleId: cred.bundleId };
+            log.info({ source: cred.source, production: cred.production, ...(cred.consumerId != null ? { consumerId: cred.consumerId } : {}) }, 'APNs provider initialized');
         } catch (error) {
-            log.error({ err: error }, 'Initialization error');
-            this.provider = null;
+            log.error({ err: error, source: cred.source, consumerId: cred.consumerId }, 'APNs initialization error — VoIP push with these credentials disabled');
         }
+        this._clients.set(cred.key, client);
+        return client;
+    }
+
+    _retire(consumerId, currentKey) {
+        const previous = this._consumerKeys.get(consumerId);
+        this._consumerKeys.set(consumerId, currentKey);
+        if (!previous || previous === currentKey) return;
+        this._clients.get(previous)?.provider.shutdown();
+        this._clients.delete(previous);
     }
 
     /**
      * @param {string[]} tokens
      * @param {object} callData - { type, callId, tenantId, channel, customerName, customerAddress }
+     * @param {object} [credentials] - pushCredentials' apns section for the agents' consumer (default: the platform's)
      */
-    async sendVoipPush(tokens, callData) {
+    async sendVoipPush(tokens, callData, credentials = pushCredentials.platformApns()) {
         if (!tokens || tokens.length === 0) return;
 
-        if (!this.provider) {
+        const client = this._client(credentials);
+        if (!client) {
             log.warn({ length: tokens.length }, 'Provider not initialized — skipping VoIP push to device(s)');
             return;
         }
@@ -58,7 +82,7 @@ class ApnsVoipService {
         note.pushType = "voip";
         // VoIP pushes require the bundle id with ".voip" appended, distinct
         // from the plain bundle-id topic used for alert/background pushes.
-        note.topic = `${config.apple.bundleId}.voip`;
+        note.topic = `${client.bundleId}.voip`;
         note.priority = 10;
         // 0, not a future timestamp — a VoIP push has no value once it's
         // not immediately deliverable: either the call is live right now, or
@@ -121,7 +145,7 @@ class ApnsVoipService {
         for (let attempt = 1; attempt <= maxAttempts && pendingTokens.length > 0; attempt++) {
             let result;
             try {
-                result = await this.provider.send(note, pendingTokens);
+                result = await client.provider.send(note, pendingTokens);
             } catch (error) {
                 // Deliberately non-retrying, unlike the per-token loop below —
                 // node-apn's Provider.send() resolves per-token failures

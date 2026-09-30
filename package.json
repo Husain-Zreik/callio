@@ -23,6 +23,7 @@
     "sip:trunk": "node scripts/sip-trunk.js",
     "ivr:test": "node scripts/ivr-test.js",
     "agent:token": "node scripts/agent-token.js",
+    "push:credentials": "node scripts/push-credentials.js",
     "demo:agent": "node sdk/agent-js/examples/serve.mjs"
   },
   "dependencies": {

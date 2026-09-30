@@ -51,6 +51,7 @@ const env = {
     CALLIO_MASTER_KEY: randomBytes(32).toString('base64'),
     // Keep real provider credentials out of the test process.
     AWS_ACCESS_KEY_ID: '', AWS_SECRET_ACCESS_KEY: '', ONESIGNAL_APP_ID: '', APNS_KEY_ID: '',
+    ONESIGNAL_API_URL: 'http://127.0.0.1:3998/notifications',   // push.test.mjs's fake OneSignal
     FIREBASE_SERVICE_ACCOUNT_PATH: join(work, 'no-firebase.json'),
     // Each suite's Callio output (pretty, debug) lands in <work>/<suite>.callio.log.
     LOG_LEVEL: process.env.TEST_LOG_LEVEL || 'debug', LOG_STDOUT: 'true', LOG_FORMAT: 'pretty',
