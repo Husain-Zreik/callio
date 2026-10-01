@@ -20,6 +20,7 @@ import CallRepository from '../../persistence/CallRepository.js';
 import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinator.js';
 import { customerChannels } from '../channels/CustomerChannels.js';
 import { callLifecycleLogger } from './CallLifecycleLogger.js';
+import { callParticipants } from './CallParticipants.js';
 import { peerRegistry } from '../../media/webrtc/PeerRegistry.js';
 import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
 import { EventTypes } from '../events/EventTypes.js';
@@ -76,6 +77,8 @@ class CallTerminator {
         // Before call:terminated: the consumer's call.ended is built from the row.
         await CallRepository.fillQueueDuration(callId)
             .catch((err) => log.warn({ callId, err }, 'Setting queue_duration failed'));
+
+        await callParticipants.callEnded(callId);
 
         EventBus.emit('call:terminated', {
             callId,

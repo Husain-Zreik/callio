@@ -228,6 +228,11 @@ try {
         && Boolean(t3?.transferredAt), JSON.stringify(t3));
     a1.peer?.close(); a1.peer = null;
     await endByAgent(a2, row3.id);
+    const people3 = (await api('GET', `/v1/calls/${row3.id}`)).body.participants ?? [];
+    const stays = people3.map((p) => `${p.kind}:${p.agentRef ?? '-'}:${p.leaveReason}`);
+    check('participants: the customer, agent-1 twice (each stay handed on), agent-2 to the end, the supervisor until they stopped',
+        JSON.stringify(stays) === JSON.stringify(['CUSTOMER:-:ENDED', 'AGENT:agent-1:TRANSFERRED', 'SUPERVISOR:sup-1:MONITOR_STOPPED', 'AGENT:agent-1:TRANSFERRED', 'AGENT:agent-2:ENDED'])
+        && people3.every((p) => p.joinedAt && p.leftAt), JSON.stringify(stays));
 
     // ── 6. IVR with an in-band DTMF key press ──
     mkdirSync(STORAGE, { recursive: true });

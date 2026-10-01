@@ -93,7 +93,7 @@ async function resetState() {
     const db = await mysql.createConnection({ host: env.DB_HOST, port: Number(env.DB_PORT), user: env.DB_USERNAME, password: env.DB_PASSWORD, database: env.DB_DATABASE });
     await db.query('SET FOREIGN_KEY_CHECKS=0');
     for (const t of ['webhook_deliveries', 'call_recordings', 'ivr_session_inputs', 'ivr_sessions', 'call_transfer_logs',
-        'call_lifecycle_events', 'call_connections', 'calls']) await db.query(`TRUNCATE ${t}`);
+        'call_lifecycle_events', 'call_participants', 'call_connections', 'calls']) await db.query(`TRUNCATE ${t}`);
     await db.query('SET FOREIGN_KEY_CHECKS=1');
     await db.query("UPDATE agents SET availability = 'OFFLINE'");
     await db.end();

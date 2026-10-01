@@ -11,8 +11,9 @@ import { queueRouter } from '../../routing/QueueRouter.js';
 import { callLifecycleLogger } from '../../calls/CallLifecycleLogger.js';
 import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
 import { sdpCoordinator } from '../../../media/webrtc/SDPCoordinator.js';
-import { ConnectionType, AssignmentType, AgentRole, InitiatorType, CallStatus } from '../../constants/CallConstants.js';
+import { ConnectionType, AssignmentType, AgentRole, InitiatorType, CallStatus, ParticipantKind, LeaveReason } from '../../constants/CallConstants.js';
 import { IncomingCallPayload } from '../../calls/IncomingCallPayload.js';
+import { callParticipants } from '../../calls/CallParticipants.js';
 import { logger } from '../../../infra/logging/logger.js';
 
 const log = logger('core.events.TransferEventHandler');
@@ -64,7 +65,10 @@ export class TransferEventHandler {
             // The target must accept within CALL_TRANSFER_TIMEOUT_SECONDS (QueueTimeoutService).
             if (call.status === CallStatus.IN_PROGRESS) await CallRepository.markHandoverOffered(callId, resolved.newAgentId);
 
-            if (oldAgentId) await agentAssignmentCoordinator.releaseAgentIfIdle(oldAgentId);
+            if (oldAgentId) {
+                await callParticipants.leave(callId, { kind: ParticipantKind.AGENT, agentId: oldAgentId, reason: LeaveReason.TRANSFERRED });
+                await agentAssignmentCoordinator.releaseAgentIfIdle(oldAgentId);
+            }
 
             // Replace the AGENT leg: close the old agent's peer, offer a fresh one to the new agent.
             await peerRegistry.closePeerConnection(callId, ConnectionType.AGENT);

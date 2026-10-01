@@ -41,6 +41,7 @@ consumer's migration system touch this database.
 | `20260930000002_add_consumer_to_calls_terminated_by.js` | `calls.terminated_by` gains `CONSUMER` |
 | `20260930120000_add_history_indexes_and_lifecycle_tenant.js` | `calls` `(tenant_id, created_at)` and `(tenant_id, ended_at)`; `call_lifecycle_events.tenant_id` (backfilled) + `(tenant_id, occurred_at)`; `agent_push_tokens` unique `(provider, token)`, `is_active` dropped |
 | `20260930150000_add_consumer_event_types.js` | `consumers.event_types` |
+| `20261001120000_create_call_participants_table.js` | `call_participants` |
 
 ## Overview
 
@@ -76,6 +77,7 @@ consumer ─┬─ api keys, signing keys, webhook_deliveries
 | `channels` | Customer-facing lines: `WHATSAPP` (a Meta phone number) or `SIP` (a DID). |
 | `ivr_flows` | IVR flow graphs and their trigger conditions, tenant-wide or per channel. |
 | `calls` | One row per call between a channel and a customer. |
+| `call_participants` | Who is in a call (customer, agents, supervisors), when they joined and left. |
 | `call_connections` | One row per media leg type per call. |
 | `call_lifecycle_events` | Append-only audit trail per call. |
 | `call_transfer_logs` | Transfers to an agent or into a queue. |
@@ -261,6 +263,22 @@ leg now.
 | `connection_state` | `NEW` / `CONNECTING` / `CONNECTED` / `DISCONNECTED` / `FAILED` / `CLOSED`. |
 | `ice_gathering_state`, `ice_connection_state` | WebRTC states, uppercase. |
 | `sdp_type`, `local_sdp`, `remote_sdp`, `ice_candidates`, `media_types` | Diagnostics. |
+
+### call_participants
+
+Who is in a call: one row per stay. A transfer closes the old agent's row
+(`TRANSFERRED`) and the new agent gets one on accept; supervisors get one per
+monitoring session; the call ending closes every open row (`ENDED`). Open
+while `left_at` is NULL; `src/core/calls/CallParticipants.js` keeps at most one
+open row per (call, kind, agent). Replaces `call_connections` once media leaves
+Node ([media-architecture.md](media-architecture.md#data-model)).
+
+| Column | Values |
+|---|---|
+| `kind` | `CUSTOMER` / `AGENT` / `SUPERVISOR`. |
+| `agent_id`, `device_id` | The agent or supervisor, and their device (updated on a reconnect). NULL for the customer. |
+| `media_node` | The media server the leg runs on (set once media runs there). |
+| `joined_at`, `left_at`, `leave_reason` | `leave_reason`: `ENDED` / `TRANSFERRED` / `MONITOR_STOPPED`. |
 
 ### call_lifecycle_events
 

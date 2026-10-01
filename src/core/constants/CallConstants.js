@@ -9,6 +9,20 @@ export const ConnectionType = Object.freeze({
     MONITOR: 'MONITOR',
 });
 
+// Who a call participant is (call_participants.kind).
+export const ParticipantKind = Object.freeze({
+    CUSTOMER: 'CUSTOMER',
+    AGENT: 'AGENT',
+    SUPERVISOR: 'SUPERVISOR',
+});
+
+// Why a participant left (call_participants.leave_reason).
+export const LeaveReason = Object.freeze({
+    ENDED: 'ENDED',               // the call ended
+    TRANSFERRED: 'TRANSFERRED',   // an agent handed the call on
+    MONITOR_STOPPED: 'MONITOR_STOPPED',
+});
+
 // How the customer is connected (calls.channel / channels.type).
 export const Channel = Object.freeze({
     WHATSAPP: 'WHATSAPP',

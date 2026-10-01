@@ -464,7 +464,7 @@ removed from storage; an object you registered by `storage_key` is left alone.
 |---|---|---|---|
 | `POST` | `/v1/tenants/{t}/calls` | Outbound intent — see below | `201 { call }` |
 | `GET` | `/v1/tenants/{t}/calls` | `?status&direction&agent_ref&external_ref&customer&channel_ref&queue_ref&from&to&limit&before_id` | `{ calls, nextBeforeId }` |
-| `GET` | `/v1/calls/{callId}` | — | `{ call, legs, events, transfers, ivrSessions, recording }` |
+| `GET` | `/v1/calls/{callId}` | — | `{ call, participants, legs, events, transfers, ivrSessions, recording }` |
 | `PATCH` | `/v1/calls/{callId}` | `{ external_ref?, consumer_metadata? }` | `{ call }` |
 | `POST` | `/v1/calls/{callId}/terminate` | — | `202 { accepted: true }` |
 | `GET` | `/v1/calls/{callId}/recording` | — | `{ url, expiresInSeconds, format, channelMap }` |
@@ -483,7 +483,13 @@ removed from storage; an object you registered by `storage_key` is left alone.
   matches nothing); `limit` 1–200, default 50. Pages are newest first; pass
   `nextBeforeId` as `before_id` for the next page. `nextBeforeId` is `null`
   only when the page is empty.
-- **Detail:** `legs` — `[{ type: AGENT|CUSTOMER|MONITOR, agentId, deviceId,
+- **Detail:** `participants` — who was in the call and when, in join order:
+  `[{ kind: CUSTOMER|AGENT|SUPERVISOR, agentId, agentRef, deviceId, joinedAt,
+  leftAt, leaveReason }]`. `leftAt` is `null` while they're in; `leaveReason`
+  is `ENDED` (the call ended), `TRANSFERRED` (an agent handed it on) or
+  `MONITOR_STOPPED`. The customer joins on arrival (inbound) or when they
+  answer (outbound); an agent when they accept or start the call. `legs` —
+  `[{ type: AGENT|CUSTOMER|MONITOR, agentId, deviceId,
   state, connectedAt, disconnectedAt }]`; `events` — the lifecycle log,
   `[{ type, agentId, occurredAt, durationSeconds, metadata }]`; `recording` —
   `{ id, status, durationSeconds, format, channelMap, completedAt }` or

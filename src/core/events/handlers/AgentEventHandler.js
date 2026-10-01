@@ -20,9 +20,10 @@ import { queueRouter } from '../../routing/QueueRouter.js';
 import { IncomingCallPayload } from '../../calls/IncomingCallPayload.js';
 import { toCallView } from '../../calls/CallView.js';
 import { callTerminator } from '../../calls/CallTerminator.js';
-import { AssignmentType, AgentAvailability } from '../../constants/CallConstants.js';
+import { AssignmentType, AgentAvailability, ParticipantKind } from '../../constants/CallConstants.js';
 import { logger } from '../../../infra/logging/logger.js';
 import { endedDuringWork } from '../../calls/endedDuringWork.js';
+import { callParticipants } from '../../calls/CallParticipants.js';
 
 const log = logger('core.events.AgentEventHandler');
 
@@ -192,6 +193,10 @@ export class AgentEventHandler {
             // Who is on the AGENT leg now.
             CallConnectionRepository.updateAgentId(callId, ConnectionType.AGENT, userId)
                 .catch((err) => log.error({ callId, err }, 'Failed to persist agent'));
+
+            await callParticipants.join(callRecord ?? { id: callId, tenant_id: tenantId }, {
+                kind: ParticipantKind.AGENT, agentId: userId, deviceId: deviceId ?? null,
+            });
 
             const agentName = await AgentRepository.getNameById(userId);
 
@@ -442,6 +447,7 @@ export class AgentEventHandler {
 
             CallConnectionRepository.updateAgentId(callId, ConnectionType.AGENT, userId)
                 .catch((err) => log.error({ callId, err }, 'Failed to persist agent'));
+            await callParticipants.agentDevice(callId, userId, deviceId ?? null);
             const agentName = await AgentRepository.getNameById(userId);
 
             await callLifecycleLogger.logReconnected(callId, tenantId, userId, {

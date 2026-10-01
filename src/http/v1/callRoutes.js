@@ -5,6 +5,7 @@ import AgentRepository from '../../persistence/AgentRepository.js';
 import TenantRepository from '../../persistence/TenantRepository.js';
 import ChannelRepository from '../../persistence/ChannelRepository.js';
 import CallConnectionRepository from '../../persistence/CallConnectionRepository.js';
+import CallParticipantRepository from '../../persistence/CallParticipantRepository.js';
 import CallLifecycleEventRepository from '../../persistence/CallLifecycleEventRepository.js';
 import CallTransferLogRepository from '../../persistence/CallTransferLogRepository.js';
 import IvrRepository from '../../persistence/IvrRepository.js';
@@ -121,8 +122,9 @@ export default async function callRoutes(fastify) {
 
     fastify.get('/calls/:callId', async (request) => {
         const { call, tenant } = await ownedCall(request);
-        const [[view], legs, events, transfers, ivrSessions, recording] = await Promise.all([
+        const [[view], participants, legs, events, transfers, ivrSessions, recording] = await Promise.all([
             views([call], tenant),
+            CallParticipantRepository.findByCall(call.id),
             Promise.all(['AGENT', 'CUSTOMER', 'MONITOR'].map((t) => CallConnectionRepository.findByCallAndType(call.id, t))),
             CallLifecycleEventRepository.listForCall(call.id),
             CallTransferLogRepository.listForCall(call.id),
@@ -131,6 +133,10 @@ export default async function callRoutes(fastify) {
         ]);
         return {
             call: view,
+            participants: participants.map((p) => ({
+                kind: p.kind, agentId: p.agent_id, agentRef: p.agent_ref, deviceId: p.device_id,
+                joinedAt: p.joined_at, leftAt: p.left_at, leaveReason: p.leave_reason,
+            })),
             legs: legs.filter(Boolean).map((l) => ({
                 type: l.connection_type, agentId: l.agent_id, deviceId: l.device_id, state: l.connection_state,
                 connectedAt: l.connected_at, disconnectedAt: l.disconnected_at,

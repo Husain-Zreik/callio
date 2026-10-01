@@ -140,6 +140,15 @@ try {
     check('call detail API returns legs, lifecycle events and the final state',
         detail.body.call?.status === 'TERMINATED' && detail.body.legs?.length >= 2 && detail.body.events?.length >= 3,
         `legs=${detail.body.legs?.map((l) => l.type).join(',')}`);
+    const people = detail.body.participants ?? [];
+    check('participants: the customer and agent-1 (on the device it moved to), both until the call ended',
+        people.length === 2 && people[0].kind === 'CUSTOMER' && people[1].kind === 'AGENT' && people[1].agentRef === 'agent-1'
+        && people[1].deviceId === 'agent-1-phone' && people.every((p) => p.leaveReason === 'ENDED' && p.joinedAt && p.leftAt),
+        JSON.stringify(people.map((p) => [p.kind, p.agentRef, p.deviceId, p.leaveReason])));
+    const outPeople = (await api('GET', `/v1/calls/${outId}`)).body.participants ?? [];
+    check('outbound participants: agent-2 from call:start, the customer from the answer',
+        outPeople.length === 2 && outPeople[0].kind === 'AGENT' && outPeople[0].agentRef === 'agent-2' && outPeople[1].kind === 'CUSTOMER'
+        && outPeople.every((p) => p.leaveReason === 'ENDED'), JSON.stringify(outPeople.map((p) => [p.kind, p.agentRef, p.leaveReason])));
 
     // ── Consumer events ──
     await waitFor(() => receiver.events.some((e) => e.callId === outId && e.type === 'call.ended'), 15000, 'call.ended delivered');

@@ -20,8 +20,9 @@ import { iceCoordinator } from '../../../media/webrtc/ice/ICECandidateCoordinato
 import { agentAssignmentCoordinator } from '../../routing/AgentAssignmentCoordinator.js';
 import { toCallView } from '../../calls/CallView.js';
 import { callTerminator } from '../../calls/CallTerminator.js';
+import { callParticipants } from '../../calls/CallParticipants.js';
 import {
-    ConnectionType, CallDirection, CallStatus, AgentAvailability, TerminationReason, TerminatedBy,
+    ConnectionType, CallDirection, CallStatus, AgentAvailability, TerminationReason, TerminatedBy, ParticipantKind,
 } from '../../constants/CallConstants.js';
 import { logger } from '../../../infra/logging/logger.js';
 
@@ -112,6 +113,8 @@ export class InitiationEventHandler {
             .catch((err) => log.error({ callId, err }, 'Failed to persist deviceId'));
         CallConnectionRepository.updateAgentId(callId, ConnectionType.AGENT, userId)
             .catch((err) => log.error({ callId, err }, 'Failed to persist agent'));
+
+        await callParticipants.join(call, { kind: ParticipantKind.AGENT, agentId: userId, deviceId: deviceId ?? null });
 
         await AgentRepository.updateAgentAvailability(userId, AgentAvailability.ON_CALL);
         EventBus.emit('call:agent_availability', {

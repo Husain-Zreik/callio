@@ -9,7 +9,8 @@ import { iceCoordinator } from '../../../media/webrtc/ice/ICECandidateCoordinato
 import { audioCoordinator } from '../../../media/bridge/AudioCoordinator.js';
 import { CallErrorCodes } from '../CallErrorCodes.js';
 import { emitCallError } from '../CallErrorEmitter.js';
-import { ConnectionType } from '../../constants/CallConstants.js';
+import { ConnectionType, ParticipantKind, LeaveReason } from '../../constants/CallConstants.js';
+import { callParticipants } from '../../calls/CallParticipants.js';
 import { logger } from '../../../infra/logging/logger.js';
 
 const log = logger('core.events.MonitorEventHandler');
@@ -34,6 +35,7 @@ export class MonitorEventHandler {
             const sdpAnswer = await sdpCoordinator.createSDPAnswer(callId, sdpOffer, ConnectionType.MONITOR);
             iceCoordinator.markClientReady(callId);
 
+            await callParticipants.join(call, { kind: ParticipantKind.SUPERVISOR, agentId: userId });
             log.info({ callId }, 'Monitoring session created');
 
             EventBus.emit('call:monitor:started', { callId, sdpAnswer, socketId });
@@ -112,6 +114,7 @@ export class MonitorEventHandler {
             // Closing the monitor leg ends a private reply; the agent must hear of it.
             const wasPrivate = Boolean(audioCoordinator.getBridge(callId)?.agentPrivate);
             await peerRegistry.closePeerConnection(callId, ConnectionType.MONITOR);
+            await callParticipants.leave(callId, { kind: ParticipantKind.SUPERVISOR, agentId: userId, reason: LeaveReason.MONITOR_STOPPED });
             if (wasPrivate) EventBus.emit('call:agent:private:changed', { callId, active: false });
 
             await agentConnections.detachSocketFromCall(socketId, callId).catch(() => { });

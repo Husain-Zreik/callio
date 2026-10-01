@@ -42,11 +42,13 @@ import { presenceService } from '../agents/PresenceService.js';
 import { IncomingCallPayload } from '../calls/IncomingCallPayload.js';
 import { customerChannels } from './CustomerChannels.js';
 import { callTerminator } from '../calls/CallTerminator.js';
+import { callParticipants } from '../calls/CallParticipants.js';
 import { autoOfflinePolicy } from '../routing/AutoOfflinePolicy.js';
 import {
     CallStatus,
     CallDirection,
     ConnectionType,
+    ParticipantKind,
     AssignmentType,
     AgentAvailability,
     TerminationReason,
@@ -251,6 +253,8 @@ class ChannelIngress {
                 log.info({ callId, providerCallId }, 'Ended by the provider during setup — finalized as CANCELLED');
                 return;
             }
+
+            await callParticipants.join({ id: callId, tenant_id: tenantId }, { kind: ParticipantKind.CUSTOMER, at: ringingAt });
 
             if (userId) {
                 const agentSocketCount = await presenceService.getUserSocketCount(userId);
@@ -517,6 +521,9 @@ class ChannelIngress {
                         await CallRepository.updateState(callId, 'ACTIVE');
                     }
                     if (call.direction === CallDirection.OUTBOUND) {
+                        // Joined when we learn of the answer (the provider's own time is
+                        // whole seconds, so it can read as before the agent who dialled).
+                        if (!isTerminal) await callParticipants.join(call, { kind: ParticipantKind.CUSTOMER });
                         callLifecycleLogger.logOutboundAccepted(callId, call.tenant_id, agentId, {
                             providerCallId, previousState: previousStatus,
                         }).catch(() => { });
