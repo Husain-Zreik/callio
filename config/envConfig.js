@@ -94,6 +94,9 @@ export const config = {
             accessKeyId: process.env.AWS_ACCESS_KEY_ID,
             secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
             bucket: process.env.AWS_BUCKET,
+            // An S3-compatible service (MinIO, R2, …) instead of AWS; unset = AWS.
+            endpoint: process.env.AWS_ENDPOINT || undefined,
+            forcePathStyle: process.env.AWS_USE_PATH_STYLE_ENDPOINT === 'true',
             prefix: process.env.S3_RECORDINGS_PREFIX || "recordings/",
             // Optional key prefix applied when reading objects (e.g. a shared
             // bucket partitioned per environment).

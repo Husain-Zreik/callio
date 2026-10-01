@@ -35,6 +35,8 @@ class StorageClient {
 
         this.client = new S3Client({
             region: s3.region,
+            endpoint: s3.endpoint,
+            forcePathStyle: s3.forcePathStyle,
             credentials: {
                 accessKeyId: s3.accessKeyId,
                 secretAccessKey: s3.secretAccessKey,

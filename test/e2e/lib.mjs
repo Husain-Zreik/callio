@@ -87,6 +87,7 @@ export function listen(track, freqs = [440, 660, 880]) {
         for (let i = 0; i < samples.length; i += step) { stats.energy += samples[i] * samples[i]; stats.samples++; }
     };
     return {
+        track,
         stats,
         reset() { stats.frames = 0; stats.samples = 0; stats.energy = 0; for (const f of freqs) stats.bins[f] = 0; },
         dominant() {
@@ -250,6 +251,114 @@ export function eventReceiver({ secret, port = 3999 }) {
         res.writeHead(200); res.end('ok');
     });
     return { events, listen: () => new Promise((r) => server.listen(port, '127.0.0.1', r)), close: () => server.close() };
+}
+
+// ── Fake S3 ───────────────────────────────────────────────────────────────────
+
+// Enough of S3 (path-style) for Callio's recordings: head bucket, put/get/delete
+// an object, and multipart uploads. Signatures aren't checked. Objects live in
+// memory; anyone can read them back over HTTP.
+export function fakeS3({ bucket, port = 3995 }) {
+    const objects = new Map();   // key -> Buffer
+    const uploads = new Map();   // uploadId -> Map(partNumber -> Buffer)
+    let nextUpload = 0;
+
+    // Streaming bodies arrive aws-chunked: <hex size>[;ext]\r\n<data>\r\n … 0\r\n<trailers>\r\n\r\n
+    const unchunk = (buf) => {
+        const parts = [];
+        let i = 0;
+        while (i < buf.length) {
+            const eol = buf.indexOf('\r\n', i);
+            if (eol < 0) break;
+            const size = parseInt(buf.subarray(i, eol).toString().split(';')[0], 16);
+            if (!size) break;
+            parts.push(buf.subarray(eol + 2, eol + 2 + size));
+            i = eol + 2 + size + 2;
+        }
+        return Buffer.concat(parts);
+    };
+
+    const server = http.createServer(async (req, res) => {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        let body = Buffer.concat(chunks);
+        if (/aws-chunked/.test(req.headers['content-encoding'] || '') || /^STREAMING-/.test(req.headers['x-amz-content-sha256'] || '')) body = unchunk(body);
+        const url = new URL(req.url, 'http://s3');
+        const [b, ...rest] = url.pathname.slice(1).split('/');
+        const key = decodeURIComponent(rest.join('/'));
+        const send = (status, xml = '', headers = {}) => { res.writeHead(status, { 'Content-Type': 'application/xml', ...headers }); res.end(xml); };
+        if (b !== bucket) return send(404, '<Error><Code>NoSuchBucket</Code></Error>');
+        if (!key) return send(200);   // HeadBucket
+
+        const uploadId = url.searchParams.get('uploadId');
+        if (req.method === 'POST' && url.searchParams.has('uploads')) {
+            const id = String(++nextUpload);
+            uploads.set(id, new Map());
+            return send(200, `<InitiateMultipartUploadResult><Bucket>${bucket}</Bucket><Key>${key}</Key><UploadId>${id}</UploadId></InitiateMultipartUploadResult>`);
+        }
+        if (req.method === 'PUT' && uploadId) {
+            uploads.get(uploadId)?.set(Number(url.searchParams.get('partNumber')), body);
+            return send(200, '', { ETag: `"part-${url.searchParams.get('partNumber')}"` });
+        }
+        if (req.method === 'POST' && uploadId) {
+            const parts = uploads.get(uploadId);
+            if (!parts) return send(404, '<Error><Code>NoSuchUpload</Code></Error>');
+            objects.set(key, Buffer.concat([...parts.entries()].sort((x, y) => x[0] - y[0]).map(([, p]) => p)));
+            uploads.delete(uploadId);
+            return send(200, `<CompleteMultipartUploadResult><Bucket>${bucket}</Bucket><Key>${key}</Key><ETag>"done"</ETag></CompleteMultipartUploadResult>`);
+        }
+        if (req.method === 'DELETE' && uploadId) { uploads.delete(uploadId); return send(204); }
+        if (req.method === 'PUT') { objects.set(key, body); return send(200, '', { ETag: '"put"' }); }
+        if (req.method === 'GET' || req.method === 'HEAD') {
+            const obj = objects.get(key);
+            if (!obj) return send(404, '<Error><Code>NoSuchKey</Code></Error>');
+            res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': obj.length });
+            return res.end(req.method === 'GET' ? obj : undefined);
+        }
+        if (req.method === 'DELETE') { objects.delete(key); return send(204); }
+        send(400, '<Error><Code>NotImplemented</Code></Error>');
+    });
+    return { objects, listen: () => new Promise((r) => server.listen(port, '127.0.0.1', r)), close: () => server.close() };
+}
+
+// ── Recordings ────────────────────────────────────────────────────────────────
+
+// The Opus packets of an Ogg Opus file, without the OpusHead/OpusTags headers.
+export function oggOpusPackets(buf) {
+    const packets = [];
+    let pending = [];
+    let i = 0;
+    while (i + 27 <= buf.length && buf.toString('ascii', i, i + 4) === 'OggS') {
+        const segments = buf[i + 26];
+        const table = buf.subarray(i + 27, i + 27 + segments);
+        let at = i + 27 + segments;
+        for (const len of table) {
+            pending.push(buf.subarray(at, at + len));
+            at += len;
+            if (len < 255) { packets.push(Buffer.concat(pending)); pending = []; }
+        }
+        i = at;
+    }
+    return packets.filter((p) => !/^Opus(Head|Tags)/.test(p.toString('ascii', 0, 8)));
+}
+
+// Goertzel energy at each of `freqs` in one channel of interleaved 16-bit PCM.
+export function toneEnergy(pcm, { channels, channel, rate, freqs }) {
+    const samples = new Int16Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.length / 2));
+    const out = {};
+    for (const f of freqs) {
+        const k = 2 * Math.cos((2 * Math.PI * f) / rate);
+        let total = 0;
+        // 20 ms blocks keep the sums well inside floating-point range.
+        const block = (rate / 50) * channels;
+        for (let start = channel; start < samples.length; start += block) {
+            let s1 = 0, s2 = 0;
+            for (let j = start; j < Math.min(start + block, samples.length); j += channels) { const s0 = samples[j] + k * s1 - s2; s2 = s1; s1 = s0; }
+            total += s1 * s1 + s2 * s2 - k * s1 * s2;
+        }
+        out[f] = total;
+    }
+    return out;
 }
 
 // ── Agents ────────────────────────────────────────────────────────────────────

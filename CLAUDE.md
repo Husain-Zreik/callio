@@ -9,6 +9,7 @@ Callio is a standalone contact-center call engine that **any product** integrate
 | `docs/architecture.md` | How it works: surfaces, boundaries, process model, call flows, routing, media, IVR, startup/shutdown |
 | `docs/management-api.md` · `docs/events.md` · `docs/agent-protocol.md` | The public contract (REST API, consumer webhooks, agent socket + WebRTC). **If you change behaviour a consumer can observe, update the matching doc in the same change.** |
 | `docs/data-model.md` | Tables and columns. Every schema change is a new Knex migration (`npm run migrate:make -- <name>`); never edit a migration that has run anywhere real |
+| `docs/media-architecture.md` | Target media design (not implemented yet): rtpengine + FreeSWITCH rooms, participants, ownership failover, the order of work |
 | `docs/sip.md` | SIP gateway (`deploy/sip-gateway/`) and SIP channel (`src/channels/sip/`): carrier requirements, config, deploy, tests, open items |
 | `docs/logging.md` | Logging rules in full, reading logs, metrics |
 | `test/e2e/README.md` · `deploy/*/README.md` · `sdk/agent-js/README.md` | The test runner, deploy pieces and the agent SDK, next to their files |

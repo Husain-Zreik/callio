@@ -12,6 +12,7 @@ import { mkdtempSync, writeFileSync, readdirSync, readFileSync, existsSync } fro
 import { tmpdir } from 'os';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { fakeS3 } from './lib.mjs';
 
 const require = createRequire(import.meta.url);
 const mysql = require('mysql2/promise');
@@ -38,6 +39,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
 const work = mkdtempSync(join(tmpdir(), 'callio-e2e-'));
 const port = Number(process.env.TEST_CALLIO_PORT || 3901);
+const S3_PORT = Number(process.env.TEST_S3_PORT || 3995);
 
 // The SIP suite needs the local SIP gateway (deploy/sip-gateway/docker-compose.local.yml).
 const drachtioUp = await new Promise((resolve) => {
@@ -66,8 +68,11 @@ const env = {
     WHATSAPP_API_URL: 'http://127.0.0.1:3990/',
     STORAGE_LOCAL_ROOT: join(work, 'storage'),
     CALLIO_MASTER_KEY: randomBytes(32).toString('base64'),
-    // Keep real provider credentials out of the test process.
-    AWS_ACCESS_KEY_ID: '', AWS_SECRET_ACCESS_KEY: '', ONESIGNAL_APP_ID: '', APNS_KEY_ID: '',
+    // Keep real provider credentials out of the test process. Object storage is
+    // the fake S3 below, so recordings upload and can be read back.
+    AWS_ACCESS_KEY_ID: 'test', AWS_SECRET_ACCESS_KEY: 'test', AWS_BUCKET: 'callio-test', AWS_DEFAULT_REGION: 'us-east-1',
+    AWS_ENDPOINT: `http://127.0.0.1:${S3_PORT}`, AWS_USE_PATH_STYLE_ENDPOINT: 'true', AWS_BUCKET_PREFIX: '', AWS_URL: '',
+    ONESIGNAL_APP_ID: '', APNS_KEY_ID: '',
     ONESIGNAL_API_URL: 'http://127.0.0.1:3998/notifications',   // push.test.mjs's fake OneSignal
     FIREBASE_SERVICE_ACCOUNT_PATH: join(work, 'no-firebase.json'),
     // Each suite's Callio output (pretty, debug) lands in <work>/<suite>.callio.log.
@@ -163,6 +168,8 @@ checkLogging();
 
 let failed = 0;
 let callio = null;
+const s3 = fakeS3({ bucket: 'callio-test', port: S3_PORT });
+await s3.listen();
 try {
     console.log(`[e2e] preparing database ${env.DB_DATABASE}`);
     const admin = await mysql.createConnection({ host: env.DB_HOST, port: Number(env.DB_PORT), user: env.DB_USERNAME, password: env.DB_PASSWORD });
@@ -183,7 +190,9 @@ try {
         const logFile = join(work, `${suite}.callio.log`);
         callio = await startCallio(logFile);
         console.log(`\n[e2e] ── ${suite}`);
-        const r = spawnSync(process.execPath, [join(here, suite), seedFile, String(port)], { cwd: root, env, stdio: 'inherit' });
+        // Not spawnSync: the fake S3 in this process has to keep answering while the suite runs.
+        const r = await new Promise((done) => spawn(process.execPath, [join(here, suite), seedFile, String(port)], { cwd: root, env, stdio: 'inherit' })
+            .on('exit', (status) => done({ status })));
         callio.kill();
         await new Promise((r) => callio.once('exit', r));
         callio = null;
@@ -197,6 +206,7 @@ try {
     failed++;
 } finally {
     if (callio) callio.kill();
+    s3.close();
 }
 
 console.log(`\n[e2e] ${failed ? `${failed} suite(s) failed` : 'all suites passed'} — logs in ${work}`);

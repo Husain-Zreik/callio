@@ -1,0 +1,172 @@
+# Media architecture (target)
+
+**Status: target design, not implemented.** Today every call's audio runs through
+`@roamhq/wrtc` inside the Callio workers ([architecture.md → Media](architecture.md#media)).
+This doc is where that is going and in what order. Update it as steps land.
+
+## Why
+
+Today a call's audio is decoded, processed and re-encoded in Node, on the same event loop as the
+API, the agent sockets and routing:
+
+- `AudioBridge` relays AGENT ⇄ CUSTOMER by handing one peer's received track to the other, so
+  libwebrtc runs two jitter buffers, two decoders and two Opus encoders per call, even Opus ⇄
+  Opus.
+- Recording, the customer silence watchdog, DTMF, whisper/barge mixing, playback and the
+  placeholder tones move 10 ms PCM frames through JS: about 300 callbacks a second for a
+  recorded call, more with a supervisor.
+- An API burst or a GC pause adds jitter to every call on the worker, and a native wrtc crash or
+  a memory-limit restart drops them all.
+- `MAX_CALLS_PER_WORKER` defaults to 10. Inbound placement is whichever worker wins the claim,
+  not the least loaded one.
+- Media capacity can't grow without growing the API, and the other way round.
+
+## Requirements
+
+- **No feature is lost.** Everything in [Feature parity](#feature-parity) keeps working, and the
+  e2e suite proves it. With no live users there is one implementation, not a fallback: the suite
+  is the gate.
+- **Calls are rooms.** A call will be shared by several agents and supervisors, not one agent
+  plus one monitor. The media port and the data model are participant-first from the start.
+- **The external contract stays.** The agent protocol (agents still exchange SDP with Callio over
+  the socket), the Management API, consumer events, channel adapters behind `customerChannels`,
+  queues and routing, the outbox. Recordings stay stereo OGG/Opus.
+
+## Planes
+
+| Plane | Components | Scales by |
+|---|---|---|
+| Control | Callio: routing, call state, Management API, agent sockets, events | Stateless workers |
+| SIP signalling | drachtio servers, with DNS SRV or a SIP load balancer in front | Nodes |
+| Media edge | rtpengine pool: ICE, DTLS-SRTP, NAT, codecs for every external leg (WhatsApp relay, agents, carrier) | Nodes |
+| Media processing | FreeSWITCH pool driven through `drachtio-fsmrf`, no dialplan: rooms, mixing, audibility, playback, recording, DTMF | Nodes |
+| NAT traversal | coturn for agents behind strict NATs (`IceServers.js`, `TURN_SECRET`) | Nodes |
+| State | MySQL (source of truth), Redis (leases, presence, hot cache, call input streams) | Vertical, then replicas |
+| Async | Redis Streams for call inputs, the webhook outbox for consumer events | Partitions |
+| Storage | S3 for recordings and audio assets | Managed |
+
+**No Node process touches audio.** Sockets carry only control messages and SDP.
+
+FreeSWITCH was rejected in [sip.md](sip.md#why-drachtio--rtpengine) because call logic would
+split between its dialplan and Callio. With `drachtio-fsmrf` there is no dialplan: FreeSWITCH is
+a media resource that Node commands (create an endpoint from this SDP, join it to a room, change
+who hears it). All call logic stays in Callio.
+
+## Call ownership and inputs
+
+- **One owner per live call**, holding a Redis lease (`CallOwnershipService`, as today). The owner
+  processes the call's inputs one at a time and commands media through the port. It holds no
+  media state.
+- **Inputs go through a Redis Stream per call**, keyed by call id: socket actions, API calls,
+  channel events, media events. Pub/sub (`publishCallEvent` today) is at-most-once, so a
+  restarting owner would miss events. A stream lets the next owner read what it hasn't
+  processed.
+- **Failover.** When an owner's worker dies, another worker takes the lease, rebuilds the call
+  from MySQL and continues from the stream. The room keeps running on its FreeSWITCH node, so
+  the call survives a control-worker crash. Agents' sockets reconnect to any worker; the SDK
+  already resyncs on reconnect.
+- **Cross-call races stay guarded in SQL.** Serialising one call's inputs doesn't serialise two
+  calls claiming the same agent, queue draining or overflow. `claimAgentAndAssignCall`,
+  `markOnCall`, `withdrawOffer` and the other guarded `UPDATE … WHERE <expected state>` stay.
+- No actor framework: the lease, the stream and rebuild-from-DB are enough.
+
+## Media port
+
+The core's only way to touch media. Room-shaped:
+
+| Operation | Does |
+|---|---|
+| `createRoom(node)` | A room on a chosen media node |
+| `addParticipant(roomId, sdp, role)` → `answer` | Anchors the leg on rtpengine, joins it to the room |
+| `removeParticipant(roomId, participantId)` | Leaves the room, releases the leg |
+| `setAudibility(roomId, matrix)` | Who hears whom (FreeSWITCH `relate`, mute, deaf) |
+| `play(target, asset)` | A file to one participant or the whole room; `stop` ends it |
+| `record(roomId, layout)` | Stereo: customer on one channel, the room mix on the other |
+| `collectDtmf(participantId)` | RFC 4733 and in-band digits, as media events |
+| `stats(participantId)` | Per-leg RTCP (loss, jitter) from rtpengine |
+
+The features are data on top of it:
+
+| Feature | In the port |
+|---|---|
+| 1:1 call | customer + agent, both hear each other |
+| Listen | supervisor joins; nobody hears them |
+| Whisper | agents hear the supervisor; the customer doesn't |
+| Barge | everyone hears the supervisor |
+| Agent-private | the agent is heard by supervisors only |
+| Transfer | add the new agent, then remove the old one (warm transfer: both briefly) |
+| Hold music, IVR prompts, reconnect tone | `play` |
+| Agent drop | the agent participant leaves; the customer gets `play(reconnect tone)` until they rejoin or the 120 s limit |
+| Multi-party | more agent and supervisor participants |
+
+## Data model
+
+| Table | Holds |
+|---|---|
+| `calls` | The call: tenant, channel, direction, status, timestamps, refs, media node |
+| `call_participants` | Replaces `call_connections`: role, kind (`CUSTOMER` / `AGENT` / `SUPERVISOR` / `IVR`), media node, `joined_at`, `left_at`, leave reason |
+| `call_lifecycle_events` | Grows into the append-only call log the timeline, reports and consumer events derive from |
+
+Queues, agents, channels, trunks and the DID inventory stay separate aggregates.
+
+**Primary agent.** `calls.agent_id` and `CallView`'s agent mean "the" agent today. With several
+agents a call keeps a primary agent (who answered, or who holds it after a transfer) for that
+field, and the other participants are added to the contract. Documented in
+[management-api.md](management-api.md), [events.md](events.md) and
+[agent-protocol.md](agent-protocol.md) when multi-party lands.
+
+## Media placement
+
+- An rtpengine + FreeSWITCH **pair** is chosen per call by load (later by region) and stored on
+  the call. The pair is placed together, on the same host or LAN, because every call crosses
+  both.
+- Full nodes refuse new calls; the caller gets a clean busy/unavailable, not a half-set-up call.
+
+## Failure behaviour (v1)
+
+| Fails | Result |
+|---|---|
+| Control worker | Calls continue; another worker takes the lease and continues from the stream |
+| rtpengine node | Its calls drop, unless it runs with Redis-backed sessions **and** a floating IP (keepalived / VIP) for a standby to take over, because remote ends keep sending to the IP in the SDP |
+| FreeSWITCH node | Its rooms and calls drop. Re-anchoring legs on rtpengine to a new node is possible later, not in v1 |
+| drachtio node | Its SIP dialogs drop; new calls go to the other nodes through SRV / the load balancer |
+
+## Feature parity
+
+Each is covered by `test/e2e`, with audio heard or read back, not just state:
+
+| Feature | Suite |
+|---|---|
+| WhatsApp and SIP audio, inbound and outbound | `calls`, `sip` |
+| Transfer, reconnect, device switch | `calls`, `routing`, `sdk` |
+| IVR prompts + in-band DTMF | `routing`, `sip` |
+| Listen / whisper / barge / agent-private | `routing` |
+| Customer network loss | `routing` |
+| Recording content (customer left, agent right) | `media` |
+| Hold music after an IVR transfer | `media` |
+| Reconnect tone when the agent drops, and recovery | `media` |
+| Call-quality events | `media` |
+
+**DTMF:** `sipSdp.js` strips `telephone-event` so carriers send in-band tones. FreeSWITCH detects
+both, so that flips to accepting RFC 4733.
+
+## Order of work
+
+1. **e2e checks** for the gaps above (`media.test.mjs`). Done.
+2. **Participants data model and the room-shaped port contract**, designed together.
+3. **rtpengine + FreeSWITCH implementation:** a spike (one WhatsApp and one SIP call), then the
+   features until the suite passes.
+4. **Delete the wrtc media code** (`src/media/`). The test harness keeps `wrtc` for its simulated
+   customers and agents.
+5. **Failover-able call ownership**, with call inputs on Redis Streams.
+6. **Multi-party calls** and the primary-agent contract.
+
+Steps 2–4 break media until the suite passes again, and the dev server runs `main`, so they
+happen on a branch (or worktree) and merge green.
+
+## Open questions for the spike
+
+- Meta's relay accepting rtpengine's SDP (the rules in `whatsappSdp.js`).
+- FreeSWITCH writing Ogg Opus directly (`mod_opusfile`), or a conversion after the call.
+- `relate` covering whisper, barge and agent-private exactly as the e2e checks expect.
+- The latency of the two hops (rtpengine → FreeSWITCH → rtpengine) on one host.

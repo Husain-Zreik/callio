@@ -18,6 +18,7 @@ npm run test:e2e -- routing     # suites whose file name contains "routing"
 | Simulated WhatsApp customers | `lib.mjs` | `wrtc` peers that post Meta-shaped webhooks and send a 440 Hz tone. |
 | Simulated agents | `lib.mjs` `connectAgent()` | Socket.IO clients with consumer-signed JWTs and `wrtc` peers sending their own tones (880 / 660 Hz), so every audio check (Goertzel, `listen()`) proves who is bridged to whom. |
 | Consumer event receiver | `lib.mjs` `eventReceiver()`, port 3999 | Verifies the signature of every event Callio delivers. |
+| Fake S3 | `lib.mjs` `fakeS3()`, port 3995, inside `run.mjs` | Path-style S3 (head bucket, put/get/delete, multipart), in memory, signatures unchecked. Recordings upload to it and the suites read them back through the API's signed URL. |
 | Fake SIP carrier | `sipCarrier.mjs`, UDP 5070 | A minimal SIP user agent plus G.711 μ-law RTP: calls into Callio through the local gateway like a trunk, and answers the calls Callio dials out. |
 
 ## What `run.mjs` does
@@ -60,12 +61,15 @@ After each suite it scans that suite's Callio log for
 | `TEST_REDIS_HOST` / `PORT` / `DB` | `127.0.0.1` / `36379` / `15` | |
 | `TEST_CALLIO_PORT` | `3901` | |
 | `TEST_LOCK_PORT` | `3899` | The one-run-at-a-time lock. |
+| `TEST_S3_PORT` | `3995` | The fake S3. |
 | `TEST_DRACHTIO_SECRET` | `CHANGE_ME` | drachtio admin secret of the local SIP gateway. |
 | `TEST_LOG_LEVEL` | `debug` | Callio's `LOG_LEVEL` during the suites. |
 
 `run.mjs` also forces `CALL_TRANSFER_TIMEOUT_SECONDS=6` (so an unaccepted
-transfer returns quickly), a random `CALLIO_MASTER_KEY`, local storage, and
-empty AWS / OneSignal / APNs / Firebase credentials.
+transfer returns quickly), a random `CALLIO_MASTER_KEY`, local storage, object
+storage pointed at the fake S3 (`AWS_ENDPOINT`, path-style), and empty
+OneSignal / APNs / Firebase credentials. Suites run as async child processes,
+so the fake S3 in `run.mjs` keeps answering while they do.
 
 ## Suites
 
@@ -73,6 +77,7 @@ empty AWS / OneSignal / APNs / Firebase credentials.
 |---|---|
 | `calls.test.mjs` | Invalid token rejected; `session:ready` identity + ICE servers; availability over the socket; inbound WhatsApp routed ROUND_ROBIN to the longest-available agent and bridged both ways; answer moving to a reconnecting device; agent hang-up (COMPLETED/AGENT) and release; outbound intent → `call:start` → dial → answer, bridged; API terminate; agent OFFLINE after outbound; call detail API; consumer events signed and delivered once per id; provider refusing a dial (FAILED / `PROVIDER_TRIGGER_FAILED`, `call:error`); webhooks for an unowned line ignored; wrong API key rejected. |
 | `routing.test.mjs` | Queue wait, then offered to the agent who became available; customer hang-up (COMPLETED/CUSTOMER); `call.queued` / `call.assigned` events; PRIORITY; RING_ALL with a decline, first accept wins, others told it was taken; supervisor monitoring (listen / whisper / barge, separate tracks), plain agent refused; transfer access check; unaccepted transfer back to the queue; transfer to another agent; IVR via API (audio asset, flow), in-band DTMF `1` into a queue, session and key press recorded. |
+| `media.test.mjs` | The media features the media-plane migration must keep ([media-architecture.md](../../docs/media-architecture.md#feature-parity)): a recorded call's customer-quality events; the recording saved, downloaded through the API, decoded, with the customer (440 Hz) on its channel and the agent (880 Hz) on the other; the agent dropping, the customer hearing the reconnect tone (600/750/900 Hz) and the call staying up, then the agent reconnecting and heard again; queue hold music after an IVR transfer while the agent rings, stopping when they answer. |
 | `queues.test.mjs` | Ring timeout passing the offer on (missed offer logged); decline passed on and never offered back; waiting call ended by customer hang-up; lone member re-offered; max wait overflowing to another queue (logged, consumer told); max wait with no overflow ending as TIMEOUT. |
 | `sdk.test.mjs` | The JS agent SDK (`sdk/agent-js`) in Node: token from `npm run agent:token`, connect, `setAvailability`; supervisor connect, `refreshSession()`; incoming Call, `accept()`, two-way audio; board and `monitor()` (listen / whisper); `hangup()`; customer hang-up; `decline()` passing the call on; reload recovering the media; another device and `switchHere()`; `startOutbound()`. |
 | `react.test.mjs` | The React bindings (`sdk/agent-react`) rendered in Node: provider connects, hooks go available, show and answer the ringing call (two-way audio), mute; a supervisor's hooks show the board and monitor; hang-up clears both; unmounting disconnects. |
