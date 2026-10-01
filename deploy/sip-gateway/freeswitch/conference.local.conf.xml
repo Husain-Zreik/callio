@@ -1,0 +1,32 @@
+<!-- Callio's conference profile: one room per call (docs/media-architecture.md).
+     Wideband mixing; no energy gate or comfort noise, so quiet speech (and the
+     test tones) always mix and silence stays silent. -->
+<configuration name="conference.conf" description="Audio Conference">
+  <advertise/>
+  <caller-controls>
+    <group name="none"/>
+  </caller-controls>
+  <profiles>
+    <profile name="callio">
+      <param name="domain" value="$${domain}"/>
+      <param name="rate" value="16000"/>
+      <param name="interval" value="20"/>
+      <param name="energy-level" value="0"/>
+      <param name="comfort-noise" value="false"/>
+      <param name="caller-controls" value="none"/>
+      <param name="muted-sound" value=""/>
+      <param name="unmuted-sound" value=""/>
+      <param name="alone-sound" value=""/>
+      <param name="enter-sound" value=""/>
+      <param name="exit-sound" value=""/>
+      <param name="kicked-sound" value=""/>
+      <param name="locked-sound" value=""/>
+      <param name="is-locked-sound" value=""/>
+      <param name="is-unlocked-sound" value=""/>
+      <param name="pin-sound" value=""/>
+      <param name="bad-pin-sound" value=""/>
+      <param name="moh-sound" value=""/>
+      <param name="max-members" value="32"/>
+    </profile>
+  </profiles>
+</configuration>

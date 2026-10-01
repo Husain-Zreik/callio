@@ -1,0 +1,14 @@
+#!/bin/sh
+# callio-recording-upload <wav> <put-url>
+# A call's recording leaves the media server: the stereo WAV FreeSWITCH wrote
+# is encoded to Ogg Opus, PUT to the presigned object-storage URL Callio gave,
+# and both local files are deleted. Callio runs it through the event socket
+# (bgapi system) and checks the object landed (a HEAD) — the exit status and
+# output don't come back through `system`.
+wav="$1"; url="$2"; ogg="${wav%.wav}.ogg"
+[ -f "$wav" ] || exit 1
+opusenc --quiet --bitrate 32 "$wav" "$ogg" && \
+  curl -sS -f -X PUT -H 'Content-Type: audio/ogg' --data-binary @"$ogg" "$url" -o /dev/null
+status=$?
+rm -f "$wav" "$ogg"
+exit $status

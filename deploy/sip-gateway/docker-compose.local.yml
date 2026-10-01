@@ -15,14 +15,31 @@
 # back-to-back calls, keeps the port list short. The production file's wider
 # range doesn't need to change.
 #
+# The media plane (docs/media-architecture.md): rtpengine terminates every
+# external leg, FreeSWITCH mixes each call's room. Two networks:
+#   edge  (172.31.10.0/24) — what the published ports reach: SIP, ng, RTP
+#   media (172.31.20.0/24) — rtpengine ⇄ FreeSWITCH plain RTP, drachtio ⇄
+#                            FreeSWITCH SIP (fsmrf creates endpoints by INVITE)
+# Callio on this machine reaches FreeSWITCH's event socket on 127.0.0.1:8021,
+# and FreeSWITCH connects back to Callio (fsmrf's outbound socket) at
+# host.docker.internal.
+#
 # rtpengine.local.conf (no comments in it: rtpengine's parser rejects them):
-#   interface = eth0!127.0.0.1   bind the container's interface (what the
-#                                published ports reach), advertise 127.0.0.1
-#                                in SDP (how this machine reaches it)
+#   interface = external/172.31.10.3!127.0.0.1;internal/172.31.20.3
+#                                external: the edge address, advertised as
+#                                127.0.0.1 (how this machine reaches the
+#                                published ports); internal: toward FreeSWITCH.
+#                                An offer without a direction uses the first.
 #   delete-delay = 0             free a deleted call's ports at once (default
 #                                30 s), so back-to-back test calls don't run out
 #
-# Usage: docker compose -f docker-compose.local.yml up -d
+# FreeSWITCH: freeswitch/Dockerfile (the image drachtio-fsmrf is built
+# against, plus Opus preferred and the recording upload script), event-socket
+# password CHANGE_ME, RTP 31000-31099 on the media network only, and Callio's
+# conference profile (freeswitch/conference.local.conf.xml). Build once:
+#   docker compose -f docker-compose.local.yml up -d --build
+#
+# Usage: docker compose -f docker-compose.local.yml up -d --build
 #        docker compose -f docker-compose.local.yml down
 name: callio-sip-local
 
@@ -35,6 +52,9 @@ services:
       - "127.0.0.1:5060:5060/udp"
       - "127.0.0.1:5060:5060/tcp"
       - "127.0.0.1:9022:9022/tcp"
+    networks:
+      edge: { ipv4_address: 172.31.10.2 }
+      media: { ipv4_address: 172.31.20.2 }
     volumes:
       - ./drachtio/drachtio.local.conf.xml:/etc/drachtio.conf.xml:ro
       - drachtio-local-log:/var/log/drachtio
@@ -64,10 +84,38 @@ services:
     ports:
       - "127.0.0.1:22222:22222/udp"
       - "127.0.0.1:30000-30099:30000-30099/udp"
+    networks:
+      edge: { ipv4_address: 172.31.10.3 }
+      media: { ipv4_address: 172.31.20.3 }
     volumes:
       - ./rtpengine/rtpengine.local.conf:/etc/rtpengine.conf:ro
       # Same reason as drachtio's /config: the image declares /tmp a volume.
       - rtpengine-local-tmp:/tmp
+
+  freeswitch:
+    build: ./freeswitch
+    image: callio-freeswitch:local
+    container_name: callio-freeswitch-local
+    restart: unless-stopped
+    environment:
+      ESL_PASSWORD: CHANGE_ME
+    command: ["freeswitch", "--rtp-range-start", "31000", "--rtp-range-end", "31099"]
+    ports:
+      - "127.0.0.1:8021:8021/tcp"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      media: { ipv4_address: 172.31.20.4 }
+    volumes:
+      - ./freeswitch/conference.local.conf.xml:/usr/local/freeswitch/conf/autoload_configs/conference.conf.xml:ro
+
+networks:
+  edge:
+    ipam:
+      config: [{ subnet: 172.31.10.0/24 }]
+  media:
+    ipam:
+      config: [{ subnet: 172.31.20.0/24 }]
 
 volumes:
   drachtio-local-log:
