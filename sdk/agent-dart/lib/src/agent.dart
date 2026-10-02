@@ -464,6 +464,10 @@ class CallioAgent extends ChangeNotifier {
       final p = m(raw);
       forMonitor(p)?.onStarted(p);
     });
+    t.on('call:monitor:offer', (raw) {
+      final p = m(raw);
+      forMonitor(p)?.onOffer(p);
+    });
     t.on('call:monitor:mode:changed', (raw) {
       final p = m(raw);
       forMonitor(p)?.onMode(monitorModeFrom(p['mode']));

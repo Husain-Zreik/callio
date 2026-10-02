@@ -210,6 +210,9 @@ export const config = {
         callbackUrl: (process.env.MEDIA_CALLBACK_URL || "").replace(/\/+$/, "") || null,
         // Recordings are written here on the media server before upload.
         recordingDir: process.env.MEDIA_RECORDING_DIR || "/tmp",
+        // Plain 1:1 calls on personal lines bridged by rtpengine alone, without
+        // a FreeSWITCH room (core/media/MediaTopology.js). false = every call a room.
+        directPath: process.env.MEDIA_DIRECT_PATH !== "false",
         // How often each worker sweeps dead workers' media legs (seconds).
         orphanSweepSeconds: parseInt(process.env.MEDIA_ORPHAN_SWEEP_SECONDS || "30", 10) || 30,
     },

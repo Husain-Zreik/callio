@@ -92,6 +92,25 @@ class MediaLegs {
         return answer;
     }
 
+    async offerSupervisor(call, supervisorId) {
+        const offer = await callMedia.offerSupervisor(call, supervisorId);
+        await persist(call.id, 'monitor', async () => {
+            await CallConnectionRepository.cleanupConnection(call.id, ConnectionType.MONITOR);
+            await CallConnectionRepository.create({
+                call_id: call.id, connection_type: ConnectionType.MONITOR, agent_id: supervisorId, local_sdp: offer, sdp_type: 'OFFER',
+            });
+        });
+        return offer;
+    }
+
+    async supervisorAnswered(call, supervisorId, sdpAnswer) {
+        await callMedia.supervisorAnswered(call, supervisorId, sdpAnswer);
+        await persist(call.id, 'monitor', async () => {
+            await CallConnectionRepository.updateSDP(call.id, ConnectionType.MONITOR, null, sdpAnswer);
+            await CallConnectionRepository.markReady(call.id, ConnectionType.MONITOR);
+        });
+    }
+
     async removeSupervisor(callId, supervisorId) {
         const wasPrivate = await callMedia.removeSupervisor(callId, supervisorId);
         await persist(callId, 'monitor', () => CallConnectionRepository.cleanupConnection(callId, ConnectionType.MONITOR));

@@ -85,6 +85,10 @@ export class CallEventHandler {
                     await this.agentHandler.handleAgentReconnected(data);
                     break;
 
+                case EventTypes.AGENT_RECONNECT_ANSWERED:
+                    await this.agentHandler.handleReconnectAnswered(data);
+                    break;
+
                 case EventTypes.RINGING_AGENT_RECONNECT:
                     await this.agentHandler.handleRingingAgentReconnect(data);
                     break;
@@ -99,6 +103,10 @@ export class CallEventHandler {
 
                 case EventTypes.MONITOR_STARTED:
                     await this.monitorHandler.handleMonitorStarted(data);
+                    break;
+
+                case EventTypes.MONITOR_ANSWERED:
+                    await this.monitorHandler.handleMonitorAnswered(data);
                     break;
 
                 case EventTypes.MONITOR_STOPPED:

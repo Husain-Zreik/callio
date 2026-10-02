@@ -2,8 +2,9 @@
 // Created by CallioAgent.monitor().
 //
 // One audio line: it sends the supervisor's microphone and receives the call
-// — the customer and the agent, mixed by Callio. Callio decides who hears the
-// supervisor, so a mode change needs no renegotiation:
+// — the customer and the agent, mixed by Callio. A direct call (no room to mix
+// in) is listen-only: Callio offers one line per side and we answer. Callio
+// decides who hears the supervisor, so a mode change needs no renegotiation:
 //   listen   the supervisor hears the call; nobody hears the supervisor
 //   whisper  the agent hears the supervisor; the customer doesn't
 //   barge    both hear the supervisor
@@ -31,6 +32,7 @@ class CallioMonitor extends ChangeNotifier {
   bool _ownsLocalStream = false;
   rtc.MediaStream? _stream;
   bool _remoteSet = false;
+  bool _direct = false;
   final List<Map<String, dynamic>> _pendingRemote = [];
   Timer? _timer;
   final _ended = Completer<String>();
@@ -70,15 +72,19 @@ class CallioMonitor extends ChangeNotifier {
   Future<void> start({rtc.MediaStream? stream}) async {
     final pc = await _agent.media.createPeerConnection({'iceServers': _agent.iceServers});
     _pc = pc;
-    _ownsLocalStream = stream == null;
-    final local = stream ?? await _agent.media.getMicrophone();
-    _localStream = local;
-    final tracks = local.getAudioTracks();
-    final sendLine = rtc.RTCRtpTransceiverInit(direction: rtc.TransceiverDirection.SendRecv, streams: [local]);
-    if (tracks.isEmpty) {
-      await pc.addTransceiver(kind: rtc.RTCRtpMediaType.RTCRtpMediaTypeAudio, init: sendLine);
-    } else {
-      await pc.addTransceiver(track: tracks.first, kind: rtc.RTCRtpMediaType.RTCRtpMediaTypeAudio, init: sendLine);
+    // A direct call is listened to by answering Callio's offer, without the microphone.
+    _direct = _agent.board.any((c) => c.callId == callId && c.isDirect);
+    if (!_direct) {
+      _ownsLocalStream = stream == null;
+      final local = stream ?? await _agent.media.getMicrophone();
+      _localStream = local;
+      final tracks = local.getAudioTracks();
+      final sendLine = rtc.RTCRtpTransceiverInit(direction: rtc.TransceiverDirection.SendRecv, streams: [local]);
+      if (tracks.isEmpty) {
+        await pc.addTransceiver(kind: rtc.RTCRtpMediaType.RTCRtpMediaTypeAudio, init: sendLine);
+      } else {
+        await pc.addTransceiver(track: tracks.first, kind: rtc.RTCRtpMediaType.RTCRtpMediaTypeAudio, init: sendLine);
+      }
     }
 
     pc.onIceCandidate = (c) {
@@ -109,14 +115,33 @@ class CallioMonitor extends ChangeNotifier {
       if (_state == MonitorState.connecting) stop();
     });
 
+    if (_direct) {
+      _agent.send('call:monitor', {'callId': callId});
+      return;
+    }
     final offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     _agent.send('call:monitor', {'callId': callId, 'sdpOffer': offer.sdp});
   }
 
-  Future<void> onStarted(Map<String, dynamic> payload) async {
+  /// Callio's offer, for a monitor started without one (a direct call).
+  Future<void> onOffer(Map<String, dynamic> payload) async {
     final pc = _pc;
     if (pc == null || _remoteSet) return;
+    await pc.setRemoteDescription(rtc.RTCSessionDescription(payload['sdpOffer'] as String?, 'offer'));
+    _remoteSet = true;
+    for (final c in List.of(_pendingRemote)) {
+      await _add(c);
+    }
+    _pendingRemote.clear();
+    final answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    _agent.send('call:monitor:answer', {'callId': callId, 'sdpAnswer': answer.sdp});
+  }
+
+  Future<void> onStarted(Map<String, dynamic> payload) async {
+    final pc = _pc;
+    if (pc == null || _remoteSet || payload['sdpAnswer'] == null) return;
     await pc.setRemoteDescription(rtc.RTCSessionDescription(payload['sdpAnswer'] as String?, 'answer'));
     _remoteSet = true;
     for (final c in List.of(_pendingRemote)) {

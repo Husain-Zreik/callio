@@ -49,6 +49,8 @@ export class Call extends Emitter {
     get queueId() { return this.data.queueId ?? null; }
     get callUuid() { return this.data.callUuid ?? null; }
     get isRingAll() { return this.data.assignmentType === 'QUEUED' && this.data.agentId == null; }
+    /** 'DIRECT': rtpengine alone carries the call (a personal line's 1:1 call). */
+    get isDirect() { return this.data.mediaTopology === 'DIRECT'; }
 
     // ── Agent actions ─────────────────────────────────────────────────────────
 
@@ -196,24 +198,37 @@ export class Call extends Emitter {
     }
 
     // A new leg for the same call (network change, page reload, another device).
+    // A direct call asks Callio to offer (an offer from here would move the
+    // ports the provider sends to); any other call offers itself.
     async _reconnect(trigger, stream) {
         this._recovering = true;
         try {
             this._setState('connecting');
             const pc = this._newPeer();
             await this._attachMicrophone(pc, stream);
-            await pc.setLocalDescription(await pc.createOffer());
             this._awaitingReconnect = true;
-            this.agent._send('call:reconnect', { callId: this.id, sdpOffer: pc.localDescription.sdp, reconnectTrigger: trigger });
+            if (this.isDirect) {
+                this.agent._send('call:reconnect', { callId: this.id, reconnectTrigger: trigger });
+            } else {
+                await pc.setLocalDescription(await pc.createOffer());
+                this.agent._send('call:reconnect', { callId: this.id, sdpOffer: pc.localDescription.sdp, reconnectTrigger: trigger });
+            }
             this._markBound();
         } finally {
             this._recovering = false;
         }
     }
 
-    async _onReconnected({ sdpAnswer }) {
+    async _onReconnected({ sdpAnswer, sdpOffer }) {
         if (!this._awaitingReconnect || !this.pc) return;
         this._awaitingReconnect = false;
+        if (sdpOffer) {
+            await this.pc.setRemoteDescription({ type: 'offer', sdp: sdpOffer });
+            await this._flushRemote();
+            await this.pc.setLocalDescription(await this.pc.createAnswer());
+            this.agent._send('call:reconnect:answer', { callId: this.id, sdpAnswer: this.pc.localDescription.sdp });
+            return;
+        }
         await this.pc.setRemoteDescription({ type: 'answer', sdp: sdpAnswer });
         await this._flushRemote();
     }

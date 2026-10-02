@@ -34,6 +34,15 @@ export class MonitorEventHandler {
                 throw new Error('Another supervisor is monitoring this call right now.');
             }
 
+            // Without an offer, Callio offers and the supervisor answers
+            // (call:monitor:answer → handleMonitorAnswered) — how a DIRECT call
+            // is listened to.
+            if (!sdpOffer) {
+                const offer = await mediaLegs.offerSupervisor(call, userId);
+                EventBus.emit('call:monitor:offer', { callId, sdpOffer: offer, socketId });
+                return;
+            }
+
             const sdpAnswer = await mediaLegs.addSupervisor(call, userId, sdpOffer);
 
             await callParticipants.join(call, { kind: ParticipantKind.SUPERVISOR, agentId: userId });
@@ -54,6 +63,23 @@ export class MonitorEventHandler {
 
             await agentConnections.detachSocketFromCall(socketId, callId).catch(() => { });
 
+            emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: error.message, socketId });
+        }
+    }
+
+    // The supervisor's answer to Callio's monitor offer.
+    async handleMonitorAnswered({ callId, userId, tenantId, sdpAnswer, socketId }) {
+        try {
+            const call = await CallRepository.getInProgressCall(tenantId, callId);
+            if (!call) throw new Error('Call not found or already ended');
+            await mediaLegs.supervisorAnswered(call, userId, sdpAnswer);
+            await callParticipants.join(call, { kind: ParticipantKind.SUPERVISOR, agentId: userId });
+            log.info({ callId }, 'Monitoring session created');
+            EventBus.emit('call:monitor:started', { callId, socketId });
+        } catch (error) {
+            log.error({ err: error }, 'Monitor answer failed');
+            await mediaLegs.removeSupervisor(callId, userId).catch(() => { });
+            await agentConnections.detachSocketFromCall(socketId, callId).catch(() => { });
             emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: error.message, socketId });
         }
     }

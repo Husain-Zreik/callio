@@ -30,6 +30,7 @@ class CallRepository {
             agent_id = null,
             ivr_flow_id = null,
             state = null,
+            media_topology = 'ROOM',
             customer_address = null,
             customer_address_type = null,
             customer_name = null,
@@ -47,15 +48,15 @@ class CallRepository {
         const [result] = await connection.execute(`
             INSERT INTO calls (
                 tenant_id, channel_id, channel, channel_address, provider_call_id,
-                queue_id, agent_id, ivr_flow_id, state,
+                queue_id, agent_id, ivr_flow_id, state, media_topology,
                 customer_address, customer_address_type, customer_name,
                 external_ref, consumer_metadata,
                 direction, type, status, ringing_at, queued_at, offered_at, metadata,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
         `, [
             tenant_id, channel_id, channel, channel_address, provider_call_id,
-            queue_id, agent_id, ivr_flow_id, state,
+            queue_id, agent_id, ivr_flow_id, state, media_topology,
             customer_address, customer_address_type, customer_name,
             external_ref, consumer_metadata ? JSON.stringify(consumer_metadata) : null,
             direction, type, status, ringing_at, queued_at, offered_at, metadata ? JSON.stringify(metadata) : null,

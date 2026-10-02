@@ -109,6 +109,12 @@ export const TerminationReason = Object.freeze({
     IVR_AGENT_NO_ANSWER: 'IVR_AGENT_NO_ANSWER',
 });
 
+// How a call's media runs (calls.media_topology, core/media/MediaTopology.js).
+export const MediaTopology = Object.freeze({
+    ROOM: 'ROOM',       // a FreeSWITCH room (IVR, queues, hold, recording, whisper/barge)
+    DIRECT: 'DIRECT',   // rtpengine alone bridges the customer and the agent
+});
+
 export const TerminatedBy = Object.freeze({
     AGENT: 'AGENT',       // an agent or supervisor ended it
     SYSTEM: 'SYSTEM',     // our infrastructure caused the failure (agent disconnect, cleanup, IVR error)

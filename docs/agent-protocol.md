@@ -145,10 +145,12 @@ id) answers `{ error: { code: 'BOARD_REQUEST_FAILED', message } }` and a
 | `call:start` | `{ callId, sdpOffer }` | Start an outbound call the consumer created via `POST /v1/tenants/{t}/calls`. Only the agent the intent names may start it. Replies `call:started`. The agent is `ON_CALL` during the call, whatever their shift, and back to their shift (`AVAILABLE` or `OFFLINE`, unchanged) when it ends. |
 | `call:terminate` | `{ callId, reason? }` | Hang up. Allowed for the agent on (or offered) the call and for the tenant's supervisors. The call ends `COMPLETED`, or `NO_ANSWER` if nobody answered yet (`terminatedBy: AGENT`). `reason: 'system_failed'` when the client gave up reconnecting media: it ends `FAILED` / `NETWORK_ERROR` (`terminatedBy: SYSTEM`). Any other `reason` is ignored. |
 | `call:cancel` | `{ callId }` | Cancel an outbound call before it's answered: ends `CANCELLED` (`terminatedBy: AGENT`). Same permissions as `call:terminate`. |
-| `call:reconnect` | `{ callId, sdpOffer, reconnectTrigger? }` | Re-establish the media leg (network change, page reload, moving to another device). Another still-live socket holding the call gets `call:connection_superseded`. |
+| `call:reconnect` | `{ callId, sdpOffer?, reconnectTrigger? }` | Re-establish the media leg (network change, page reload, moving to another device). Another still-live socket holding the call gets `call:connection_superseded`. Without `sdpOffer`, Callio offers instead: `call:reconnected` brings `sdpOffer`, answered with `call:reconnect:answer`. A `DIRECT` call must reconnect this way — see *Media*. |
+| `call:reconnect:answer` | `{ callId, sdpAnswer }` | Your answer to the offer in `call:reconnected`. Replies `call:reconnect:completed`. |
 | `call:transfer` | `{ callId, agentId }` or `{ callId, queueId }` | Transfer to an agent, or into a queue (picked by the queue's strategy). Allowed for the agent on the call and for supervisors. The target agent must be `AVAILABLE`; a queue must be `ACTIVE` and have an available member other than the current agent. |
 | `connection:ice-candidate` | `{ callId, candidate, connectionType: 'AGENT'\|'MONITOR' }` | Trickle ICE for this socket's leg. Accepted, but not needed: Callio's side learns your address from your connectivity checks. Ignored unless the socket is bound to the call. |
-| `call:monitor` | `{ callId, sdpOffer }` | Supervisors only, on an `IN_PROGRESS` call; one supervisor per call at a time. Offer **one** audio transceiver — see *Monitoring*. Replies `call:monitor:started`. |
+| `call:monitor` | `{ callId, sdpOffer? }` | Supervisors only, on an `IN_PROGRESS` call; one supervisor per call at a time. Offer **one** audio transceiver — see *Monitoring*. Replies `call:monitor:started`. Without `sdpOffer`, Callio offers (`call:monitor:offer`) and you answer with `call:monitor:answer`; a `DIRECT` call is monitored this way. |
+| `call:monitor:answer` | `{ callId, sdpAnswer }` | Your answer to `call:monitor:offer`. Replies `call:monitor:started` (without `sdpAnswer`). |
 | `call:monitor:mode` | `{ callId, mode: 'listen'\|'whisper'\|'barge' }` | While monitoring. Any other mode → `MONITOR_FAILED`. |
 | `call:monitor:stop` | `{ callId }` | Ignored unless this socket is monitoring the call. |
 | `call:agent:private` | `{ callId, active }` | The agent talks privately to the monitoring supervisor (muted to the customer). Takes effect only while the supervisor is in `whisper` mode: otherwise the answer is `call:agent:private:changed { active: false }` plus `MONITOR_FAILED`. It ends when the supervisor leaves `whisper` or stops monitoring. |
@@ -166,7 +168,8 @@ id) answers `{ error: { code: 'BOARD_REQUEST_FAILED', message } }` and a
 | `call:success` | `{ callId, message, code: 'CALL_ACCEPTED' }` — to the call room once an accept went through. |
 | `call:handled` | `{ callId, tenantId, userId, agentName, deviceId, action: 'accepted'\|'rejected' }` — someone answered/declined; other agents should stop ringing. For an outbound call, `accepted` means the customer answered (`deviceId: null`). |
 | `call:status` | `{ callId, tenantId, status, userId, ringingAt?, answeredAt? }` — provider status changes: `RINGING`, `ACCEPTED`, `REJECTED`, `FAILED`. `userId` is the call's agent. |
-| `call:reconnected` | `{ callId, userId, deviceId, sdpAnswer }` — reply to `call:reconnect`, sent only to the socket that sent it. |
+| `call:reconnected` | `{ callId, userId, deviceId, sdpAnswer }` — reply to `call:reconnect`, sent only to the socket that sent it; `sdpOffer` instead of `sdpAnswer` when you reconnected without an offer. |
+| `call:reconnect:completed` | `{ callId, userId, deviceId }` — your `call:reconnect:answer` was applied and the leg is back in the call. |
 | `call:connection_superseded` | `{ callId, reason: 'switched_device' }` — this socket no longer holds the call's media (taken over by another of the agent's sockets). |
 | `call:transferred` | To the previous agent and supervisors: the new agent's `call:incoming` payload without `sdpOffer` and `tenantId`, plus `userId` (the new agent), `targetQueueId` and `transferTarget: { type: 'agent'\|'queue', queueId }`. |
 | `call:terminated` | `{ callId, tenantId, reason, terminationReason, terminatedBy, source }` — the call ended; `reason` equals `terminationReason` (values in [events.md](events.md#values)); `source` is a short internal label. Two other forms: `{ callId, reason: 'transferred' }` to the call room when a transfer moves the call away from the previous agent — that agent's leg is over, the call is not; and `{ callId, tenantId, reason: 'orphan_cleanup', terminationReason }` when Callio closes leftover media of a call that already ended (`terminationReason` is then the call's status, or `NOT_FOUND`; no `terminatedBy`). |
@@ -226,7 +229,8 @@ call room.
 |---|---|
 | `call:incoming:supervisor` | Every offer of a call: the `call:incoming` payload without `sdpOffer`, including calls entering IVR (`assignmentType: 'IVR'`). |
 | `call:initiated` | An agent started an outbound call: the call view (no SDP). |
-| `call:monitor:started` | `{ callId, sdpAnswer }` — reply to `call:monitor`. |
+| `call:monitor:offer` | `{ callId, sdpOffer }` — Callio's offer for a `call:monitor` without one. |
+| `call:monitor:started` | `{ callId, sdpAnswer }` — reply to `call:monitor` (no `sdpAnswer` after `call:monitor:answer`). |
 | `call:monitor:mode:changed` | `{ callId, mode }` — to the supervisor's socket, confirming `call:monitor:mode`. |
 | `call:monitor:ended` | `{ callId, userId }` — to the supervisor's socket when monitoring stopped. |
 | `call:monitor:agent:reconnected` | `{ callId }` — to the call room: the agent's leg was rebuilt and the supervisor hears the agent again. |
@@ -251,6 +255,7 @@ Every call event is built on one call view:
   "direction": "INBOUND",
   "status": "RINGING",
   "state": null,
+  "mediaTopology": "ROOM",
   "customer": { "address": "+96181030841", "addressType": "E164", "name": "Test Customer" },
   "agentId": 7,
   "agentName": "Agent One",
@@ -270,6 +275,11 @@ Every call event is built on one call view:
 `callUuid` is a stable UUID-shaped id for the call, for native call UIs that
 require one (CallKit, Android Telecom). The same value is in the call's pushes.
 
+`mediaTopology` is how Callio carries the call's audio: `ROOM` (a media room:
+IVR, queues, hold music, recording, whisper and barge) or `DIRECT` (a personal
+line's plain 1:1 call, relayed without a room). It's fixed for the call. A
+`DIRECT` call reconnects and is monitored with Callio offering (below).
+
 ## Media
 
 - **Inbound:** `call:incoming.sdpOffer` is Callio's offer for your leg (its
@@ -287,6 +297,13 @@ require one (CallKit, Android Telecom). The same value is in the call's pushes.
   answer from `call:reconnected`. There is no ICE restart — Callio rebuilds its
   side of the leg. If reconnecting doesn't bring media back, send
   `call:terminate { reason: 'system_failed' }`.
+- **Reconnecting a `DIRECT` call:** send `call:reconnect` **without** an offer;
+  `call:reconnected` brings Callio's `sdpOffer`; answer it on the new peer
+  connection and send the answer in `call:reconnect:answer`
+  (`call:reconnect:completed` confirms). An offer from your side would move the
+  ports the provider sends to. This flow works for `ROOM` calls too.
+- On a `DIRECT` call nothing plays while your leg is down: the customer hears
+  silence, not the reconnecting tone.
 - **A Callio worker restarting** (a deploy) or dying doesn't end your call: its
   media keeps flowing and another worker takes the call over. Your socket closes
   (socket.io reason `transport close`); reconnect it as for any drop. Your media
@@ -302,6 +319,14 @@ mixed by Callio. The microphone is only heard in `whisper` (by the agent) and
 `barge` (by the agent and the customer); Callio applies the mode, so there is
 no renegotiation when it changes. Extra audio lines in the offer (older
 clients offered a second, receive-only one) are answered as rejected (port 0).
+
+Without an offer in `call:monitor`, Callio offers (`call:monitor:offer`) and
+you answer (`call:monitor:answer`). On a `ROOM` call that's the same single
+`sendrecv` line. On a `DIRECT` call (no room to mix in) the offer has **one
+receive-only audio line per side** — the customer and the agent — and nothing
+you send reaches the call: monitoring a direct call is listen-only
+(`listen` is the only mode; a tenant whose calls run direct allows only
+`listen`).
 
 ## Push
 

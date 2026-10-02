@@ -281,10 +281,8 @@ export default function registerCallSocketListeners(socket) {
                 emitCallError({ callId: null, code: CallErrorCodes.RECONNECT_FAILED, message: 'Missing callId', socket });
                 return;
             }
-            if (!sdpOffer) {
-                emitCallError({ callId, code: CallErrorCodes.RECONNECT_FAILED, message: 'Missing SDP offer', socket });
-                return;
-            }
+            // No sdpOffer: Callio offers (call:reconnected { sdpOffer }) and the
+            // agent answers with call:reconnect:answer — how a DIRECT call reconnects.
             if (!await callAccess.asAgent(callId, identity())) {
                 emitCallError({ callId, code: CallErrorCodes.RECONNECT_FAILED, message: 'You are not on this call', socket });
                 return;
@@ -304,6 +302,32 @@ export default function registerCallSocketListeners(socket) {
             });
         } catch (error) {
             log.error({ err: error }, 'Reconnect call error');
+            emitCallError({ callId, code: CallErrorCodes.RECONNECT_FAILED, message: 'Failed to reconnect call', socket });
+        }
+    });
+
+    // The agent's answer to the offer call:reconnected brought.
+    socket.on('call:reconnect:answer', async (data) => {
+        const { callId, sdpAnswer } = data || {};
+        try {
+            if (!callId || !sdpAnswer) {
+                emitCallError({ callId: callId ?? null, code: CallErrorCodes.RECONNECT_FAILED, message: 'Missing callId or SDP answer', socket });
+                return;
+            }
+            if (!boundTo(callId) || !await callAccess.asAgent(callId, identity())) {
+                emitCallError({ callId, code: CallErrorCodes.RECONNECT_FAILED, message: 'You are not reconnecting this call', socket });
+                return;
+            }
+            await callInbox.post(callId, EventTypes.AGENT_RECONNECT_ANSWERED, {
+                callId,
+                userId: socket.user?.id,
+                tenantId: socket.tenant?.id,
+                sdpAnswer,
+                socketId: socket.id,
+                deviceId: socket.user?.deviceId ?? null,
+            });
+        } catch (error) {
+            log.error({ err: error }, 'Reconnect answer error');
             emitCallError({ callId, code: CallErrorCodes.RECONNECT_FAILED, message: 'Failed to reconnect call', socket });
         }
     });
@@ -364,10 +388,8 @@ export default function registerCallSocketListeners(socket) {
                 emitCallError({ callId: null, code: CallErrorCodes.MONITOR_FAILED, message: 'Missing callId', socket });
                 return;
             }
-            if (!sdpOffer) {
-                emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: 'Missing SDP offer', socket });
-                return;
-            }
+            // No sdpOffer: Callio offers (call:monitor:offer) and the supervisor
+            // answers with call:monitor:answer — how a DIRECT call is listened to.
             if (!await callAccess.asSupervisor(callId, identity())) {
                 emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: 'Only supervisors can monitor calls', socket });
                 return;
@@ -388,6 +410,26 @@ export default function registerCallSocketListeners(socket) {
             log.error({ err: error }, 'Monitor call error');
             roomManager.leaveCallRoom(socket, callId);
             socket.isMonitoring = false;
+            emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: error.message, socket });
+        }
+    });
+
+    socket.on('call:monitor:answer', async (data) => {
+        const { callId, sdpAnswer } = data || {};
+        try {
+            if (!callId || !sdpAnswer) {
+                emitCallError({ callId: callId ?? null, code: CallErrorCodes.MONITOR_FAILED, message: 'Missing callId or SDP answer', socket });
+                return;
+            }
+            if (!socket.isMonitoring || !boundTo(callId)) {
+                emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: 'You are not monitoring this call', socket });
+                return;
+            }
+            await callInbox.post(callId, EventTypes.MONITOR_ANSWERED, {
+                callId, userId: socket.user?.id, tenantId: socket.tenant?.id, sdpAnswer, socketId: socket.id,
+            });
+        } catch (error) {
+            log.error({ err: error }, 'Monitor answer error');
             emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: error.message, socket });
         }
     });

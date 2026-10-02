@@ -12,7 +12,7 @@ import { redisCleanupService } from '../infra/cluster/RedisCleanupService.js';
 import { storageClient } from '../infra/storage/StorageClient.js';
 import { drachtio } from '../infra/sip/Drachtio.js';
 import { callMedia } from '../core/media/CallMedia.js';
-import { roomMedia } from '../media/rooms/RoomMedia.js';
+import { mediaRouter } from '../media/MediaRouter.js';
 import { callNotifications } from '../core/calls/CallNotifications.js';
 import { callPushNotifier } from '../push/CallPushNotifier.js';
 import { customerNetworkLossPolicy } from '../core/calls/CustomerNetworkLossPolicy.js';
@@ -78,7 +78,7 @@ export async function startCoreServices() {
     // rooms on FreeSWITCH. A media server that isn't up yet doesn't stop the
     // worker: the first call reconnects.
     drachtio.start();
-    callMedia.register(roomMedia);
+    callMedia.register(mediaRouter);
     await callMedia.start().catch((err) => log.error({ err }, 'Media plane not ready — calls fail until it connects'));
     // Takes over calls whose worker stopped (needs the media plane to drive them).
     callAdoption.start();

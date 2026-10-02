@@ -35,6 +35,9 @@ export function toCallView(call, { agentName = null, deviceId = undefined } = {}
         direction: call.direction,
         status: call.status,
         state: call.state ?? null,
+        // 'DIRECT': rtpengine alone carries it — reconnect without an offer
+        // (docs/agent-protocol.md → Reconnect).
+        mediaTopology: call.media_topology ?? 'ROOM',
         customer: {
             address: call.customer_address ?? null,
             addressType: call.customer_address_type ?? null,

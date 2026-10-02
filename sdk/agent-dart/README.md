@@ -76,6 +76,10 @@ monitor.stop();
 `monitor.stream` (the call as the supervisor hears it), `monitor.mode`,
 `monitor.state`, `monitor.ended`. A reconnect ends monitoring.
 
+Direct calls (`call.data.isDirect`: a personal line's 1:1 call that Callio
+relays without a room) reconnect by answering Callio's offer (handled for you),
+and monitoring one is listen-only, without the microphone.
+
 ## The native call screen (`package:callio_agent/native_calls.dart`)
 
 The phone's own call UI: full-screen incoming call and ConnectionService on

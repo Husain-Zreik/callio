@@ -35,6 +35,7 @@ import { redisBaseService } from '../../infra/redis/RedisBaseService.js';
 import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinator.js';
 import { queueRouter } from '../routing/QueueRouter.js';
 import { inboundRouter, RouteKind } from '../routing/InboundRouter.js';
+import { mediaTopology } from '../media/MediaTopology.js';
 import { deadlines } from '../../infra/cluster/Deadlines.js';
 import { callLifecycleLogger } from '../calls/CallLifecycleLogger.js';
 import { customerLookup } from '../calls/CustomerLookup.js';
@@ -56,6 +57,7 @@ import {
     AgentAvailability,
     TerminationReason,
     TerminatedBy,
+    MediaTopology,
 } from '../constants/CallConstants.js';
 import { logger } from '../../infra/logging/logger.js';
 
@@ -219,6 +221,8 @@ class ChannelIngress {
                 state: ivrFlowId ? 'IVR' : null,
                 // An IVR call enters the queue when the flow transfers it.
                 queued_at: route.kind === RouteKind.QUEUE ? ringingAt : null,
+                // A personal line's plain 1:1 call may skip the room (MediaTopology).
+                media_topology: route.kind === RouteKind.OWNER ? await mediaTopology.decide(channel) : MediaTopology.ROOM,
                 metadata,
             });
             consumerEventPublisher.publishForCall(callId, 'call.created');

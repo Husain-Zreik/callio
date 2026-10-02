@@ -173,7 +173,10 @@ export async function hear(listener, ms = 3000, settleMs = 2000) {
 // Outbound calls to this number fail at the Graph API.
 export const UNREACHABLE_NUMBER = '96181030899';
 
-export function fakeMeta({ callioUrl, apiKey, phoneNumberId, port = 3990 }) {
+// One fake Graph API for every WhatsApp number Callio calls (Callio sends all
+// of them to one base URL): phoneNumberId is the default for callIn, and
+// otherPhoneNumberIds are numbers it also answers for.
+export function fakeMeta({ callioUrl, apiKey, phoneNumberId, otherPhoneNumberIds = [], port = 3990 }) {
     const customers = new Map();
     const calls = [];
     let outbound = 0;
@@ -181,11 +184,14 @@ export function fakeMeta({ callioUrl, apiKey, phoneNumberId, port = 3990 }) {
     const ts = () => String(Math.floor(Date.now() / 1000));
 
     let target = callioUrl;   // retarget(): webhooks reach any worker
-    async function post(value) {
+    const numberOf = new Map();   // provider call id → the number it's on
+    async function post(value, number = null) {
+        const callId = value.calls?.[0]?.id ?? value.statuses?.[0]?.id;
+        const pnid = number ?? numberOf.get(callId) ?? phoneNumberId;
         const res = await fetch(`${target}/v1/webhooks/whatsapp/forward`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-            body: JSON.stringify({ object: 'whatsapp_business_account', entry: [{ id: 'waba', changes: [{ field: 'calls', value: { messaging_product: 'whatsapp', metadata, ...value } }] }] }),
+            body: JSON.stringify({ object: 'whatsapp_business_account', entry: [{ id: 'waba', changes: [{ field: 'calls', value: { messaging_product: 'whatsapp', metadata: { ...metadata, phone_number_id: pnid }, ...value } }] }] }),
         });
         return res.status;
     }
@@ -203,7 +209,8 @@ export function fakeMeta({ callioUrl, apiKey, phoneNumberId, port = 3990 }) {
         const body = raw ? JSON.parse(raw) : {};
         calls.push({ path: req.url, auth: req.headers.authorization, body });
         const reply = (status, data) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); };
-        if (!req.url.replace(/\/+/g, '/').endsWith(`/${phoneNumberId}/calls`)) return reply(404, { error: { message: 'unknown path' } });
+        const path = req.url.replace(/\/+/g, '/');
+        if (![phoneNumberId, ...otherPhoneNumberIds].some((n) => path.endsWith(`/${n}/calls`))) return reply(404, { error: { message: 'unknown path' } });
 
         if (body.action === 'accept') {
             const customer = customers.get(body.call_id);
@@ -253,9 +260,10 @@ export function fakeMeta({ callioUrl, apiKey, phoneNumberId, port = 3990 }) {
         listen: () => new Promise((r) => server.listen(port, '127.0.0.1', r)),
         close: () => { for (const c of customers.values()) c.close(); server.close(); },
         // A customer calls in; resolves with { id, customer } once the webhook is accepted.
-        async callIn(id, { from = '96181030841', name = 'Test Customer', freq = 440 } = {}) {
+        async callIn(id, { from = '96181030841', name = 'Test Customer', freq = 440, phoneNumberId: number = null } = {}) {
             const customer = newPeer(freq);
             customers.set(id, customer);
+            if (number) numberOf.set(id, number);
             await customer.pc.setLocalDescription(await customer.pc.createOffer());
             await gathered(customer.pc);
             const status = await post({

@@ -2,8 +2,10 @@
 // Created by CallioAgent.monitor() — don't construct directly.
 //
 // One audio line to Callio: it sends the supervisor's microphone and
-// receives the call — the customer and the agent, mixed by Callio. Callio
-// decides who hears the supervisor, so a mode change needs no renegotiation:
+// receives the call — the customer and the agent, mixed by Callio. A DIRECT
+// call (no room to mix in) is listen-only: Callio offers one line per side and
+// the stream carries both. Callio decides who hears the supervisor, so a mode
+// change needs no renegotiation:
 //   listen   the supervisor hears the call; nobody hears the supervisor
 //   whisper  the agent hears the supervisor; the customer doesn't
 //   barge    both hear the supervisor
@@ -57,11 +59,16 @@ export class Monitor extends Emitter {
         const { RTCPeerConnection, MediaStream } = this.agent.webrtc;
         const pc = new RTCPeerConnection({ iceServers: this.agent.iceServers });
         this.pc = pc;
+        // A direct call is listened to by answering Callio's offer, and never
+        // needs the microphone.
+        this._direct = this.agent.board?.get?.(String(this.callId))?.mediaTopology === 'DIRECT';
 
-        this._ownsLocalStream = !stream;
-        this.localStream = stream ?? await this.agent._getMicrophone();
-        const mic = this.localStream.getAudioTracks()[0];
-        pc.addTransceiver(mic ?? 'audio', { direction: 'sendrecv', streams: [this.localStream] });
+        if (!this._direct) {
+            this._ownsLocalStream = !stream;
+            this.localStream = stream ?? await this.agent._getMicrophone();
+            const mic = this.localStream.getAudioTracks()[0];
+            pc.addTransceiver(mic ?? 'audio', { direction: 'sendrecv', streams: [this.localStream] });
+        }
 
         pc.onicecandidate = (e) => {
             if (!e.candidate || pc !== this.pc) return;
@@ -72,7 +79,9 @@ export class Monitor extends Emitter {
         };
         pc.ontrack = (e) => {
             if (pc !== this.pc) return;
-            this.stream = new MediaStream([e.track]);
+            // Every line Callio sends goes into the one stream (a direct call: both sides).
+            if (!this.stream) this.stream = new MediaStream([e.track]);
+            else this.stream.addTrack(e.track);
             this.emit('stream', this.stream, e.track);
         };
         pc.onconnectionstatechange = () => {
@@ -82,12 +91,25 @@ export class Monitor extends Emitter {
         };
         this._timer = setTimeout(() => { if (this.state === 'connecting') this.stop(); }, CONNECT_TIMEOUT_MS);
 
+        if (this._direct) {
+            this.agent._send('call:monitor', { callId: this.callId });
+            return;
+        }
         await pc.setLocalDescription(await pc.createOffer());
         this.agent._send('call:monitor', { callId: this.callId, sdpOffer: pc.localDescription.sdp });
     }
 
-    async _onStarted({ sdpAnswer }) {
+    // Callio's offer, for a monitor started without one.
+    async _onOffer({ sdpOffer }) {
         if (!this.pc || this.pc.remoteDescription) return;
+        await this.pc.setRemoteDescription({ type: 'offer', sdp: sdpOffer });
+        for (const c of this._pendingRemote.splice(0)) await this.pc.addIceCandidate(c).catch(() => { });
+        await this.pc.setLocalDescription(await this.pc.createAnswer());
+        this.agent._send('call:monitor:answer', { callId: this.callId, sdpAnswer: this.pc.localDescription.sdp });
+    }
+
+    async _onStarted({ sdpAnswer }) {
+        if (!sdpAnswer || !this.pc || this.pc.remoteDescription) return;
         await this.pc.setRemoteDescription({ type: 'answer', sdp: sdpAnswer });
         for (const c of this._pendingRemote.splice(0)) await this.pc.addIceCandidate(c).catch(() => { });
     }

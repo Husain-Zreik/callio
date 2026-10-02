@@ -47,6 +47,8 @@ export interface CallData {
     direction?: 'INBOUND' | 'OUTBOUND';
     status?: CallStatus;
     state?: 'IVR' | 'QUEUE' | 'ACTIVE' | 'ON_HOLD' | null;
+    /** 'DIRECT': rtpengine alone carries it (a personal line's 1:1 call); listen-only monitoring. */
+    mediaTopology?: 'ROOM' | 'DIRECT';
     customer?: Customer;
     agentId?: number | string | null;
     agentName?: string | null;
@@ -130,6 +132,8 @@ export class Call extends Emitter {
     readonly callUuid: string | null;
     /** Offered to every member of a RING_ALL queue at once. */
     readonly isRingAll: boolean;
+    /** A direct call (mediaTopology 'DIRECT'): it reconnects by answering Callio's offer. */
+    readonly isDirect: boolean;
 
     accept(opts?: { stream?: MediaStream }): Promise<void>;
     decline(): void;

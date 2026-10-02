@@ -7,6 +7,8 @@
 //   2. The call waits in the queue on worker 1; the agent becomes available
 //      on worker 2, which drains the queue and makes the offer: the offer is
 //      made by worker 1 (the call's room stays on one worker) and bridges.
+//   3. Worker 1 dies with a room call, an IVR call and a DIRECT call (a
+//      personal line, rtpengine only) up: worker 2 takes each over.
 // Run through run.mjs, which starts the workers and passes them in E2E_WORKERS.
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { createRequire } from 'module';
@@ -27,7 +29,9 @@ const Redis = createRequire(import.meta.url)('ioredis');
 const redis = new Redis({ host: process.env.REDIS_HOST, port: Number(process.env.REDIS_PORT), db: Number(process.env.REDIS_DB ?? 0) });
 const roomState = async (callId) => JSON.parse((await redis.get(`callio:call:${callId}:room`)) ?? 'null');
 let api = makeApi(W1, seed.api_key);
-const meta = fakeMeta({ callioUrl: W1, apiKey: seed.api_key, phoneNumberId: '111222333' });
+// 555000111: a personal WhatsApp line, whose calls run DIRECT (tenant listen-only, no recording).
+const meta = fakeMeta({ callioUrl: W1, apiKey: seed.api_key, phoneNumberId: '111222333', otherPhoneNumberIds: ['555000111'] });
+const lineMeta = meta;
 const db = await testDb();
 const q = async (sql, params = []) => (await db.execute(sql, params))[0];
 const callByProvider = (id) => waitFor(async () => (await q('SELECT * FROM calls WHERE provider_call_id = ?', [id]))[0], 8000, `call ${id}`);
@@ -50,6 +54,7 @@ const endByAgent = async (agent, callId) => {
 
 await meta.listen();
 let exitCode = 0;
+const tenantBefore = (await api('GET', '/v1/tenants/demo')).body.tenant;
 
 try {
     await api('PUT', '/v1/tenants/demo/queues/main', { name: 'Main queue', strategy: 'ROUND_ROBIN' });
@@ -152,9 +157,29 @@ try {
     check('call 4 waits in an IVR menu on worker 1', (await callRow(row4.id)).state === 'IVR'
         && JSON.parse(await redis.get(`callio:call:${row4.id}:ivr`)).nodeId === 'menu');
 
+    // Call 5: a direct call (rtpengine only) on worker 1 when it dies.
+    await api('PUT', '/v1/tenants/demo', { name: tenantBefore.name, settings: { ...(tenantBefore.settings ?? {}), monitoring: { modes: ['listen'] } } });
+    await api('PUT', '/v1/tenants/demo/agents/line-owner', { name: 'Line owner' });
+    await api('PUT', '/v1/tenants/demo/channels/cluster-line', {
+        type: 'WHATSAPP', address: '+96170000160', provider_account_id: '555000111', credentials: { access_token: 'fake-token' }, owner_agent_ref: 'line-owner',
+    });
+    const owner = await connectAgent(W2, seed, 'line-owner');
+    const c5 = await lineMeta.callIn('wacid.cl.5', { from: '96181030855', freq: 660, phoneNumberId: '555000111' });
+    const row5 = await callByProvider(c5.id);
+    await accept(owner, await nextIncoming(owner, row5.id), 880);
+    await waitFor(async () => (await callRow(row5.id)).status === 'IN_PROGRESS', 10000, 'call 5 in progress');
+    const cust5Before = await ear(c5.customer.received);
+    const owner5Before = await ear(owner.peer.received);
+    const lease5 = `callio:call:${row5.id}:lease`;
+    check('call 5 is DIRECT on worker 1 and bridges both ways', (await callRow(row5.id)).media_topology === 'DIRECT'
+        && cust5Before?.dominant() === 880 && owner5Before?.dominant() === 660
+        && (await redis.get(lease5)) === (await (await fetch(`${W1}/health`)).json()).boot && Boolean(await redis.get(`callio:call:${row5.id}:direct`)),
+        `${(await callRow(row5.id)).media_topology} customer=${cust5Before?.dominant()} owner=${owner5Before?.dominant()}`);
+
     const killedAt = Date.now();
     process.kill(workers[0].pid);
     meta.retarget(W2);
+    lineMeta.retarget(W2);
     api = makeApi(W2, seed.api_key);
     const custGap = await ear(c3.customer.received);
     const agentGap = await ear(a1.peer.received);
@@ -167,6 +192,11 @@ try {
     }, 30000, 'call 3 adopted').catch(() => null);
     check('worker 2 takes the call over', Boolean(ownerAfter) && ownerAfter === (await (await fetch(`${W2}/health`)).json()).boot,
         `lease=${ownerAfter} after ${Math.round((Date.now() - killedAt) / 1000)}s`);
+    const lease5After = await waitFor(async () => { const v = await redis.get(lease5); return v === ownerAfter ? v : null; }, 15000, 'call 5 adopted').catch(() => null);
+    const cust5Gap = await ear(c5.customer.received);
+    const owner5Gap = await ear(owner.peer.received);
+    check('worker 2 takes the direct call over too; it never stopped bridging', Boolean(lease5After)
+        && cust5Gap?.dominant() === 880 && owner5Gap?.dominant() === 660, `lease=${await redis.get(lease5)} customer=${cust5Gap?.dominant()} owner=${owner5Gap?.dominant()}`);
 
     // Call 4: the menu resumes on worker 2; pressing 1 routes it to the queue.
     await waitFor(async () => (await redis.get(`callio:call:${row4.id}:lease`)) === ownerAfter, 15000, 'call 4 adopted').catch(() => { });
@@ -194,6 +224,14 @@ try {
     check('a minute later the adopted call still bridges both ways (the sweep spared its legs)',
         custLate?.dominant() === 880 && agentLate?.dominant() === 440, `customer=${custLate?.dominant()} agent=${agentLate?.dominant()}`);
 
+    const cust5Late = await ear(c5.customer.received);
+    const owner5Late = await ear(owner.peer.received);
+    check('a minute later the adopted direct call still bridges (the sweep spared its rtpengine session)',
+        cust5Late?.dominant() === 880 && owner5Late?.dominant() === 660, `customer=${cust5Late?.dominant()} owner=${owner5Late?.dominant()}`);
+    await endByAgent(owner, row5.id).catch(() => { });
+    check('the adopted direct call hangs up cleanly; its state and lease are gone', (await callRow(row5.id)).termination_reason === 'COMPLETED'
+        && !(await redis.exists(`callio:call:${row5.id}:direct`)) && !(await redis.exists(lease5)));
+
     await endByAgent(a1, row3.id).catch(() => { });
     const ended = await callRow(row3.id);
     check('the adopted call hangs up cleanly: COMPLETED/AGENT', ended.status === 'TERMINATED'
@@ -211,6 +249,7 @@ try {
         name: 'Cluster menu', channel_ref: 'whatsapp-main', status: 'INACTIVE',
         structure: { nodes: [{ id: 'start', type: 'ivr_start', data: {} }], edges: [] },
     }).catch(() => { });
+    await api('PUT', '/v1/tenants/demo', { name: tenantBefore.name, settings: tenantBefore.settings ?? {} }).catch(() => { });
     if (summary() > 0) exitCode = 1;
     meta.close();
     redis.disconnect();

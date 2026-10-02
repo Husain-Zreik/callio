@@ -137,6 +137,10 @@ Types ship with the package (`src/index.d.ts`): `connect`, `CallioAgent`,
 - ICE candidates buffered both ways until each side is ready.
 - Media recovery: no media within 15 s or a failed connection → one reconnect,
   then the call is ended with `system_failed`.
+- Direct calls (`call.isDirect`: a personal line's 1:1 call that Callio relays
+  without a room): reconnecting answers Callio's offer instead of sending one,
+  and `agent.monitor()` listens without the microphone — the stream carries the
+  customer and the agent as two tracks (listen-only).
 - Offers withdrawn (taken, timed out, declined elsewhere, an unaccepted
   transfer returned to its queue) and redelivered offers.
 - TURN credentials refreshed on the live connection before they expire, for

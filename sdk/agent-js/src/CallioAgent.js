@@ -411,6 +411,7 @@ export class CallioAgent extends Emitter {
             s.on(done, (p) => { if (onBoard(p)) this.#boardUpsert({ callId: p.callId, ivr: null }); });
         }
         s.on('call:monitor:started', (p) => forMonitor(p)?._onStarted(p));
+        s.on('call:monitor:offer', (p) => forMonitor(p)?._onOffer(p));
         s.on('call:monitor:mode:changed', (p) => forMonitor(p)?._onMode(p.mode));
         s.on('call:monitor:ended', (p) => forMonitor(p)?._end('ended'));
         s.on('call:monitor:agent:reconnected', (p) => forMonitor(p)?.emit('agentReconnected', p));

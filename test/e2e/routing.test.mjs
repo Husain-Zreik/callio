@@ -200,6 +200,28 @@ try {
     check('a plain agent cannot monitor calls', agentMonitor?.message?.includes('supervisor'), agentMonitor?.message);
     sup.socket.emit('call:monitor:stop', { callId: row3.id });
     sup.peer.close(); sup.peer = null;
+    await waitFor(() => sup.events.some((e) => e.event === 'call:monitor:ended'), 5000, 'monitor ended').catch(() => { });
+
+    // Monitoring without an offer (how DIRECT calls are listened to) works on a
+    // room too: Callio offers, the supervisor answers, hears the room mix.
+    const offersBefore = sup.events.filter((e) => e.event === 'call:monitor:offer').length;
+    sup.socket.emit('call:monitor', { callId: row3.id });
+    const roomOffer = await waitFor(() => sup.events.filter((e) => e.event === 'call:monitor:offer')[offersBefore]?.payload, 8000, 'call:monitor:offer').catch(() => null);
+    let roomMix = null;
+    if (roomOffer?.sdpOffer) {
+        sup.peer = newPeer(660);
+        await sup.peer.pc.setRemoteDescription({ type: 'offer', sdp: roomOffer.sdpOffer });
+        for (const c of sup.pendingCandidates.splice(0)) await sup.peer.pc.addIceCandidate(c).catch(() => { });
+        await sup.peer.pc.setLocalDescription(await sup.peer.pc.createAnswer());
+        await gathered(sup.peer.pc);
+        sup.socket.emit('call:monitor:answer', { callId: row3.id, sdpAnswer: sup.peer.pc.localDescription.sdp });
+        roomMix = await Promise.race([sup.peer.received, sleep(8000).then(() => null)]);
+        if (roomMix) await hear(roomMix);
+    }
+    check('monitoring without an offer: Callio offers, the supervisor answers and hears the call', Boolean(roomMix?.has(440)),
+        roomOffer ? `heard=${roomMix ? JSON.stringify(Object.keys(roomMix.stats.bins).filter((f) => roomMix.has(Number(f)))) : 'no track'}` : 'no offer');
+    sup.socket.emit('call:monitor:stop', { callId: row3.id });
+    sup.peer?.close(); sup.peer = null;
 
     // ── 5. Transfer to another agent ──
     await sleep(500);
@@ -255,8 +277,8 @@ try {
     await endByAgent(a2, row3.id);
     const people3 = (await api('GET', `/v1/calls/${row3.id}`)).body.participants ?? [];
     const stays = people3.map((p) => `${p.kind}:${p.agentRef ?? '-'}:${p.leaveReason}`);
-    check('participants: the customer, agent-1 twice (each stay handed on), agent-2 to the end, the supervisor until they stopped',
-        JSON.stringify(stays) === JSON.stringify(['CUSTOMER:-:ENDED', 'AGENT:agent-1:TRANSFERRED', 'SUPERVISOR:sup-1:MONITOR_STOPPED', 'AGENT:agent-1:TRANSFERRED', 'AGENT:agent-2:ENDED'])
+    check('participants: the customer, agent-1 twice (each stay handed on), agent-2 to the end, the supervisor twice until they stopped',
+        JSON.stringify(stays) === JSON.stringify(['CUSTOMER:-:ENDED', 'AGENT:agent-1:TRANSFERRED', 'SUPERVISOR:sup-1:MONITOR_STOPPED', 'SUPERVISOR:sup-1:MONITOR_STOPPED', 'AGENT:agent-1:TRANSFERRED', 'AGENT:agent-2:ENDED'])
         && people3.every((p) => p.joinedAt && p.leftAt), JSON.stringify(stays));
 
     // ── 6. IVR with an in-band DTMF key press ──

@@ -46,6 +46,7 @@ class Room {
         this.pendingAgent = null;      // offered, not answered
         this.agents = new Map();       // agentId → leg
         this.supervisors = new Map();  // supervisorId → leg
+        this.pendingSupervisors = new Map();  // supervisorId → leg offered, not answered
         this.mode = 'listen';
         this.agentPrivate = false;
         this.bridged = false;
@@ -372,6 +373,31 @@ class RoomMedia {
         });
     }
 
+    // Callio offers the supervisor's leg; supervisorAnswered joins it, muted.
+    offerSupervisor(call, supervisorId) {
+        return this._serial(call.id, async (room) => {
+            await this._destroyLeg(room.pendingSupervisors.get(String(supervisorId)));
+            const { leg, offer } = await this._legOffer(room, 'supervisor', 'webrtc');
+            room.pendingSupervisors.set(String(supervisorId), leg);
+            return offer;
+        });
+    }
+
+    supervisorAnswered(call, supervisorId, sdpAnswer) {
+        return this._serial(call.id, async (room) => {
+            const leg = room.pendingSupervisors.get(String(supervisorId));
+            if (!leg) throw new Error('No supervisor leg offered on this worker');
+            room.pendingSupervisors.delete(String(supervisorId));
+            await this._applyAnswer(leg, sdpAnswer);
+            const previous = room.supervisors.get(String(supervisorId));
+            if (previous) { room.supervisors.delete(String(supervisorId)); await this._destroyLeg(previous); }
+            if (room.supervisors.size === 0) room.mode = 'listen';
+            await this._join(room, leg, { mute: true });
+            room.supervisors.set(String(supervisorId), leg);
+            await this._rules(room);
+        });
+    }
+
     setSupervisorMode(callId, mode) {
         if (!this._get(callId)) throw new Error('This call has no media here');
         return this._serial(callId, async (room) => {
@@ -481,7 +507,7 @@ class RoomMedia {
             this.rooms.delete(String(callId));
             room.monitor?.stop();
             if (room.recording) await roomRecorder.stop(room.recording);
-            const legs = [room.customer, room.pendingAgent, ...room.agents.values(), ...room.supervisors.values()].filter(Boolean);
+            const legs = [room.customer, room.pendingAgent, ...room.agents.values(), ...room.supervisors.values(), ...room.pendingSupervisors.values()].filter(Boolean);
             await Promise.all(legs.map((leg) => this._destroyLeg(leg)));
             await dropRoom(callId).catch(() => { });
             log.debug({ callId }, `Room closed (${legs.length} legs)`);

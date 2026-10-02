@@ -327,6 +327,26 @@ export class AgentEventHandler {
         }
     }
 
+    // The agent's answer to the offer a reconnect without an offer got.
+    async handleReconnectAnswered({ callId, userId, tenantId, sdpAnswer, socketId, deviceId }) {
+        try {
+            const call = await CallRepository.getUserActiveCall(tenantId, callId, userId);
+            if (!call) throw new Error('No active call found for reconnecting.');
+            if (!callMedia.hasAgentOffer(callId)) throw new Error('No reconnect offer is waiting for this call.');
+            agentLegSockets.set(callId, socketId);
+            await mediaLegs.agentAccepted(call, userId, sdpAnswer, deviceId);
+            await callMedia.bridge(call);
+            this._announceToMonitor(callId);
+            await callParticipants.agentDevice(callId, userId, deviceId ?? null);
+            await callLifecycleLogger.logReconnected(callId, tenantId, userId, { source: 'reconnect_offer' });
+            EventBus.emit('call:reconnect:completed', { callId, userId, socketId, deviceId: deviceId ?? null });
+            log.info({ agentId: userId, callId }, 'Agent reconnected');
+        } catch (error) {
+            log.error({ callId, err: error }, 'Failed to complete the reconnect');
+            emitCallError({ callId, code: CallErrorCodes.RECONNECT_FAILED, message: error.message, socketId });
+        }
+    }
+
     async handleAgentReconnected(data) {
         const { callId, userId, tenantId, sdpOffer, socketId, deviceId, reconnectTrigger } = data;
 
@@ -396,6 +416,17 @@ export class AgentEventHandler {
                 });
             } else {
                 log.debug({ callId, previousSocketId: previousConnectionInfo?.socketId ?? null, sameSocket: !isDifferentSocket }, 'Reconnect — no supersede notification needed');
+            }
+
+            // Without an offer, Callio offers and the agent answers
+            // (call:reconnect:answer → handleReconnectAnswered). A direct call
+            // reconnects this way: an offer from the agent's side would move the
+            // ports the provider sends to.
+            if (!sdpOffer) {
+                const offer = await mediaLegs.offerAgent(call);
+                EventBus.emit('call:reconnected', { callId, userId, tenantId, sdpOffer: offer, socketId, deviceId: deviceId ?? null });
+                log.info({ agentId: userId, callId }, 'Reconnect offer sent to the agent');
+                return null;
             }
 
             // The new leg replaces the agent's old one, then joins the room.

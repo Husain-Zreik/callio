@@ -108,6 +108,10 @@ class CallData {
   String? get agentName => raw['agentName'] as String?;
   String? get queueId => raw['queueId'] == null ? null : idOf(raw['queueId']);
   String? get assignmentType => raw['assignmentType'] as String?;
+
+  /// A direct call: rtpengine alone carries it (a personal line's 1:1 call).
+  /// It reconnects by answering Callio's offer; supervisors can only listen.
+  bool get isDirect => raw['mediaTopology'] == 'DIRECT';
   List<String> get offeredAgentIds => [for (final id in (raw['offeredAgentIds'] as List? ?? const [])) idOf(id)];
   String? get deviceId => raw['deviceId'] as String?;
   String? get sdpOffer => raw['sdpOffer'] as String?;

@@ -10,7 +10,7 @@
 import { readFileSync } from 'fs';
 import {
     testDb, sleep, makeChecks, waitFor, newPeer, hear, gathered, eventReceiver,
-    connectAgent, accept, nextIncoming, api as makeApi,
+    connectAgent, accept, nextIncoming, api as makeApi, fakeMeta,
 } from './lib.mjs';
 import { sipCarrier } from './sipCarrier.mjs';
 
@@ -23,12 +23,15 @@ const SHARED_NO_QUEUE = '+96170000103';
 const { check, summary } = makeChecks();
 const api = makeApi(CALLIO, seed.api_key);
 const receiver = eventReceiver({ secret: seed.webhook_secret });
+const WA_LINE_ACCOUNT = '555666777';   // a WhatsApp number that is line-user-1's own line
+const meta = fakeMeta({ callioUrl: CALLIO, apiKey: seed.api_key, phoneNumberId: WA_LINE_ACCOUNT });
 const carrier = sipCarrier({ sipPort: Number(process.env.TEST_SIP_CARRIER_PORT || 5070) });
 const db = await testDb();
 const q = async (sql, params = []) => (await db.execute(sql, params))[0];
 const sipCall = (providerCallId) => waitFor(async () => (await q("SELECT * FROM calls WHERE channel = 'SIP' AND provider_call_id = ?", [providerCallId]))[0], 8000, `SIP call ${providerCallId}`);
 const callRow = async (id) => (await q('SELECT * FROM calls WHERE id = ?', [id]))[0];
 const agentRow = async (ref) => (await q('SELECT id, availability, busy_call_id FROM agents WHERE external_ref = ?', [ref]))[0];
+const carrierHears = async (call, ms = 3000) => { await sleep(1500); call.rtp.ear.reset(); await sleep(ms); return call.rtp.ear; };
 const finalStatus = (call) => call.answered.then(() => 200, (err) => err.status);
 const ended = (id) => waitFor(async () => { const r = await callRow(id); return ['TERMINATED', 'FAILED'].includes(r.status) ? r : null; }, 15000, `call ${id} ended`);
 const ask = (agent, event, data) => Promise.race([new Promise((resolve) => agent.socket.emit(event, data, resolve)), sleep(5000).then(() => ({ timeout: true }))]);
@@ -37,6 +40,7 @@ const endedEvent = (callId) => waitFor(() => receiver.events.find((e) => e.callI
 
 await receiver.listen();
 await carrier.listen();
+await meta.listen();
 let exitCode = 0;
 const tenantBefore = (await api('GET', '/v1/tenants/demo')).body.tenant;
 
@@ -96,25 +100,57 @@ try {
     await waitFor(async () => (await callRow(row1.id)).status === 'IN_PROGRESS', 15000, 'line call answered');
     const ownerEar = await hear(await u1.peer.received);
     check('the owner hears the caller', ownerEar.dominant() === 440, `tone=${ownerEar.dominant()}`);
+    const callerEar = await carrierHears(c1);
+    check('the caller hears the owner', callerEar.dominant() === 880, `tone=${callerEar.dominant()}`);
+    check('a plain 1:1 call on a listen-only personal line runs DIRECT (rtpengine only, no room)', (await callRow(row1.id)).media_topology === 'DIRECT',
+        (await callRow(row1.id)).media_topology);
+
+    // The owner moves the direct call to their phone: a reconnect without an
+    // offer — Callio offers from the customer's side, the phone answers.
+    u1Phone.socket.emit('call:reconnect', { callId: row1.id });
+    const reoffer = await waitFor(() => u1Phone.events.find((e) => e.event === 'call:reconnected')?.payload, 10000, 'call:reconnected').catch(() => null);
+    let phoneEar = null;
+    if (reoffer?.sdpOffer) {
+        u1Phone.peer = newPeer(660);
+        await u1Phone.peer.pc.setRemoteDescription({ type: 'offer', sdp: reoffer.sdpOffer });
+        for (const c of u1Phone.pendingCandidates.splice(0)) await u1Phone.peer.pc.addIceCandidate(c).catch(() => { });
+        await u1Phone.peer.pc.setLocalDescription(await u1Phone.peer.pc.createAnswer());
+        await gathered(u1Phone.peer.pc);
+        u1Phone.socket.emit('call:reconnect:answer', { callId: row1.id, sdpAnswer: u1Phone.peer.pc.localDescription.sdp });
+        await waitFor(() => u1Phone.events.find((e) => e.event === 'call:reconnect:completed'), 10000, 'call:reconnect:completed').catch(() => { });
+        phoneEar = await hear(await u1Phone.peer.received, 3000, 3000);
+    }
+    const callerAfterMove = await carrierHears(c1);
+    check('the owner moves the direct call to another device (Callio re-offers, the phone answers): both hear each other again',
+        Boolean(reoffer?.sdpOffer) && phoneEar?.dominant() === 440 && callerAfterMove.dominant() === 660,
+        `offer=${Boolean(reoffer?.sdpOffer)} completed=${u1Phone.events.some((e) => e.event === 'call:reconnect:completed')} phone=${phoneEar?.dominant()} caller=${callerAfterMove.dominant()}`);
+    u1.peer?.close(); u1.peer = u1Phone.peer; u1Phone.peer = null;
 
     const page = await ask(sup, 'board:calls', { channelIds: [line1Id], limit: 10 });
     const otherLine = await ask(sup, 'board:calls', { channelIds: [shared.body.channel.id] });
     check('board:calls pages the live calls of a line', page?.calls?.some((c) => String(c.callId) === String(row1.id)) && otherLine?.calls?.length === 0,
         `line=${page?.calls?.map((c) => c.callId)} other=${otherLine?.calls?.length}`);
     // A listen-only tenant: the supervisor listens; whisper and barge are refused.
-    sup.peer = newPeer([660], { audioLines: 2 });
-    await sup.peer.pc.setLocalDescription(await sup.peer.pc.createOffer());
-    await gathered(sup.peer.pc);
-    const monitorStarted = new Promise((resolve) => sup.socket.once('call:monitor:started', resolve));
-    sup.socket.emit('call:monitor', { callId: row1.id, sdpOffer: sup.peer.pc.localDescription.sdp });
-    const monitoring = await Promise.race([monitorStarted, sleep(8000).then(() => null)]);
-    if (monitoring) {
-        await sup.peer.pc.setRemoteDescription({ type: 'answer', sdp: monitoring.sdpAnswer });
+    // A direct call is listened to through an rtpengine subscription: monitor
+    // without an offer, answer Callio's (one audio line per side).
+    sup.socket.emit('call:monitor', { callId: row1.id });
+    const monOffer = await waitFor(() => sup.events.find((e) => e.event === 'call:monitor:offer')?.payload, 8000, 'call:monitor:offer').catch(() => null);
+    let supHeard = [];
+    if (monOffer?.sdpOffer) {
+        sup.peer = newPeer([660]);
+        await sup.peer.pc.setRemoteDescription({ type: 'offer', sdp: monOffer.sdpOffer });
         for (const c of sup.pendingCandidates.splice(0)) await sup.peer.pc.addIceCandidate(c).catch(() => { });
+        await sup.peer.pc.setLocalDescription(await sup.peer.pc.createAnswer());
+        await gathered(sup.peer.pc);
+        sup.socket.emit('call:monitor:answer', { callId: row1.id, sdpAnswer: sup.peer.pc.localDescription.sdp });
+        await waitFor(() => sup.events.some((e) => e.event === 'call:monitor:started'), 8000, 'call:monitor:started').catch(() => { });
+        await sleep(3000);
+        for (const t of sup.peer.tracks) t.reset();
+        await sleep(3000);
+        supHeard = sup.peer.tracks.map((t) => t.dominant());
     }
-    const supEar = monitoring ? await Promise.race([sup.peer.received, sleep(8000).then(() => null)]) : null;
-    if (supEar) await hear(supEar);
-    check('a listen-only tenant\'s supervisor listens to the line call', Boolean(supEar?.has(440)), monitoring ? `hears 440: ${Boolean(supEar?.has(440))}` : 'not started');
+    check('a listen-only tenant\'s supervisor listens to the direct call: the caller and the owner',
+        supHeard.includes(440) && supHeard.includes(660), `offer=${Boolean(monOffer?.sdpOffer)} tracks=${JSON.stringify(supHeard)} errors=${JSON.stringify(sup.errors.slice(-2))}`);
     sup.errors.length = 0;
     sup.socket.emit('call:monitor:mode', { callId: row1.id, mode: 'whisper' });
     sup.socket.emit('call:monitor:mode', { callId: row1.id, mode: 'barge' });
@@ -192,6 +228,10 @@ try {
     const answered5 = await carrier.answerNext({ ringMs: 500, freqs: [440] });
     check('the carrier sees the call from the line number', String(answered5.from).includes(LINE.slice(1)), `from=${answered5.from}`);
     await waitFor(async () => (await callRow(outId)).status === 'IN_PROGRESS', 15000, 'outbound answered');
+    const outOwnerEar = await hear(await u1.peer.received);
+    const outCallerEar = await carrierHears(answered5);
+    check('outbound DIRECT: the owner and the customer hear each other', outOwnerEar.dominant() === 440 && outCallerEar.dominant() === 660
+        && (await callRow(outId)).media_topology === 'DIRECT', `owner=${outOwnerEar.dominant()} customer=${outCallerEar.dominant()} ${(await callRow(outId)).media_topology}`);
     check('the owner is busy (ON_CALL) during their outbound call', String((await agentRow('line-user-1')).busy_call_id) === String(outId));
     u1.socket.emit('call:terminate', { callId: outId });
     await waitFor(async () => (await callRow(outId)).status === 'TERMINATED', 10000, 'outbound ended');
@@ -222,6 +262,24 @@ try {
         row6b?.channel_id === line1Id && row6b?.customer_address === '+9613123456', JSON.stringify(row6b && { ch: row6b.channel_id, from: row6b.customer_address }));
     if (row6b) { u1.socket.emit('call:reject', { callId: row6b.id }); await ended(row6b.id); }
     await q('UPDATE sip_trunks SET number_rules = NULL WHERE id = ?', [trunkId]);
+
+    // ── 6c. A WhatsApp number as a personal line: Opus relayed by rtpengine ──
+    await api('PUT', '/v1/tenants/demo/channels/wa-line-1', {
+        type: 'WHATSAPP', address: '+96170000150', provider_account_id: WA_LINE_ACCOUNT,
+        credentials: { access_token: 'fake-token' }, owner_agent_ref: 'line-user-1',
+    });
+    const wa = await meta.callIn('wacid.line.1', { freq: 440 });
+    const waRow = await waitFor(async () => (await q("SELECT * FROM calls WHERE channel = 'WHATSAPP' AND provider_call_id = ?", [wa.id]))[0], 8000, 'WhatsApp line call');
+    const waOffer = await nextIncoming(u1, waRow.id);
+    await accept(u1, waOffer, 880);
+    await waitFor(async () => (await callRow(waRow.id)).status === 'IN_PROGRESS', 15000, 'WhatsApp line call answered');
+    const waOwner = await hear(await u1.peer.received);
+    const waCustomer = await hear(await wa.customer.received, 3000, 0);
+    check('a WhatsApp personal line runs DIRECT: the owner and the customer hear each other', waOwner.dominant() === 440 && waCustomer.dominant() === 880
+        && (await callRow(waRow.id)).media_topology === 'DIRECT', `owner=${waOwner.dominant()} customer=${waCustomer.dominant()} ${(await callRow(waRow.id)).media_topology}`);
+    await meta.hangUp(wa.id);
+    await ended(waRow.id);
+    u1.peer?.close(); u1.peer = null;
 
     // ── 7. An owner nobody can reach ──
     const c7 = await carrier.callIn({ from: '+96181030907', to: UNREACHABLE_LINE });
@@ -261,7 +319,7 @@ try {
 } finally {
     await api('PUT', '/v1/tenants/demo', { name: tenantBefore.name, settings: tenantBefore.settings ?? {} }).catch(() => { });
     await q('UPDATE sip_trunks SET number_rules = NULL').catch(() => { });
-    carrier.close(); receiver.close();
+    carrier.close(); receiver.close(); meta.close();
     await db.end();
 }
 process.exit(exitCode || (summary() ? 1 : 0));

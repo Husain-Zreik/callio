@@ -1,6 +1,6 @@
 # Personal lines and the direct media path (plan)
 
-**Status: Part A done (2026-10-02): personal lines work on the room path. Next: the Part B spike.** Step 5 of [media-architecture.md](media-architecture.md)
+**Status: Part A done; Part B built (2026-10-02) — direct calls run on rtpengine alone, inbound and outbound, SIP and WhatsApp, reconnect and failover covered by e2e. Open: listening to a direct call (rtpengine subscriptions) is written but not yet run against rtpengine 12.5 locally, and the load measurement.** Step 5 of [media-architecture.md](media-architecture.md)
 (failover-able call ownership) is done (2026-10-02), so this can start. Update this doc as steps
 land; the contract changes go into the API, event and protocol docs in the same change.
 
@@ -300,17 +300,37 @@ Run with a script against rtpengine directly (fake G.711 carrier, wrtc peers):
 
 Open: building that image here stalled on this machine's network (~6 KB/s to the Debian mirror; apt also had to be forced to IPv4). Items 6 and 7 are re-run on 12.x once it's built, then the full e2e suite on the new image, before anything switches to it. The load measurement (item 6 of the list above) is still to do.
 
-### Work after the spike
+### Built (2026-10-02)
 
-1. The needs computation in the core, passed to `callMedia` when the call's media starts;
-   `calls.media_topology` recorded for reports (migration, docs).
-2. `src/media/direct/` implementing the port; the dispatcher where the room implementation is
-   registered at startup (`server/bootstrap.js`).
-3. Adoption and hand-over for direct calls, added to `cluster.test.mjs` and `deploy.test.mjs`.
-4. e2e: `lines` runs inbound and outbound SIP and WhatsApp on the direct path with audio checked
-   both ways; turning recording on puts the next call in a room.
-5. `docs/architecture.md → Media`, `media-architecture.md` (planes, failure behaviour), and
-   CLAUDE.md's "No media in the core" rule (the port is no longer only room-shaped).
+- **Topology** decided when a call is created (`core/media/MediaTopology.js`, stored in
+  `calls.media_topology`, shown as `mediaTopology` in call views): DIRECT for a personal line
+  without recording in a listen-only tenant; outbound DIRECT only towards plain-RTP carriers
+  (WhatsApp outbound stays in a room until it's proven). `MEDIA_DIRECT_PATH=false` turns it off.
+  As built it's simpler than the table above: personal lines have no IVR or queue, so recording
+  and the tenant's monitor modes decide; a direct call can still be transferred (the next agent
+  answers a re-offer).
+- **`media/MediaRouter.js`** is the registered port implementation; it routes each call to
+  `rooms/` or `direct/` (call-id-only operations to whichever holds the call, so no topology
+  lookup is needed for them).
+- **`media/direct/DirectMedia.js`**: one rtpengine call per call (`callio.<boot>.<callId>.direct`,
+  tags `ext`/`agent`), inbound offer→agent, answer→provider, outbound with the placeholder
+  answer, state in Redis for adoption, the orphan sweep and leases as for rooms.
+  `directSdp.dedupeCodecs` fixes WhatsApp's normalized offer (four identical telephone-events
+  stopped all audio).
+- **Callio-offers flows**, an agent-protocol addition that also works for rooms:
+  `call:reconnect` without an offer → `call:reconnected { sdpOffer }` → `call:reconnect:answer`
+  (how a direct call reconnects: the customer side keeps its ports), and `call:monitor` without
+  an offer → `call:monitor:offer` → `call:monitor:answer` (listening: an rtpengine subscription
+  on a direct call, one receive-only line per side). The JS and Dart SDKs use them for direct
+  calls (`isDirect`).
+- **e2e**: `lines` (inbound/outbound SIP, WhatsApp, moving the call to another device, all DIRECT
+  with audio both ways), `cluster` (a direct call survives its worker dying), `routing` (monitor
+  without an offer on a room).
+- **rtpengine 12.5** (`deploy/sip-gateway/rtpengine/Dockerfile`), running on the dev server.
+
+Still to do: run the direct listening check (`lines`) on rtpengine 12.5 locally (the image
+couldn't be built here on a ~6–50 KB/s connection; the dev server has it); the load measurement
+(room vs direct CPU and latency at 50 and 200 calls).
 
 ## Part C (later, only when needed)
 

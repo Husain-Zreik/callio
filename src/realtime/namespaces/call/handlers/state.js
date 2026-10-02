@@ -33,9 +33,19 @@ export function registerCallStateListeners() {
 
     // Only the socket that asked gets the answer: other devices in the call
     // room must not apply an SDP answer meant for another peer connection.
-    EventBus.on('call:reconnected', ({ callId, userId, sdpAnswer, socketId, deviceId }) => {
+    // sdpAnswer answers the agent's offer; sdpOffer (a reconnect without an
+    // offer) waits for call:reconnect:answer.
+    EventBus.on('call:reconnected', ({ callId, userId, sdpAnswer, sdpOffer, socketId, deviceId }) => {
         log.debug({ callId, agentId: userId }, 'Call reconnected by user');
-        if (socketId) roomManager.emitToSocket(socketId, 'call:reconnected', { callId, userId, deviceId: deviceId ?? null, sdpAnswer });
+        if (socketId) {
+            roomManager.emitToSocket(socketId, 'call:reconnected', {
+                callId, userId, deviceId: deviceId ?? null, ...(sdpOffer ? { sdpOffer } : { sdpAnswer }),
+            });
+        }
+    });
+
+    EventBus.on('call:reconnect:completed', ({ callId, userId, socketId, deviceId }) => {
+        if (socketId) roomManager.emitToSocket(socketId, 'call:reconnect:completed', { callId, userId, deviceId: deviceId ?? null });
     });
 
     EventBus.on('call:terminated', (data) => {

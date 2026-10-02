@@ -241,7 +241,8 @@ whose `trigger_condition` holds wins.
 | `state` | Where the call is within its status: `IVR` / `QUEUE` / `ACTIVE` / `ON_HOLD`, NULL before routing. `ON_HOLD` is not set by the code. |
 | `termination_reason` | `COMPLETED`, `CANCELLED`, `REJECTED`, `BUSY`, `NO_ANSWER`, `TIMEOUT`, `AGENT_DISCONNECTED`, `AGENT_MEDIA_NOT_READY`, `SYSTEM_ERROR`, `NETWORK_ERROR`, `PROVIDER_ERROR`, `PROVIDER_TRIGGER_FAILED`, `SERVICE_MAINTENANCE`, `CUSTOMER_NETWORK_LOSS`, `IVR_AGENT_NO_ANSWER`. |
 | `terminated_by` | `AGENT` (agent or supervisor) / `CONSUMER` (Management API terminate) / `CUSTOMER` / `PROVIDER` / `SYSTEM`. |
-| `ringing_at`, `answered_at`, `ended_at` | |
+| `media_topology` | `ROOM` (a FreeSWITCH room) / `DIRECT` (rtpengine alone: a personal line's plain 1:1 call), chosen at creation (`core/media/MediaTopology.js`), fixed for the call. |
+| `ringing_at`, `answered_at`, `ended_at` |
 | `queued_at` | When the call entered its current queue (arrival, IVR transfer, overflow); `max_wait_seconds` counts from here. |
 | `offered_at` | When the current offer to `agent_id` started; NULL while nobody is offered it and once the agent starts answering. `ring_timeout_seconds` counts from here. On an `IN_PROGRESS` call it marks a transfer waiting for its target. |
 | `overflow_count` | Overflows so far; `src/core/routing/QueueTimeoutService.js` stops at 3 so overflow loops end. |

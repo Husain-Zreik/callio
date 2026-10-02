@@ -35,6 +35,9 @@
 //                                        when the line records)
 // Supervisors
 //   addSupervisor(call, supervisorId, sdpOffer) → sdpAnswer   joins listening (nobody hears them)
+//   offerSupervisor(call, supervisorId) → sdpOffer            the same with Callio offering (how a
+//   supervisorAnswered(call, supervisorId, sdpAnswer)         DIRECT call is listened to: an
+//                                                             rtpengine subscription)
 //   setSupervisorMode(callId, mode) → endedPrivate            'listen' | 'whisper' | 'barge'
 //   setAgentPrivate(callId, active) → isPrivate               only while whispering
 //   removeSupervisor(callId, supervisorId) → wasPrivate
@@ -65,7 +68,7 @@ const METHODS = [
     'answerCustomer', 'offerCustomer', 'customerAnswered', 'customerAudio',
     'offerAgent', 'agentAccepted', 'answerAgent', 'dropAgent', 'hasAgentOffer',
     'bridge',
-    'addSupervisor', 'setSupervisorMode', 'setAgentPrivate', 'removeSupervisor', 'hasSupervisor', 'monitorState',
+    'addSupervisor', 'offerSupervisor', 'supervisorAnswered', 'setSupervisorMode', 'setAgentPrivate', 'removeSupervisor', 'hasSupervisor', 'monitorState',
     'player', 'listenForDigits', 'startHold', 'stopHold', 'audioUrl', 'errorAudio',
     'close', 'owns', 'activeCallIds', 'adopt', 'handOver', 'start', 'stop', 'stats',
 ];

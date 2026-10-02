@@ -7,10 +7,12 @@
 export const EventTypes = {
     AGENT_JOINED: 'agent_joined',
     AGENT_RECONNECTED: 'agent_reconnected',
+    AGENT_RECONNECT_ANSWERED: 'agent_reconnect_answered',   // the agent's answer to a reconnect offer
     RINGING_AGENT_RECONNECT: 'ringing_agent_reconnect',
     AGENT_DISCONNECTED: 'agent_disconnected',
     ICE_CANDIDATE: 'ice_candidate',
     MONITOR_STARTED: 'monitor_started',
+    MONITOR_ANSWERED: 'monitor_answered',    // the supervisor's answer to Callio's monitor offer
     MONITOR_STOPPED: 'monitor_stopped',
     MONITOR_MODE_CHANGED: 'monitor_mode_changed',
     AGENT_PRIVATE_CHANGED: 'agent_private_changed',

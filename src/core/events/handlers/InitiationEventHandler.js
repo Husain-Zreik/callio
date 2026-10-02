@@ -4,6 +4,7 @@
 //      consent) → a calls row in INITIATED, bound to one agent.
 //   2. handleCallStart — that agent's client connects its media leg with
 //      call:start; Callio then dials the customer through the channel.
+import { mediaTopology } from '../../media/MediaTopology.js';
 import CallRepository from '../../../persistence/CallRepository.js';
 import CallConnectionRepository from '../../../persistence/CallConnectionRepository.js';
 import AgentRepository from '../../../persistence/AgentRepository.js';
@@ -77,6 +78,7 @@ export class InitiationEventHandler {
             consumer_metadata: consumerMetadata,
             direction: CallDirection.OUTBOUND,
             status: CallStatus.INITIATED,
+            media_topology: await mediaTopology.decide(channel, { outbound: true }),
         });
         consumerEventPublisher.publishForCall(callId, 'call.created');
         return CallRepository.findById(callId);

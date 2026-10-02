@@ -73,6 +73,7 @@ const ok = crypto.timingSafeEqual(Buffer.from(v1), Buffer.from(expected))
       "direction": "INBOUND",
       "status": "TERMINATED",
       "state": null,
+      "mediaTopology": "ROOM",
       "customer": { "address": "+96181030841", "addressType": "E164", "name": "Test Customer" },
       "agentId": 7,
       "agentRef": "user-7",

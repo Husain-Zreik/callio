@@ -243,26 +243,44 @@ class CallioCall extends ChangeNotifier {
   }
 
   /// A new leg for the same call (network change, app restart, another device).
+  /// A direct call asks Callio to offer (an offer from here would move the
+  /// ports the provider sends to); any other call offers itself.
   Future<void> reconnect(String trigger, {rtc.MediaStream? stream}) async {
     _recovering = true;
     try {
       _setState(CallState.connecting);
       final pc = await _newPeer();
       await _attachMicrophone(pc, stream);
-      final offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
       _awaitingReconnect = true;
-      _agent.send('call:reconnect', {'callId': data.raw['callId'], 'sdpOffer': offer.sdp, 'reconnectTrigger': trigger});
+      if (data.isDirect) {
+        _agent.send('call:reconnect', {'callId': data.raw['callId'], 'reconnectTrigger': trigger});
+      } else {
+        final offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        _agent.send('call:reconnect', {'callId': data.raw['callId'], 'sdpOffer': offer.sdp, 'reconnectTrigger': trigger});
+      }
       _markBound();
     } finally {
       _recovering = false;
     }
   }
 
+  /// call:reconnected: Callio's answer to our offer, or (a direct call) its
+  /// offer, which we answer with call:reconnect:answer.
   Future<void> onReconnected(Map<String, dynamic> payload) async {
     final pc = _pc;
     if (!_awaitingReconnect || pc == null) return;
     _awaitingReconnect = false;
+    final offer = payload['sdpOffer'] as String?;
+    if (offer != null) {
+      await pc.setRemoteDescription(rtc.RTCSessionDescription(offer, 'offer'));
+      _remoteSet = true;
+      await _flushRemote();
+      final answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      _agent.send('call:reconnect:answer', {'callId': data.raw['callId'], 'sdpAnswer': answer.sdp});
+      return;
+    }
     await pc.setRemoteDescription(rtc.RTCSessionDescription(payload['sdpAnswer'] as String?, 'answer'));
     _remoteSet = true;
     await _flushRemote();

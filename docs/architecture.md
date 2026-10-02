@@ -356,6 +356,27 @@ No audio passes through Callio: rtpengine terminates every external leg and Free
 each call in a room. Callio commands both (`src/media/rooms/`, behind the media port). The target
 design and what comes next are in [media-architecture.md](media-architecture.md).
 
+**Topology.** Each call has a `media_topology`, fixed when it's created
+(`core/media/MediaTopology.js`): `ROOM` (everything below), or `DIRECT` — a personal line's plain
+1:1 call, which rtpengine alone bridges (`src/media/direct/DirectMedia.js`). A call is DIRECT when
+it's on a personal line, the line doesn't record, and the tenant allows only `listen` monitoring
+(an outbound call also needs a plain-RTP carrier); `MEDIA_DIRECT_PATH=false` makes every call a
+room. `media/MediaRouter.js` is the registered port implementation: it sends each call to the
+media its topology names, and call-id-only operations to whichever holds the call.
+
+**Direct calls.** One rtpengine call per Callio call, keyed `callio.<boot>.<callId>.direct` (the
+rooms' tag format, so the orphan sweep and adoption treat it alike), its sides tagged `ext` (the
+customer — `CustomerLegMonitor` reads it as on a room) and `agent`. Inbound, the customer's offer
+goes through rtpengine to the agent; the agent's answer comes back as the provider's answer.
+Outbound, the agent's offer becomes the offer to dial with (G.711 only for a carrier) and the
+agent is answered at once against a placeholder customer (`192.0.2.1:9` — `c=0.0.0.0` would mean
+hold), which the provider's answer replaces. Reconnect and listening have Callio offer: a
+re-offer from the customer's side (the provider's ports don't move) and an rtpengine
+subscription to both sides (one receive-only line each; listen-only). WhatsApp's normalized
+offer is de-duplicated first (`directSdp.dedupeCodecs`: identical telephone-events stop the
+relay). Nothing plays on a direct call: no prompts, hold music or reconnect tone. Its state is
+in Redis (`callio:call:<id>:direct`) for a worker taking it over.
+
 **Legs.** Each participant — the customer, an agent, a supervisor — is a FreeSWITCH endpoint
 behind its own rtpengine leg (`RtpLegs.js`): the external side (WebRTC for agents and WhatsApp,
 plain RTP for a carrier, from the channel's `sdpProfile.transport`) on rtpengine's `external`

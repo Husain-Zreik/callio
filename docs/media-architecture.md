@@ -216,6 +216,15 @@ happen on a branch (or worktree) and merge green.
 - **Local Docker:** rtpengine's two logical interfaces share one address, or Docker's published
   ports can deliver a packet to the other interface's socket with the same port number.
 
+## The direct path
+
+A personal line's plain 1:1 call (`calls.media_topology = 'DIRECT'`) skips the room: rtpengine
+alone bridges the customer and the agent, one rtpengine call, no FreeSWITCH endpoint
+(`src/media/direct/`, behind the same port through `media/MediaRouter.js`). How it's chosen and
+how it works: [architecture.md → Media](architecture.md#media) and
+[direct-lines.md → Part B](direct-lines.md). Listening uses rtpengine subscriptions, which
+need rtpengine ≥ 10 — the media plane runs Debian's 12.5 (`deploy/sip-gateway/rtpengine/`).
+
 ## Still open
 
 - **The production media plane** is in `deploy/sip-gateway/docker-compose.yml` (FreeSWITCH

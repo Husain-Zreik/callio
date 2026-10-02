@@ -11,9 +11,15 @@ export function registerCallMediaListeners() {
         roomManager.broadcastToCall(callId, 'connection:ice-candidate:server', data);
     });
 
+    // sdpAnswer when the supervisor offered; none after call:monitor:answer.
     EventBus.on('call:monitor:started', (data) => {
         const { callId, sdpAnswer, socketId } = data;
-        roomManager.emitToSocket(socketId, 'call:monitor:started', { callId, sdpAnswer });
+        roomManager.emitToSocket(socketId, 'call:monitor:started', { callId, ...(sdpAnswer ? { sdpAnswer } : {}) });
+    });
+
+    // Callio's offer to a supervisor who asked to monitor without one.
+    EventBus.on('call:monitor:offer', ({ callId, sdpOffer, socketId }) => {
+        roomManager.emitToSocket(socketId, 'call:monitor:offer', { callId, sdpOffer });
     });
 
     EventBus.on('call:monitor:mode:changed', (data) => {

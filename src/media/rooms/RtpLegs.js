@@ -12,7 +12,7 @@ import { config } from '../../../config/envConfig.js';
 // What the external side looks like on the wire. The DTLS role is left to
 // rtpengine: forcing 'passive' makes it answer a=setup:passive, which
 // libwebrtc (as the offerer) refuses to apply.
-const EXTERNAL = Object.freeze({
+export const EXTERNAL = Object.freeze({
     webrtc: {
         'transport-protocol': 'UDP/TLS/RTP/SAVPF',
         ICE: 'force',
