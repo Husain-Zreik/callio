@@ -246,6 +246,12 @@ restricting:
   Callio set up.
 - 9022, 22222 and FreeSWITCH's ports (loopback anyway) must not be reachable
   from outside.
+- **Loopback must pass any 5060 allow-list.** FreeSWITCH answers drachtio's
+  INVITEs (every leg's endpoint) on drachtio's port 5060 over `lo`. A rule
+  that sends all 5060 traffic through an allow-list placed above
+  `-i lo -j ACCEPT` drops those replies: every call then fails after 32 s
+  with `408 Request Timeout` and never reaches an agent. Put
+  `-A SIP -i lo -j ACCEPT` first in such a chain.
 
 SIP scanners probe any open 5060 within minutes, sending INVITEs to random
 numbers from unknown IPs. Callio answers them `404` or `403` (rate-limited
