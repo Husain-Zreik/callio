@@ -208,6 +208,23 @@ To check keypad input on a real line, `npm run ivr:test -- --consumer <slug> --t
 puts a test IVR menu on a channel (two beeps; 1 = the channel's queue, 9 = hang
 up). `--off` removes it.
 
+## When a worker stops
+
+An answered SIP call outlives the worker that answered it (a crash, or a deploy handing calls
+over — [media-architecture.md](media-architecture.md)). The carrier dialog lives in that worker's
+drachtio connection, so the worker taking the call over drives it by drachtio's dialog id,
+stored at answer (`callio:sip:dialog:<Call-ID>`):
+
+- **Hang-up from Callio's side** (agent, API, timeout): a BYE inside the dialog, by its id.
+- **Hang-up from the carrier:** its BYE goes to the dead worker's connection, so nobody gets it.
+  The new owner sends an in-dialog `OPTIONS` every 5 s; a `481`/`408`, or two failures in a row
+  (drachtio no longer has the dialog), ends the call `COMPLETED/CUSTOMER` within ~10 s.
+- **Not taken over:** an inbound call still ringing (its pending INVITE transaction was that
+  worker's) and an outbound call not yet answered. A deploy ends those; a crash leaves them to
+  the carrier's timers and the stuck-call scan.
+
+`sip-cluster.test.mjs` covers both hang-ups after the worker running two calls is killed.
+
 ## Deploying the gateway
 
 **Prerequisites:** a Linux host with a public static IP, Docker and Docker

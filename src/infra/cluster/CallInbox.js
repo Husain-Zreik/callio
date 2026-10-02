@@ -286,7 +286,15 @@ class CallInbox {
             .catch((err) => log.warn({ callId, err }, `Answering ${eventType} failed`));
     }
 
-    // Shutdown: gives every call up (5.4 will hand them over instead).
+    // Shutdown: gives up every call's lease at once (they stay in the leased
+    // set), so another worker adopts them without waiting for the lease to
+    // lapse. Returns how many.
+    async handOver() {
+        const ids = [...this.owned.keys()];
+        for (const id of ids) await this.release(id);
+        return ids.length;
+    }
+
     async close() {
         this._running = false;
         clearInterval(this._renewTimer);

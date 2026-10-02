@@ -181,11 +181,13 @@ both, so that flips to accepting RFC 4733.
 4. **Delete the wrtc media code** (`src/media/webrtc|bridge|dtmf|recording|playback`). The test
    harness keeps `wrtc` for its simulated customers and agents. Done: `wrtc` and `@discordjs/opus`
    are dev dependencies now; `ffmpeg-static` and the in-Node recording upload are gone.
-5. **Failover-able call ownership**, with call inputs on Redis Streams. In progress: the inbox
-   and lease (5.1), stored timers and state (5.2), and taking a WhatsApp call over when its worker
-   dies (5.3a, `core/calls/CallAdoption.js`, `cluster.test.mjs`) are done; SIP calls (the carrier
-   dialog by id, a hang-up probe) and resuming an IVR, then handing calls over on a deploy (5.4),
-   are next.
+5. **Failover-able call ownership**, with call inputs on Redis Streams. Done: the inbox and
+   lease (5.1), stored timers and state (5.2), taking a call over when its worker dies — WhatsApp,
+   SIP (the carrier dialog by id, an in-dialog OPTIONS probe for the customer's hang-up) and an IVR
+   resumed at its node (5.3, `core/calls/CallAdoption.js`) — and a deploy handing calls over
+   instead of ending them (5.4). Proven by `cluster.test.mjs`, `sip-cluster.test.mjs` and
+   `deploy.test.mjs`. Not taken over: an inbound SIP call still ringing (its pending INVITE is the
+   dead worker's) and an outbound one not yet answered.
 6. **Multi-party calls** and the primary-agent contract.
 
 Steps 2–4 break media until the suite passes again, and the dev server runs `main`, so they

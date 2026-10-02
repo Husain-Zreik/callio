@@ -85,6 +85,18 @@ class IvrEngine {
         this._navigateTo(firstEdge.target);
     }
 
+    // Continue the flow at a node (a worker took the call over mid-IVR); the
+    // node plays again from its start. Falls back to the flow's start.
+    startAt(nodeId) {
+        if (!this._nodes.has(nodeId)) {
+            this.start();
+            return;
+        }
+        this._stopped = false;
+        EventBus.on('call:dtmf', this._dtmfHandler);
+        this._navigateTo(nodeId);
+    }
+
     // Run the flow again from ivr_start after it completed (e.g. a transfer
     // target was unavailable and the node says to replay).
     restart() {

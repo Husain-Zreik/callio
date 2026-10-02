@@ -561,6 +561,21 @@ class RoomMedia {
         this._sweep.unref();
     }
 
+    // Shutdown: the calls held here go on without this worker. Their legs
+    // stay up on the media server, their state is in Redis, and another
+    // worker takes each over (core/calls/CallAdoption). This only lets go —
+    // no BYE, the recording keeps running. Returns how many calls.
+    handOver() {
+        for (const room of this.rooms.values()) {
+            room.monitor?.stop();
+            const legs = [room.customer, room.pendingAgent, ...room.agents.values(), ...room.supervisors.values()].filter(Boolean);
+            for (const leg of legs) if (leg.ep?.adopted) freeSwitch.unwatch(leg.ep.uuid);
+        }
+        const count = this.rooms.size;
+        this.rooms.clear();
+        return count;
+    }
+
     async stop() {
         clearInterval(this._sweep);
         this._sweep = null;

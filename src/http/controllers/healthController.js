@@ -6,6 +6,7 @@
 import { redisClient } from '../../infra/redis/RedisClient.js';
 import { workerStatsService } from '../../infra/monitoring/WorkerStatsService.js';
 import { callMedia } from '../../core/media/CallMedia.js';
+import { bootId } from '../../infra/cluster/WorkerBoot.js';
 import { config } from '../../../config/envConfig.js';
 
 function toMB(bytes) {
@@ -28,6 +29,8 @@ export function handleWorkerHealth(_request, reply) {
     const ok = workerStats.ok !== false;
     reply.code(ok ? 200 : 503).send({
         ok,
+        // This process's boot id — the value in the leases of the calls it runs.
+        boot: bootId,
         activeCalls: media.rooms,
         ...workerStats,
         media,

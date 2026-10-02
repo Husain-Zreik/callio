@@ -25,6 +25,45 @@ const log = logger('channels.sip.SipChannel');
 
 // A carrier's final response to our INVITE, as the core sees it.
 const REJECTED_STATUSES = new Set([486, 600, 603]);
+const PROBE_MS = 5000;
+
+// A carrier dialog taken over from a worker that died: its drachtio object
+// died with that worker; requests inside it go by dialog id.
+function remoteDialog(dialogId) {
+    return {
+        id: dialogId,
+        remote: {},
+        destroy() {
+            drachtio.requestInDialog(dialogId, { method: 'BYE' })
+                .catch((err) => log.debug({ err }, 'BYE on a taken-over dialog failed'));
+        },
+    };
+}
+
+// The carrier's BYE for a taken-over dialog goes to the dead worker's
+// drachtio connection, so this worker asks instead: an in-dialog OPTIONS
+// every few seconds. 481/408 (or two failures in a row: drachtio no longer
+// has the dialog) means the customer hung up.
+function probeDialog(leg) {
+    let failures = 0;
+    leg.probe = setInterval(async () => {
+        if (leg.finished || !leg.dialog) { clearInterval(leg.probe); return; }
+        let gone = false;
+        try {
+            const res = await drachtio.requestInDialog(leg.dialog.id, { method: 'OPTIONS' }, PROBE_MS - 1000);
+            gone = res.status === 481 || res.status === 408;
+            failures = 0;
+        } catch {
+            gone = ++failures >= 2;
+        }
+        if (!gone || leg.finished) return;
+        clearInterval(leg.probe);
+        log.info({ providerCallId: leg.providerCallId }, 'The carrier no longer has the dialog — the customer hung up');
+        await finishLeg(leg, { providerStatus: 'COMPLETED' })
+            .catch((err) => log.error({ providerCallId: leg.providerCallId, err }, 'Ending the call after the dialog went failed'));
+    }, PROBE_MS);
+    leg.probe.unref();
+}
 
 // Answering the carrier: the leg's pending INVITE becomes a dialog.
 async function acceptLeg(leg, sdpAnswer) {
@@ -33,6 +72,7 @@ async function acceptLeg(leg, sdpAnswer) {
     leg.res = null;
     leg.dialog = await srf.createUAS(req, res, { localSdp: sdpAnswer });
     leg.answeredAt = new Date();
+    await sipDialogs.saveDialog(leg).catch((err) => log.warn({ providerCallId: leg.providerCallId, err }, 'Saving the SIP dialog failed'));
     leg.dialog.on('destroy', () => finishLeg(leg, { providerStatus: 'COMPLETED' })
         .catch((err) => log.error({ providerCallId: leg.providerCallId, err }, 'Ending the call after BYE failed')));
 }
@@ -107,6 +147,7 @@ async function initiate(call, sdpOffer) {
             leg.uacRequest = null;
             leg.dialog = dialog;
             leg.answeredAt = new Date();
+            await sipDialogs.saveDialog(leg).catch((err) => log.warn({ providerCallId: leg.providerCallId, err }, 'Saving the SIP dialog failed'));
             dialog.on('destroy', () => finishLeg(leg, { providerStatus: 'COMPLETED' })
                 .catch((err) => log.error({ providerCallId: leg.providerCallId, err }, 'Ending the call after BYE failed')));
             await channelIngress.outboundAnswered(channel, { providerCallId: leg.providerCallId, sdpAnswer: dialog.remote.sdp });
@@ -154,6 +195,25 @@ export const sipChannel = Object.freeze({
 
     initiate,
 
+    // Takes over the answered carrier leg of a call whose worker died
+    // (core/calls/CallAdoption). A leg still ringing can't be: its pending
+    // INVITE transaction died with that worker.
+    async adopt(call) {
+        if (!call.provider_call_id || sipDialogs.get(call.provider_call_id)) return;
+        const saved = await sipDialogs.loadDialog(call.provider_call_id);
+        if (!saved?.dialogId) {
+            log.warn({ callId: call.id, providerCallId: call.provider_call_id }, 'No answered SIP dialog to take over');
+            return;
+        }
+        const channel = await ChannelRepository.findById(call.channel_id);
+        const leg = {
+            providerCallId: call.provider_call_id, channel, direction: saved.direction,
+            dialog: remoteDialog(saved.dialogId), answeredAt: saved.answeredAt ? new Date(saved.answeredAt) : null, adopted: true,
+        };
+        await sipDialogs.add(call.provider_call_id, leg);
+        probeDialog(leg);
+    },
+
     normalizeCustomerAddress({ address, addressType }) {
         const e164 = toE164(address);
         if (addressType === CustomerAddressType.SIP_URI || (!e164 && /^sips?:/i.test(String(address)))) {
@@ -182,7 +242,15 @@ export const sipChannel = Object.freeze({
     },
 
     async stop() {
+        // Answered legs are handed over: the worker that takes the call over
+        // drives the dialog by its id. A leg still ringing can't move (its
+        // pending transaction is this worker's), so it's ended.
         for (const leg of sipDialogs.all()) {
+            if (leg.dialog) {
+                if (leg.probe) clearInterval(leg.probe);
+                sipDialogs.forget(leg.providerCallId);
+                continue;
+            }
             await endLeg(leg).catch(() => { });
         }
         await sipDialogs.stop();

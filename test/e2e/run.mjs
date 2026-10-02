@@ -8,6 +8,7 @@
 // up -d --build` (drachtio, rtpengine, FreeSWITCH): every call's media runs there.
 import { spawn, spawnSync } from 'child_process';
 import net from 'net';
+import http from 'http';
 import dgram from 'dgram';
 import dns from 'dns/promises';
 import { createRequire } from 'module';
@@ -145,6 +146,7 @@ async function resetState() {
         'call_lifecycle_events', 'call_participants', 'call_connections', 'calls']) await db.query(`TRUNCATE ${t}`);
     await db.query('SET FOREIGN_KEY_CHECKS=1');
     await db.query("UPDATE agents SET availability = 'OFFLINE'");
+    await db.query("UPDATE ivr_flows SET status = 'INACTIVE'");   // a suite's flow must not catch the next suite's calls
     await db.end();
     const redis = new Redis({ host: env.REDIS_HOST, port: Number(env.REDIS_PORT), db: Number(env.REDIS_DB) });
     await redis.flushdb();
@@ -154,7 +156,7 @@ async function resetState() {
 async function startCallio(logFile, workerPort = port, workerId = 'e2e') {
     const { openSync } = await import('fs');
     const out = openSync(logFile, 'w');
-    const child = spawn(process.execPath, ['index.js'], { cwd: root, env: { ...env, NODE_PORT: String(workerPort), WORKER_ID: workerId }, stdio: ['ignore', out, out] });
+    const child = spawn(process.execPath, ['index.js'], { cwd: root, env: { ...env, NODE_PORT: String(workerPort), WORKER_ID: workerId }, stdio: ['ignore', out, out, 'ipc'] });
     child.port = workerPort;
     for (let i = 0; i < 120; i++) {   // up to 60 s: a cold first start (native modules, AV scanning) can be slow
         try {
@@ -173,6 +175,19 @@ function workersFor(suite) {
     const first = readFileSync(join(here, suite), 'utf8').split('\n', 1)[0];
     return Number(/^\/\/ e2e-workers: (\d+)/.exec(first)?.[1] ?? 1);
 }
+// A suite asks for a worker's graceful shutdown (as PM2 does on Windows, by
+// IPC message): POST <E2E_CONTROL_URL>/workers/<index>/shutdown.
+const CONTROL_PORT = Number(process.env.TEST_CONTROL_PORT || 3898);
+const control = http.createServer((req, res) => {
+    const m = /^\/workers\/(\d+)\/shutdown$/.exec(req.url);
+    const child = m && callios[Number(m[1])];
+    if (req.method !== 'POST' || !child) { res.writeHead(404).end(); return; }
+    child.send('shutdown');
+    res.writeHead(202).end();
+});
+await new Promise((resolve) => control.listen(CONTROL_PORT, '127.0.0.1', resolve));
+control.unref();
+
 const stopCallio = (child) => new Promise((resolve) => {
     if (child.exitCode !== null || child.signalCode !== null) return resolve();
     child.once('exit', resolve);
@@ -256,7 +271,7 @@ try {
             callios.push(await startCallio(logFile, port + i, count > 1 ? `e2e-${i + 1}` : 'e2e'));
         }
         console.log(`\n[e2e] ── ${suite}${count > 1 ? ` (${count} workers)` : ''}`);
-        const suiteEnv = { ...env, E2E_WORKERS: JSON.stringify(callios.map((c) => ({ port: c.port, pid: c.pid }))) };
+        const suiteEnv = { ...env, E2E_WORKERS: JSON.stringify(callios.map((c) => ({ port: c.port, pid: c.pid }))), E2E_CONTROL_URL: `http://127.0.0.1:${CONTROL_PORT}` };
         // Not spawnSync: the fake S3 in this process has to keep answering while the suite runs.
         const r = await new Promise((done) => spawn(process.execPath, [join(here, suite), seedFile, String(port)], { cwd: root, env: suiteEnv, stdio: 'inherit' })
             .on('exit', (status) => done({ status })));

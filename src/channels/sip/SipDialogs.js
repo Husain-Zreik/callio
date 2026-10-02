@@ -13,6 +13,9 @@ const log = logger('channels.sip.SipDialogs');
 
 const OWNER_TTL_SECONDS = 86400;
 const ownerKey = (providerCallId) => `callio:sip:owner:${providerCallId}`;
+// An answered leg's drachtio dialog id: a worker taking the call over sends
+// in-dialog requests (BYE, OPTIONS) by it.
+const dialogKey = (providerCallId) => `callio:sip:dialog:${providerCallId}`;
 const workerChannel = (workerId) => `callio:sip:worker:${workerId}`;
 
 class SipDialogs {
@@ -57,8 +60,26 @@ class SipDialogs {
 
     async remove(providerCallId) {
         if (!this._legs.delete(providerCallId)) return;
+        await redisBaseService.del(dialogKey(providerCallId));
         const owner = await redisBaseService.get(ownerKey(providerCallId));
         if (owner === this.workerId) await redisBaseService.del(ownerKey(providerCallId));
+    }
+
+    // Lets go of a leg without touching Redis: its dialog key and owner record
+    // stay for the worker that takes the call over (shutdown hand-over).
+    forget(providerCallId) {
+        this._legs.delete(providerCallId);
+    }
+
+    async saveDialog(leg) {
+        await redisBaseService.set(dialogKey(leg.providerCallId), JSON.stringify({
+            dialogId: leg.dialog.id, direction: leg.direction, answeredAt: leg.answeredAt?.toISOString() ?? null,
+        }), OWNER_TTL_SECONDS);
+    }
+
+    async loadDialog(providerCallId) {
+        const raw = await redisBaseService.get(dialogKey(providerCallId));
+        return raw ? JSON.parse(raw) : null;
     }
 
     // Sends a command to the worker holding the leg. False if nobody holds it.

@@ -8,9 +8,11 @@
 // worker stopped. A call that ended meanwhile is just forgotten.
 import CallRepository from '../../persistence/CallRepository.js';
 import { callMedia } from '../media/CallMedia.js';
+import { customerChannels } from '../channels/CustomerChannels.js';
 import { callInbox } from '../../infra/cluster/CallInbox.js';
 import { callState } from '../../infra/cluster/CallState.js';
 import { callEventHandler } from '../events/CallEventHandler.js';
+import { ivrCoordinator } from '../ivr/IvrCoordinator.js';
 import { CallStatus } from '../constants/CallConstants.js';
 import { logger } from '../../infra/logging/logger.js';
 
@@ -49,7 +51,8 @@ class CallAdoption {
         }
     }
 
-    async _take(callId) {
+    async _take(id) {
+        const callId = Number(id);   // ids come back from Redis as strings; the core uses numbers
         const call = await CallRepository.findById(callId);
         if (!call || call.status === CallStatus.TERMINATED || call.status === CallStatus.FAILED) {
             await callInbox.forget(callId);
@@ -76,6 +79,17 @@ class CallAdoption {
         if (call.status === CallStatus.IN_PROGRESS) {
             await callMedia.bridge(call).catch((err) => log.warn({ callId, err }, 'Finishing the bridge failed'));
         }
+        // A caller in the IVR continues at the node they were on.
+        const ivr = await callState.load(callId, 'ivr');
+        if (ivr?.flowId && ivr.nodeId) {
+            ivrCoordinator.startSession(callId, ivr.flowId, {
+                tenantId: call.tenant_id, channelId: call.channel_id, queueId: call.queue_id ?? null,
+            }, { resume: { sessionId: ivr.sessionId, nodeId: ivr.nodeId } })
+                .catch((err) => log.error({ callId, err }, 'Resuming the IVR failed'));
+        }
+        // The provider side, where it lives in a worker's memory (a SIP dialog).
+        const { channel } = await customerChannels.forCall(call);
+        await Promise.resolve(channel.adopt?.(call)).catch((err) => log.warn({ callId, err }, 'Taking the provider leg over failed'));
         await callInbox.read(callId, callEventHandler.handleCallEvent);
         log.info({ callId }, 'Call taken over from a worker that stopped');
     }

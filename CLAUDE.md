@@ -95,6 +95,7 @@ PM2 fork-mode workers (`WORKER_COUNT`, each on `BASE_PORT + i`) share no memory;
 
 - Implemented and covered by `test/e2e`: WhatsApp and SIP, inbound and outbound; queues (`RING_ALL`/`ROUND_ROBIN`/`PRIORITY`) with ring timeout, max wait, overflow and transfer timeout; IVR, transfer, monitoring, recording, push, the Management API and consumer events.
 - Dev environment `callio.pcg-ms.com` (nginx → PM2) runs on Callio's own database. Real inbound calls verified there: WhatsApp, and SIP from the carrier with two-way audio. Open: outbound SIP, carrier DTMF, a real DID (`docs/sip.md`).
+- Calls outlive their worker (step 5): a crash or a deploy hands each call to another worker (lease, room from its Redis snapshot, SIP dialog by id, IVR resumed) — `cluster`, `sip-cluster`, `deploy` suites.
 - Media plane (rtpengine + FreeSWITCH rooms) replaced the in-Node wrtc media; covered by the whole e2e suite and running on the dev server, where real inbound WhatsApp and SIP calls work (2026-10-02). Next: failover-able call ownership, media placement across nodes — see `docs/media-architecture.md`.
 - `sdk/agent-js` — JS agent SDK (browser + Node, TypeScript types) for agents and supervisors; tested by `test/e2e/sdk.test.mjs`. React bindings and the Dart SDK are next.
 

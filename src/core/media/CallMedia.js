@@ -54,6 +54,8 @@
 //   activeCallIds() → [callId]           calls with legs on this worker
 //   adopt(call) → bool                   take over a call whose worker died: rebuild its
 //                                        room from the stored snapshot (false: nothing to take)
+//   handOver() → count                   shutdown: let go of every call held here without
+//                                        ending it (another worker adopts it)
 //   start() / stop() / stats()
 // Events it emits on EventBus: 'call:dtmf' { callId, digit }, 'customer:media:state'
 // { callId, state: 'drop'|'active' }, 'call:network:quality:customer' { callId, … },
@@ -65,7 +67,7 @@ const METHODS = [
     'bridge',
     'addSupervisor', 'setSupervisorMode', 'setAgentPrivate', 'removeSupervisor', 'hasSupervisor', 'monitorState',
     'player', 'listenForDigits', 'startHold', 'stopHold', 'audioUrl', 'errorAudio',
-    'close', 'owns', 'activeCallIds', 'adopt', 'start', 'stop', 'stats',
+    'close', 'owns', 'activeCallIds', 'adopt', 'handOver', 'start', 'stop', 'stats',
 ];
 
 class CallMedia {

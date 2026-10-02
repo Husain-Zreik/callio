@@ -448,22 +448,27 @@ rtpengine legs of boots that are gone, and this worker's own legs of calls it no
    - Connects to drachtio, registers the media implementation and starts it: FreeSWITCH, the
      boot heartbeat, the orphan sweep. A media server that isn't up doesn't stop the worker.
    - Runs each channel's `start()`. SIP takes INVITEs from here on.
-7. **Listen.** Signal handlers, worker stats, then `listen`.
+7. **Listen.** Signal handlers (SIGINT/SIGTERM, and an IPC `shutdown` message — how PM2 stops
+   a process on Windows), worker stats, then `listen`.
 
 **Shutdown** (`src/server/shutdown.js`) runs in strict order. It has a double-run guard, and
 `isShuttingDown` makes the WhatsApp webhook answer 503. A hard exit is armed first: the worker
 exits after 60 s even if a step hangs. PM2's `WORKER_KILL_TIMEOUT` (default 65 s) is above it.
 
 0. Stop `callCleanupService` (its sweep would race the media closing below).
-1. Close Socket.IO and wait 800 ms.
-2–3. Close every call's media held here (their recordings start uploading).
-   - `batchTerminateCalls` as SERVICE_MAINTENANCE, and fill in the durations.
-   - Stop IVR sessions and write lifecycle logs.
-   - `customerChannels.terminate` each live call, best effort.
+1. Close Socket.IO and wait 800 ms. A socket closed this way (`server shutting down`) doesn't
+   drop its agent's leg: the agent didn't leave, their client reconnects to another worker.
+2–3. **Hand the calls over instead of ending them** (a deploy doesn't drop calls):
+   `callMedia.handOver()` lets go of every room without a BYE, `ivrCoordinator.suspendAll()`
+   stops the engines but keeps their sessions and saved positions, and `callInbox.handOver()`
+   gives up the leases at once, so another worker adopts each call within ~2 s
+   (`core/calls/CallAdoption`) — or the workers that start next, when they all restart. The
+   media never stops and the provider isn't told anything.
 4. Stop worker stats.
 5. Wait up to 45 s for recording uploads, then disconnect from the media server.
 6. Stop `redisCleanupService`, `queueTimeoutService`, `outboxDispatcher`, each channel's
-   `stop()` and drachtio.
+   `stop()` and drachtio. SIP's `stop()` keeps answered legs for the adopting worker (their
+   dialog ids are in Redis) and ends only legs still ringing, whose pending INVITE can't move.
 7. Release the cleanup lock, give up the calls' leases (`callInbox.close`) and close the adapter clients.
 8. Close the Redis clients.
 9. Close storage.

@@ -62,8 +62,10 @@ class IvrCoordinator {
      * @param {string}            callId
      * @param {number}            ivrFlowId
      * @param {object}            callMeta       { tenantId, channelId, queueId }
+     * @param {object}            [opts.resume]  { sessionId, nodeId }: continue a session a
+     *                                           worker that died was running (CallAdoption)
      */
-    async startSession(callId, ivrFlowId, callMeta = {}) {
+    async startSession(callId, ivrFlowId, callMeta = {}, { resume = null } = {}) {
         if (this._sessions.has(callId)) {
             log.warn({ callId }, 'Session already active');
             return;
@@ -92,8 +94,8 @@ class IvrCoordinator {
 
         try {
             // The first prompt plays once the caller's audio is flowing, so its
-            // start isn't lost while the media connects.
-            if (!await callMedia.customerAudio(callId, CUSTOMER_AUDIO_WAIT_MS)) {
+            // start isn't lost while the media connects (a resumed one already is).
+            if (!resume && !await callMedia.customerAudio(callId, CUSTOMER_AUDIO_WAIT_MS)) {
                 log.warn({ callId }, 'No audio from the caller yet — starting the IVR anyway');
             }
 
@@ -113,8 +115,8 @@ class IvrCoordinator {
             // 2. Each node's audio, as the media server fetches it
             const audioPathMap = this._resolveAudio(menu);
 
-            // 3. Persist session
-            const sessionId = await IvrRepository.createSession({
+            // 3. Persist session (a resumed one has its row)
+            const sessionId = resume?.sessionId ?? await IvrRepository.createSession({
                 callId,
                 ivrFlowId,
                 tenantId: callMeta.tenantId ?? null,
@@ -129,7 +131,7 @@ class IvrCoordinator {
                 }).catch(() => { });
             };
 
-            logIvrLifecycle('logIvrStarted');
+            if (!resume) logIvrLifecycle('logIvrStarted');
 
             // 4. Create and start engine
             const engine = new IvrEngine({
@@ -242,8 +244,13 @@ class IvrCoordinator {
             EventBus.on('call:ivr_complete', completeHandler);
             EventBus.on('call:terminated', terminationHandler);
 
-            engine.start();
-            log.info({ callId }, 'Session started');
+            if (resume) {
+                engine.startAt(resume.nodeId);
+                log.info({ callId, nodeId: resume.nodeId }, 'Session resumed');
+            } else {
+                engine.start();
+                log.info({ callId }, 'Session started');
+            }
 
         } catch (err) {
             log.error({ callId, err }, 'Failed to start session');
@@ -256,6 +263,19 @@ class IvrCoordinator {
                 callMedia.listenForDigits(callId, false);
             }
         }
+    }
+
+    // Shutdown with the calls handed over: stops the engines here without
+    // closing their sessions or their saved position — the worker taking a
+    // call over resumes it (core/calls/CallAdoption).
+    suspendAll() {
+        for (const session of this._sessions.values()) {
+            if (session._pending) continue;
+            EventBus.off('call:ivr_complete', session.completeHandler);
+            EventBus.off('call:terminated', session.terminationHandler);
+            session.engine?.stop();
+        }
+        this._sessions.clear();
     }
 
     /**

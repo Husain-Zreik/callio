@@ -8,11 +8,11 @@
 //      on worker 2, which drains the queue and makes the offer: the offer is
 //      made by worker 1 (the call's room stays on one worker) and bridges.
 // Run through run.mjs, which starts the workers and passes them in E2E_WORKERS.
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { createRequire } from 'module';
 import {
     testDb, sleep, makeChecks, waitFor, hear, fakeMeta,
-    connectAgent, accept, nextIncoming, api as makeApi,
+    connectAgent, accept, nextIncoming, api as makeApi, wav,
 } from './lib.mjs';
 
 const seed = JSON.parse(readFileSync(process.argv[2], 'utf8'));
@@ -26,7 +26,7 @@ const { check, summary } = makeChecks();
 const Redis = createRequire(import.meta.url)('ioredis');
 const redis = new Redis({ host: process.env.REDIS_HOST, port: Number(process.env.REDIS_PORT), db: Number(process.env.REDIS_DB ?? 0) });
 const roomState = async (callId) => JSON.parse((await redis.get(`callio:call:${callId}:room`)) ?? 'null');
-const api = makeApi(W1, seed.api_key);
+let api = makeApi(W1, seed.api_key);
 const meta = fakeMeta({ callioUrl: W1, apiKey: seed.api_key, phoneNumberId: '111222333' });
 const db = await testDb();
 const q = async (sql, params = []) => (await db.execute(sql, params))[0];
@@ -126,11 +126,36 @@ try {
         custBefore?.dominant() === 880 && agentBefore?.dominant() === 440, `customer=${custBefore?.dominant()} agent=${agentBefore?.dominant()}`);
     const leaseKey = `callio:call:${row3.id}:lease`;
     const ownerBefore = await redis.get(leaseKey);
-    check('call 3 is run by worker 1', (await rooms(W1)) === 1 && Boolean(ownerBefore), `w1 rooms=${await rooms(W1)} lease=${ownerBefore}`);
+    check('call 3 is run by worker 1', Boolean(ownerBefore) && ownerBefore === (await (await fetch(`${W1}/health`)).json()).boot, `lease=${ownerBefore}`);
+
+    // Call 4 sits in an IVR menu on worker 1 when it dies.
+    mkdirSync(process.env.STORAGE_LOCAL_ROOT, { recursive: true });
+    writeFileSync(`${process.env.STORAGE_LOCAL_ROOT}/cluster-prompt.wav`, wav(600, 1));
+    const asset = await api('POST', '/v1/tenants/demo/audio-assets', { name: 'Menu prompt', storage_provider: 'LOCAL', storage_key: 'cluster-prompt.wav', mime_type: 'audio/wav' });
+    await api('PUT', '/v1/tenants/demo/ivr-flows/cluster-menu', {
+        name: 'Cluster menu', channel_ref: 'whatsapp-main', status: 'ACTIVE', trigger_condition: 'ALWAYS',
+        structure: {
+            nodes: [
+                { id: 'start', type: 'ivr_start', data: {} },
+                { id: 'menu', type: 'ivr_menu', data: { label: 'Main', audioFileId: asset.body.audioAsset.id, timeoutSeconds: 25 } },
+                { id: 'agents', type: 'ivr_transfer', data: { targetType: 'queue' } },
+            ],
+            edges: [{ source: 'start', target: 'menu' }, { source: 'menu', target: 'agents', sourceHandle: '1' }],
+        },
+    });
+    await api('PUT', '/v1/tenants/demo/queues/main/members', { members: [{ agent_ref: 'agent-1' }, { agent_ref: 'agent-2' }] });
+    const a2 = await connectAgent(W2, seed, 'agent-2');
+    await setAvailability(a2, 'AVAILABLE');
+    const c4 = await meta.callIn('wacid.cl.4', { from: '96181030854' });
+    const row4 = await callByProvider(c4.id);
+    await waitFor(async () => (await redis.get(`callio:call:${row4.id}:ivr`)) !== null, 15000, 'call 4 in the menu');
+    check('call 4 waits in an IVR menu on worker 1', (await callRow(row4.id)).state === 'IVR'
+        && JSON.parse(await redis.get(`callio:call:${row4.id}:ivr`)).nodeId === 'menu');
 
     const killedAt = Date.now();
     process.kill(workers[0].pid);
     meta.retarget(W2);
+    api = makeApi(W2, seed.api_key);
     const custGap = await ear(c3.customer.received);
     const agentGap = await ear(a1.peer.received);
     check('with its worker dead, the customer and the agent still hear each other',
@@ -140,8 +165,26 @@ try {
         const v = await redis.get(leaseKey);
         return v && v !== ownerBefore ? v : null;
     }, 30000, 'call 3 adopted').catch(() => null);
-    check('worker 2 takes the call over', Boolean(ownerAfter) && (await rooms(W2)) === 1,
-        `lease=${ownerAfter} w2 rooms=${await rooms(W2)} after ${Math.round((Date.now() - killedAt) / 1000)}s`);
+    check('worker 2 takes the call over', Boolean(ownerAfter) && ownerAfter === (await (await fetch(`${W2}/health`)).json()).boot,
+        `lease=${ownerAfter} after ${Math.round((Date.now() - killedAt) / 1000)}s`);
+
+    // Call 4: the menu resumes on worker 2; pressing 1 routes it to the queue.
+    await waitFor(async () => (await redis.get(`callio:call:${row4.id}:lease`)) === ownerAfter, 15000, 'call 4 adopted').catch(() => { });
+    await sleep(2500);   // the resumed menu plays its prompt again, then listens
+    c4.customer.tone.set([697, 1209]); // DTMF "1"
+    await sleep(400);
+    c4.customer.tone.set([440]);
+    const offer4 = await waitFor(() => a2.incoming.find((p) => String(p.callId) === String(row4.id) && p.sdpOffer), 20000, 'call 4 offered after the resumed menu').catch(() => null);
+    check('the IVR resumes on worker 2: pressing 1 there routes the call to the queue', Boolean(offer4));
+    if (offer4) {
+        await accept(a2, offer4, 660);
+        await waitFor(async () => (await callRow(row4.id)).status === 'IN_PROGRESS', 15000, 'call 4 answered').catch(() => { });
+        const cust4 = await ear(c4.customer.received);
+        const agent4 = await ear(a2.peer.received);
+        check('the call that went through the resumed IVR bridges both ways', cust4?.dominant() === 660 && agent4?.dominant() === 440,
+            `customer=${cust4?.dominant()} agent=${agent4?.dominant()}`);
+        await endByAgent(a2, row4.id).catch(() => { });
+    }
 
     // Past the dead worker's boot key (30 s) and a sweep (every 30 s): the
     // adopted legs must not be swept as a dead worker's.
@@ -155,7 +198,7 @@ try {
     const ended = await callRow(row3.id);
     check('the adopted call hangs up cleanly: COMPLETED/AGENT', ended.status === 'TERMINATED'
         && ended.termination_reason === 'COMPLETED' && ended.terminated_by === 'AGENT', `${ended.status} ${ended.termination_reason}/${ended.terminated_by}`);
-    await waitFor(async () => (await rooms(W2)) === 0, 8000, 'worker 2 room closed').catch(() => { });
+    await waitFor(async () => (await rooms(W2)) === 0, 8000, 'worker 2 rooms closed').catch(() => { });
     check('its room, room state and lease are gone', (await rooms(W2)) === 0
         && !(await redis.exists(`callio:call:${row3.id}:room`)) && !(await redis.exists(leaseKey)),
         `w2 rooms=${await rooms(W2)} room=${await redis.exists(`callio:call:${row3.id}:room`)} lease=${await redis.exists(leaseKey)}`);
@@ -163,6 +206,11 @@ try {
     console.error('HARNESS ERROR:', err);
     exitCode = 1;
 } finally {
+    // The flow is the channel's for every later suite: leave it off.
+    await api('PUT', '/v1/tenants/demo/ivr-flows/cluster-menu', {
+        name: 'Cluster menu', channel_ref: 'whatsapp-main', status: 'INACTIVE',
+        structure: { nodes: [{ id: 'start', type: 'ivr_start', data: {} }], edges: [] },
+    }).catch(() => { });
     if (summary() > 0) exitCode = 1;
     meta.close();
     redis.disconnect();

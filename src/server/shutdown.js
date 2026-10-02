@@ -12,12 +12,9 @@ import { redisCleanupService } from '../infra/cluster/RedisCleanupService.js';
 import { storageClient } from '../infra/storage/StorageClient.js';
 import { drachtio } from '../infra/sip/Drachtio.js';
 import { callMedia } from '../core/media/CallMedia.js';
-import { mediaLegs } from '../core/media/MediaLegs.js';
 import { workerStatsService } from '../infra/monitoring/WorkerStatsService.js';
 import { customerChannels } from '../core/channels/CustomerChannels.js';
-import { callLifecycleLogger } from '../core/calls/CallLifecycleLogger.js';
 import { ivrCoordinator } from '../core/ivr/IvrCoordinator.js';
-import CallRepository from '../persistence/CallRepository.js';
 import dbPool from '../../config/dbConnection.js';
 import { outboxDispatcher } from '../outbox/OutboxDispatcher.js';
 import { queueTimeoutService } from '../core/routing/QueueTimeoutService.js';
@@ -72,102 +69,25 @@ export async function shutdown(server, io) {
             log.info('Socket.IO closed');
         }
 
-        // 2–3. Close every call's media held here — their rooms end on the media
-        //    server and their recordings start uploading (drained in step 5).
-        const activeCalls = callMedia.activeCallIds();
-        if (activeCalls.length > 0) {
-            log.info(`Closing the media of ${activeCalls.length} call(s)...`);
-            await Promise.allSettled(activeCalls.map((callId) =>
-                mediaLegs.close(callId).catch((err) =>
-                    log.warn({ callId, err }, 'Closing the call media failed')
-                )
-            ));
-
-            // Fetch call records to categorise active calls before terminating them.
-            const callRecords = await CallRepository.findByIds(activeCalls).catch(() => []);
-            const inProgressCalls = callRecords.filter(c => c.status === 'IN_PROGRESS');
-            // IVR calls: RINGING with an ivr_flow_id — they hold a live CUSTOMER audio
-            // connection and must be explicitly terminated with Meta, same as IN_PROGRESS.
-            const ivrCalls = callRecords.filter(
-                c => c.ivr_flow_id != null && c.status !== 'TERMINATED' && c.status !== 'FAILED'
-            );
-
-            // DB updates run FIRST — these are instant (~10ms) and must complete before
-            // SIGKILL. customerChannels.terminate is a 400-600ms HTTP call that runs after,
-            // as best-effort. If PM2 kill_timeout hits during the API call the DB is
-            // already correct and the customer won't see a stuck IN_PROGRESS record.
-            await CallRepository.batchTerminateCalls(
-                activeCalls,
-                'SERVICE_MAINTENANCE',
-                'SYSTEM'
-            ).catch(err =>
-                log.warn({ err }, 'batchTerminateCalls failed')
-            );
-
-            // Compute call/ringing durations for answered calls — finalizeFromWebhook
-            // won't run because Redis subscriptions are torn down before Meta's webhook
-            // arrives. If the webhook does arrive later, finalizeFromWebhook Phase 1
-            // (no status guard) overwrites with Meta's authoritative values via COALESCE.
-            if (inProgressCalls.length > 0) {
-                const shutdownTime = new Date();
-                await Promise.allSettled(inProgressCalls.flatMap(c => {
-                    const answeredAt = c.answered_at ? new Date(c.answered_at) : null;
-                    const ringingAt = c.ringing_at ? new Date(c.ringing_at) : null;
-                    const callDuration = answeredAt ? Math.round((shutdownTime - answeredAt) / 1000) : null;
-                    const ringingDuration = (ringingAt && answeredAt) ? Math.round((answeredAt - ringingAt) / 1000) : null;
-                    return [
-                        callDuration !== null
-                            ? CallRepository.updateDuration(c.id, 'call_duration', callDuration)
-                                .catch(err => log.warn({ callId: c.id, err }, 'Setting call_duration failed'))
-                            : null,
-                        ringingDuration !== null
-                            ? CallRepository.updateDuration(c.id, 'ringing_duration', ringingDuration)
-                                .catch(err => log.warn({ callId: c.id, err }, 'Setting ringing_duration failed'))
-                            : null,
-                    ].filter(Boolean);
-                }));
-            }
-
-            // Stop IVR sessions cleanly — closes engine timers and the IVR DB
-            // session record. The caller's leg is already closed above.
-            if (ivrCalls.length > 0) {
-                await Promise.allSettled(ivrCalls.map(c =>
-                    ivrCoordinator.stopSession(c.id, 'hung_up')
-                        .catch(err => log.warn({ callId: c.id, err }, 'Stopping the IVR session failed'))
-                ));
-            }
-
-            // Log service_maintenance lifecycle entry + tell Meta for all calls that
-            // had an active WhatsApp audio connection (answered calls + IVR sessions).
-            const callsNeedingTermination = [...inProgressCalls, ...ivrCalls];
-            if (callsNeedingTermination.length > 0) {
-                await Promise.allSettled(callsNeedingTermination.map(c =>
-                    callLifecycleLogger.logTerminated(c.id, c.tenant_id, c.agent_id ?? null, {
-                        reason: 'service_maintenance',
-                        message: 'Call ended due to service maintenance',
-                    }).catch(err =>
-                        log.warn({ callId: c.id, err }, 'Lifecycle log failed')
-                    )
-                ));
-
-                // Tell the provider to end each connected call so the customer is not left hanging.
-                // Best-effort: if SIGKILL arrives mid-flight the DB is already updated above.
-                log.info(`Gracefully terminating ${callsNeedingTermination.length} active call(s)...`);
-                await Promise.allSettled(callsNeedingTermination.map(c =>
-                    customerChannels.terminate(c.id).catch(err =>
-                        log.warn({ callId: c.id, err }, 'Provider terminate failed')
-                    )
-                ));
-            }
-        }
+        // 2–3. Hand the calls held here over instead of ending them: their media
+        //    keeps going on the media plane, their state is in Redis, and giving
+        //    up their leases lets another worker take each over at once
+        //    (core/calls/CallAdoption) — or the workers that start next, when
+        //    they all restart. Only a SIP call still ringing ends (its pending
+        //    INVITE can't move; the SIP channel's stop in step 6).
+        const handedOver = callMedia.handOver();
+        ivrCoordinator.suspendAll();
+        await callInbox.handOver().catch((err) => log.warn({ err }, 'Giving up the call leases failed'));
+        if (handedOver) log.info(`Handed ${handedOver} call(s) over to the other workers`);
 
         // 4. Stop metrics logging
         workerStatsService.logSnapshot('graceful_shutdown');
         workerStatsService.stop();
 
-        // 5. Recording uploads (max 45 s): the media server uploads each closed
-        //    call's recording; this waits for them to land and completes the rows.
-        //    Then the media plane disconnects.
+        // 5. Recording uploads (max 45 s): the media server uploads each call
+        //    that ended here; this waits for them to land and completes the rows.
+        //    (A handed-over call's recording keeps running.) Then the media plane
+        //    disconnects.
         log.info('Waiting for recording uploads to complete...');
         await callMedia.stop().catch((err) => log.warn({ err }, 'Stopping the media plane failed'));
 

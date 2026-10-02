@@ -194,7 +194,10 @@ export function sipCarrier({ gateway = { host: '127.0.0.1', port: 5060 }, sipPor
                 if (call) call.acked = true;
                 break;
             case 'OPTIONS':
-                respond(msg, 200, 'OK');
+                // In-dialog keep-alive: a dialog we hung up no longer exists.
+                if (call?.ended) respond(msg, 481, 'Call/Transaction Does Not Exist');
+                else respond(msg, 200, 'OK');
+                if (call) call.optionsSeen = (call.optionsSeen ?? 0) + 1;
                 break;
             case 'INVITE':
                 if (call) { respond(msg, 200, 'OK', { body: call.localSdp, toTag: call.localTag }); break; } // re-INVITE

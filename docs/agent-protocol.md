@@ -259,6 +259,12 @@ require one (CallKit, Android Telecom). The same value is in the call's pushes.
   answer from `call:reconnected`. There is no ICE restart — Callio rebuilds its
   side of the leg. If reconnecting doesn't bring media back, send
   `call:terminate { reason: 'system_failed' }`.
+- **A Callio worker restarting** (a deploy) or dying doesn't end your call: its
+  media keeps flowing and another worker takes the call over. Your socket closes
+  (socket.io reason `transport close`); reconnect it as for any drop. Your media
+  leg is still up, so audio continues meanwhile; use `call:reconnect` only if
+  your own peer connection failed. For up to ~20 s after a crash (2 s after a
+  deploy) the call's actions wait until the new worker has it.
 
 ### Monitoring
 

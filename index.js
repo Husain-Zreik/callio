@@ -80,6 +80,8 @@ async function startServer() {
 
         process.on("SIGINT",  () => shutdown(server, io));
         process.on("SIGTERM", () => shutdown(server, io));
+        // PM2 on Windows (and the e2e runner) ask for a graceful stop by IPC message.
+        process.on("message", (msg) => { if (msg === "shutdown") shutdown(server, io); });
         workerStatsService.start();
 
         await fastify.listen({ port: config.node.port, host: config.node.host });

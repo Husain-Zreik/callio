@@ -417,8 +417,12 @@ export default function registerCallSocketListeners(socket) {
 
     // ── Disconnect ────────────────────────────────────────────────────────────
 
-    socket.on('disconnect', async () => {
+    socket.on('disconnect', async (reason) => {
         if (!socket.callId) return;
+        // This worker is shutting down and handing its calls over: the agent
+        // didn't leave — their media stays up and their client reconnects to
+        // another worker.
+        if (reason === 'server shutting down') return;
         const userId = socket.user?.id;
 
         if (socket.isMonitoring) {

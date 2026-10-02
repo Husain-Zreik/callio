@@ -25,6 +25,9 @@
 //                                → { address, addressType } for outbound intents
 //   validateChannelConfig(body)  → error message or null, for channel provisioning
 //   registerRoutes(fastify)      optional HTTP ingress (webhooks)
+//   adopt(call)                  optional: take over the provider side of a call
+//                                whose worker died (core/calls/CallAdoption), for a
+//                                channel whose legs live in a worker's memory (SIP)
 //   start() / stop()             optional: connect to the provider at startup
 //                                (e.g. SIP's drachtio connection), disconnect at shutdown
 // `call` is a calls row. Adapters read their credentials from the call's channel.

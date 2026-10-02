@@ -55,7 +55,10 @@ Callio's orphan sweep hangs them up at start.
 A suite whose first line is `// e2e-workers: N` gets N Callio workers instead,
 as PM2 runs them: ports `TEST_CALLIO_PORT` + 0…N−1, `WORKER_ID` `e2e-1`…, one
 Redis and database, logs `<suite>.callio.log`, `<suite>.w2.callio.log`, …. The
-suite receives them in `E2E_WORKERS` (`[{ port, pid }]`) and may kill one.
+suite receives them in `E2E_WORKERS` (`[{ port, pid }]`) and may kill one, or stop one
+gracefully: `POST <E2E_CONTROL_URL>/workers/<index>/shutdown` (the runner sends the worker
+an IPC `shutdown`). Between suites the runner also deactivates every IVR flow, so a suite's
+flow can't catch the next suite's calls.
 
 After each suite it scans that suite's Callio log for
 `unhandled|exception|is not a function|unknown column|doesn't exist|AGENT STUCK`
@@ -95,6 +98,8 @@ so the fake S3 in `run.mjs` keeps answering while they do.
 | `sdk.test.mjs` | The JS agent SDK (`sdk/agent-js`) in Node: token from `npm run agent:token`, connect, `setAvailability`; supervisor connect, `refreshSession()`; incoming Call, `accept()`, two-way audio; board and `monitor()` (listen / whisper); `hangup()`; customer hang-up; `decline()` passing the call on; reload recovering the media; another device and `switchHere()`; `startOutbound()`. |
 | `react.test.mjs` | The React bindings (`sdk/agent-react`) rendered in Node: provider connects, hooks go available, show and answer the ringing call (two-way audio), mute; a supervisor's hooks show the board and monitor; hang-up clears both; unmounting disconnects. |
 | `cluster.test.mjs` | Two workers (`// e2e-workers: 2`): a call arriving on worker 1 offered to and accepted by an agent on worker 2, bridged both ways, its room on worker 1 only, its room state in Redis (each leg's channel uuid, dialog id, rtpengine key, member) and gone after the hang-up from worker 2; a call waiting on worker 1 drained by worker 2 with no stored agent offer — the offer is made by worker 1 through the call's inbox, and bridges; worker 1 killed during a bridged call: the audio never stops, worker 2 takes the call over (lease, room rebuilt from its snapshot) in ~16 s, a minute later (past a sweep) it still bridges both ways, and it hangs up cleanly as COMPLETED/AGENT with its room, state and lease gone. |
+| `sip-cluster.test.mjs` | Two workers: two answered SIP calls run on worker 1 (calls placed until drachtio hands two there), worker 1 killed: worker 2 takes both over; an agent hang-up sends the carrier a BYE inside the taken-over dialog, and a carrier hang-up is noticed by the in-dialog OPTIONS probe (COMPLETED/CUSTOMER). |
+| `deploy.test.mjs` | Two workers: worker 1 asked to stop gracefully (IPC `shutdown`, as PM2 does on Windows) during a bridged call — the call is handed over in ~2 s, never ended (still IN_PROGRESS, the provider never told), still bridged after worker 1 exits, and hangs up cleanly. |
 | `sip.test.mjs` | SIP channel provisioned via API (foreign trunk refused); inbound call as E.164, ringing, offered, 200 OK/ACK, G.711 audio both ways; agent hang-up sends BYE; caller hang-up; CANCEL while waiting; unknown number 404; max wait TIMEOUT with a final error to the carrier; IVR answering, in-band DTMF over SIP, caller giving up after the IVR (NO_ANSWER); outbound dialed through the trunk, answered, two-way audio, BYE; 486 → REJECTED/CUSTOMER; same consumer events as WhatsApp. Needs the local SIP gateway; see `docs/sip.md`. |
 
 When you add a feature, add its scenario to a suite.

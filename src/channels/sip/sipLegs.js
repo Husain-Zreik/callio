@@ -16,6 +16,7 @@ import { sipDialogs } from './SipDialogs.js';
 export async function finishLeg(leg, { providerStatus = 'COMPLETED', failed = false, errors = null } = {}) {
     if (leg.finished) return;
     leg.finished = true;
+    if (leg.probe) clearInterval(leg.probe);
     const endedAt = new Date();
 
     await sipDialogs.remove(leg.providerCallId);
