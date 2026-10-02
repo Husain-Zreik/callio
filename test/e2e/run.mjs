@@ -8,10 +8,12 @@
 // up -d --build` (drachtio, rtpengine, FreeSWITCH): every call's media runs there.
 import { spawn, spawnSync } from 'child_process';
 import net from 'net';
+import dgram from 'dgram';
+import dns from 'dns/promises';
 import { createRequire } from 'module';
 import { randomBytes } from 'crypto';
 import { mkdtempSync, writeFileSync, readdirSync, readFileSync, existsSync } from 'fs';
-import { tmpdir } from 'os';
+import { tmpdir, networkInterfaces } from 'os';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { fakeS3 } from './lib.mjs';
@@ -54,9 +56,43 @@ if (!await listening(9022) || !await listening(8021)) {
         + 'docker compose -f deploy/sip-gateway/docker-compose.local.yml up -d --build');
     process.exit(1);
 }
+const rtpengineAnswers = () => new Promise((resolve) => {
+    const s = dgram.createSocket('udp4');
+    const cookie = `preflight${Date.now()}${randomBytes(4).toString('hex')}`;
+    const done = (ok) => { clearTimeout(t); s.close(); resolve(ok); };
+    const t = setTimeout(() => done(false), 1500);
+    s.on('message', (m) => done(m.toString().startsWith(`${cookie} `)));
+    s.send(`${cookie} d7:command4:pinge`, 22222, '127.0.0.1');
+});
+if (!await rtpengineAnswers()) {
+    console.log('[e2e] rtpengine does not answer on :22222 — '
+        + 'docker compose -f deploy/sip-gateway/docker-compose.local.yml up -d --build');
+    process.exit(1);
+}
 // The media server runs in Docker: it reaches this machine (Callio's audio
 // route and event-socket callbacks, the fake S3) as host.docker.internal.
-const DOCKER_HOST = process.env.TEST_DOCKER_HOST || 'host.docker.internal';
+// Callio, on this machine, uses the same name, through the hosts file Docker
+// Desktop writes — which keeps an old address after the network changes, and
+// then everything that uses it (object storage first) hangs. So check it.
+async function dockerHost() {
+    if (process.env.TEST_DOCKER_HOST) return process.env.TEST_DOCKER_HOST;
+    const own = Object.values(networkInterfaces()).flat().filter((a) => a?.family === 'IPv4');
+    const resolved = await dns.lookup('host.docker.internal', { family: 4 }).then((r) => r.address, () => null);
+    if (resolved && own.some((a) => a.address === resolved)) return 'host.docker.internal';
+    // This machine's LAN address: the one in the stale address's /24 if any,
+    // else the first that isn't loopback or a Docker/WSL/Hyper-V bridge (172.16/12).
+    const lan = own.filter((a) => !a.internal && !/^172\.(1[6-9]|2\d|3[01])\./.test(a.address));
+    const prefix = resolved?.split('.').slice(0, 3).join('.');
+    const pick = lan.find((a) => a.address.startsWith(`${prefix}.`)) ?? lan[0];
+    if (!pick) {
+        console.log(`[e2e] host.docker.internal is ${resolved ?? 'unresolvable'}, not an address of this machine, and no LAN address was found — set TEST_DOCKER_HOST`);
+        process.exit(1);
+    }
+    console.log(`[e2e] host.docker.internal is ${resolved ?? 'unresolvable'}, not an address of this machine `
+        + `(stale hosts entry — restarting Docker Desktop rewrites it); using ${pick.address}`);
+    return pick.address;
+}
+const DOCKER_HOST = await dockerHost();
 const mediaEnv = {
     DRACHTIO_HOST: '127.0.0.1', DRACHTIO_PORT: '9022', DRACHTIO_SECRET: process.env.TEST_DRACHTIO_SECRET || 'CHANGE_ME',
     RTPENGINE_HOST: '127.0.0.1', RTPENGINE_NG_PORT: '22222',

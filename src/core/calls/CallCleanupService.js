@@ -145,10 +145,10 @@ class CallCleanupService {
     // ── Periodic scan ─────────────────────────────────────────────────────────
 
     async _runPeriodicCleanup() {
-        // Reconcile this worker's in-memory peers against the DB first — closes orphaned
-        // wrtc peers for calls already terminated elsewhere (runs every cycle, even when
-        // the DB stuck-call scan below finds nothing).
-        await this._reconcileOrphanedPeers();
+        // Reconcile this worker's media legs against the DB first — closes the legs
+        // of calls already terminated elsewhere (runs every cycle, even when the DB
+        // stuck-call scan below finds nothing).
+        await this._reconcileOrphanedLegs();
 
         await RecordingRepository.markStaleRecordingsFailed().catch((err) =>
             log.error({ err }, 'Stale recording scan failed')
@@ -243,7 +243,7 @@ class CallCleanupService {
      * call ending at the provider, whose owner never got CALL_TERMINATED).
      * Closes the media of any call that is terminal or gone.
      */
-    async _reconcileOrphanedPeers() {
+    async _reconcileOrphanedLegs() {
         const localCallIds = callMedia.activeCallIds();
         if (localCallIds.length === 0) return;
 

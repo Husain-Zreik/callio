@@ -33,8 +33,11 @@
 #                                both, and Docker's port publishing can deliver
 #                                a packet for one to the other. An offer
 #                                without a direction uses the first.
-#   delete-delay = 0             free a deleted call's ports at once (default
-#                                30 s), so back-to-back test calls don't run out
+#   delete-delay = 5             keep a deleted call's ports 5 s (default 30 s,
+#                                which back-to-back test calls would run out
+#                                of; 0 hands a port to the next call while
+#                                Docker's UDP forwarding may still hold the
+#                                old flow)
 #
 # FreeSWITCH: freeswitch/Dockerfile (the image drachtio-fsmrf is built
 # against, plus Opus preferred and the recording upload script), event-socket

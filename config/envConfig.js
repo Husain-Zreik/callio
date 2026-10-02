@@ -229,7 +229,6 @@ export const config = {
         // goes back to its queue (inbound) or ends (outbound).
         transferTimeoutSeconds: parseInt(process.env.CALL_TRANSFER_TIMEOUT_SECONDS || "30", 10) || 30,
         workers: {
-            encodingWorkerCount: parseInt(process.env.ENCODING_WORKER_COUNT) || 2,
             maxCallsPerWorker: parseInt(process.env.MAX_CALLS_PER_WORKER) || 10,
         },
     },

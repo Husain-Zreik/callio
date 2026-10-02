@@ -397,7 +397,8 @@ triggerPriority, timeoutSeconds, agentRingTimeout, status, structure }`.
 
 `audioAsset`: `{ id, ref, name, storageProvider, storageKey, mimeType,
 durationSeconds, platformDefault }`; `storageProvider` is lowercase (`s3`,
-`local`). Any format ffmpeg can decode works (WAV, MP3, OGG). The whole JSON
+`local`). WAV, MP3 and Ogg Opus work: the media server plays the file as it is,
+and its extension (`.wav`, `.mp3`, `.ogg`/`.opus`) says which. The whole JSON
 body is limited to 15 MB, so base64 content can carry about 11 MB of audio.
 
 ## Deleting

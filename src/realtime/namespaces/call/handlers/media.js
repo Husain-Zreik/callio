@@ -25,8 +25,8 @@ export function registerCallMediaListeners() {
         roomManager.broadcastToCall(callId, 'call:supervisor:mode', { callId, mode });
     });
 
-    // Fired by AudioBridge._refreshAgentTrackInMonitor after the monitor's agent-audio
-    // sender is seamlessly refreshed with the new AGENT track.
+    // Fired when a reconnected agent's leg is back in a monitored call's room
+    // (AgentEventHandler).
     EventBus.on('call:monitor:agent:reconnected', ({ callId, supervisorMode, agentPrivate }) => {
         log.info({ callId }, `Monitor audio restored after agent reconnect (mode=${supervisorMode}, private=${agentPrivate})`);
         roomManager.broadcastToCall(callId, 'call:monitor:agent:reconnected', { callId });
@@ -57,7 +57,7 @@ export function registerCallMediaListeners() {
         roomManager.broadcastToCall(callId, 'call:agent:private:changed', { callId, active });
     });
 
-    // Fired by CustomerNetworkMonitor every ~4s with jitter/packet-loss derived quality.
+    // Fired by the media plane's customer-leg monitor with RTCP-derived quality.
     EventBus.on('call:network:quality:customer', ({ callId, ...quality }) => {
         roomManager.broadcastToCall(callId, 'call:network:quality:customer', { callId, ...quality });
     });

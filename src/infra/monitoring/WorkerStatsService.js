@@ -13,7 +13,6 @@ import fs from 'fs';
 import v8 from 'v8';
 import { monitorEventLoopDelay } from 'perf_hooks';
 import { callMedia } from '../../core/media/CallMedia.js';
-import { leakMetrics } from './leakMetrics.js';
 import { callStateCensus } from './callStateCensus.js';
 import { config } from '../../../config/envConfig.js';
 import EventBus from '../../core/EventBus.js';
@@ -85,10 +84,7 @@ class WorkerStatsService {
                 heapTotalMB: this._mb(mem.heapTotal),
                 rssMB: this._mb(mem.rss),
                 externalMB: this._mb(mem.external),
-                // arrayBuffers is the SUBSET of external that is Node Buffers/ArrayBuffers
-                // (recording → Opus/OGG → S3 upload pipeline). If externalMB climbs during
-                // a call but arrayBuffersMB stays flat, the growth is wrtc native (sinks /
-                // peer connection), not our buffers.
+                // arrayBuffers is the subset of external that is Node Buffers/ArrayBuffers.
                 arrayBuffersMB: this._mb(mem.arrayBuffers ?? 0),
             },
             activeCalls: {
@@ -97,35 +93,17 @@ class WorkerStatsService {
             },
             // ── Leak diagnostics ───────────────────────────────────────────────
             // handles.timers should sit at a small constant on an IDLE worker.
-            // placeholderLive should return to ~0 after every call ends. Growth of
-            // either while activeCalls.count is 0 == the placeholder leak (see report).
             handles: this._handles(),
-            leaks: {
-                placeholderCreated: leakMetrics.placeholderCreated,
-                placeholderCleared: leakMetrics.placeholderCleared,
-                placeholderLive: leakMetrics.placeholderLive,
-                audioSourceCreated: leakMetrics.audioSourceCreated,
-                audioSourceStopped: leakMetrics.audioSourceStopped,
-                audioSourceLive: leakMetrics.audioSourceLive,
-                audioSinkCreated: leakMetrics.audioSinkCreated,
-                audioSinkStopped: leakMetrics.audioSinkStopped,
-                audioSinkLive: leakMetrics.audioSinkLive,
-            },
             // Per-call state census — every registry keyed by callId. `retained.total`
             // MUST be 0 at idle (Calls 0). Non-zero == an ended call left state behind.
-            // retained.breakdown.placeholderTracks specifically MUST be 0 at idle:
-            // non-zero means AudioCoordinator.cleanup() failed to call clearTrack() for
-            // a call whose agent disconnected mid-call (the reconnect placeholder leak).
             retained: callStateCensus(),
             // ── Process-level diagnostics ──────────────────────────────────────
-            // threads:          OS thread count (read from /proc/self/status). Grows by
-            //                   ~4 per wrtc peer connection and should stabilise once wrtc
-            //                   releases its audio-processing workers after pc.close().
-            //                   Steady growth over days with no call activity == wrtc thread leak.
+            // threads:          OS thread count (read from /proc/self/status). Constant at
+            //                   idle; steady growth == a thread leak.
             // v8.detachedCtx:   V8 contexts that were detached but not yet GC'd. Anything
             //                   above 0 at idle means a JS closure is holding a stale context.
             // v8.nativeCtx:     Should always be 1 (the main context). Growing == context leak.
-            // v8.mallocedMB:    Native C++ memory malloc'd by V8 internals (not heap, not wrtc).
+            // v8.mallocedMB:    Native C++ memory malloc'd by V8 internals (not heap).
             // eventBusListeners: Total listener count across all EventBus channels. Should be
             //                   constant (~28 at startup). Growth means a per-call handler was
             //                   registered without a matching off().
@@ -162,7 +140,6 @@ class WorkerStatsService {
         const heapStats = v8.getHeapStatistics();
         return {
             handles: this._handles(),
-            leaks: { ...leakMetrics },
             retained: callStateCensus(),
             threads: this._threadCount(),
             detachedContexts: heapStats.number_of_detached_contexts,

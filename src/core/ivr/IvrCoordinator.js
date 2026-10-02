@@ -270,9 +270,8 @@ class IvrCoordinator {
 
         // Latch BEFORE any of the awaits below (DB writes, track cleanup, etc.).
         // This — not the calls.state flip further down, which can fail silently
-        // or lag — is what actually prevents PeerRegistry.checkAndStartBridging
-        // from re-launching IVR on this call if a CUSTOMER ICE/track event fires
-        // while the rest of this function is still unwinding.
+        // or lag — is what prevents a late customer-media event from re-launching
+        // IVR on this call while the rest of this function is still unwinding.
         this._completedCallIds.add(callId);
 
         const {

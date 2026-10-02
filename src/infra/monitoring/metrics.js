@@ -18,7 +18,6 @@
 //   callio_log_records_dropped_total{reason}                buffer (stalled disk) | cap
 //   Leak diagnostics (WorkerStatsService.diagnostics) — at idle these return to ~0 / a constant:
 //   callio_retained_call_state{registry}   per-call state left behind; must be 0 with no calls
-//   callio_native_audio_live{kind}         placeholder | source | sink (wrtc native objects)
 //   callio_recordings_active, callio_active_timers, callio_active_handles,
 //   callio_os_threads, callio_v8_detached_contexts, callio_eventbus_listeners
 //   + Node process metrics: CPU, memory, event-loop lag, GC, handles (callio_ prefix)
@@ -51,7 +50,7 @@ export function registerRuntimeGauges({ activeMediaCalls, agentSockets, diagnost
     const gauge = (name, help, labelNames = []) => new client.Gauge({ name, help, labelNames, registers: [registry] });
     // One diagnostics() read per scrape fills every leak gauge. The registry
     // collects in registration order, so this collector is registered first.
-    let nativeAudio, plain;
+    let plain;
     new client.Gauge({
         name: 'callio_retained_call_state', help: 'Per-call state held, by registry (must be 0 with no calls).',
         labelNames: ['registry'], registers: [registry],
@@ -59,9 +58,6 @@ export function registerRuntimeGauges({ activeMediaCalls, agentSockets, diagnost
             const d = diagnostics();
             this.reset();
             for (const [name, count] of Object.entries(d.retained?.breakdown ?? {})) this.set({ registry: name }, count);
-            nativeAudio.set({ kind: 'placeholder' }, d.leaks.placeholderLive);
-            nativeAudio.set({ kind: 'source' }, d.leaks.audioSourceLive);
-            nativeAudio.set({ kind: 'sink' }, d.leaks.audioSinkLive);
             plain.recordings.set(d.activeRecordings);
             if (d.handles.timers != null) plain.timers.set(d.handles.timers);
             if (d.handles.total != null) plain.handles.set(d.handles.total);
@@ -70,7 +66,6 @@ export function registerRuntimeGauges({ activeMediaCalls, agentSockets, diagnost
             if (d.eventBusListeners != null) plain.listeners.set(d.eventBusListeners);
         },
     });
-    nativeAudio = gauge('callio_native_audio_live', 'Live wrtc native audio objects (should return to ~0 at idle).', ['kind']);
     plain = {
         recordings: gauge('callio_recordings_active', 'Recordings in progress on this worker.'),
         timers: gauge('callio_active_timers', 'Live timers (constant at idle; growth = a leaked interval).'),

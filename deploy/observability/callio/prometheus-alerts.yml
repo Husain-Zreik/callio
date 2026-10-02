@@ -71,7 +71,7 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "Worker {{ $labels.worker }} uses {{ $value | humanize1024 }}B"
-          description: "PM2 restarts a worker at WORKER_MEMORY_LIMIT (1G), dropping its calls. Check callio_native_audio_live and callio_retained_call_state for leaks."
+          description: "PM2 restarts a worker at WORKER_MEMORY_LIMIT (1G), dropping its calls. Check callio_retained_call_state for leaks."
 
       - alert: CallioStateRetainedAtIdle
         expr: |
@@ -82,16 +82,6 @@ groups:
         annotations:
           summary: "Worker {{ $labels.instance }} holds call state with no calls"
           description: "An ended call left state behind (a leak). Which registry: callio_retained_call_state by registry."
-
-      - alert: CallioNativeAudioLeak
-        expr: |
-          sum by (instance) (callio_native_audio_live) > 0
-          and on (instance) sum by (instance) (callio_media_calls_active) == 0
-        for: 15m
-        labels: { severity: warning }
-        annotations:
-          summary: "Worker {{ $labels.instance }} keeps native audio objects with no calls"
-          description: "wrtc sources/sinks not released; memory grows until PM2 restarts the worker."
 
   - name: callio-logging
     rules:

@@ -1,6 +1,6 @@
 # Media architecture (target)
 
-**Status: steps 1–3 done (branch `media-plane`).** Calls' media runs on rtpengine +
+**Status: steps 1–4 done (branch `media-plane`).** Calls' media runs on rtpengine +
 FreeSWITCH rooms behind the media port; how it works today is in
 [architecture.md → Media](architecture.md#media). This doc is the target and the order of
 work; update it as steps land.
@@ -160,7 +160,8 @@ both, so that flips to accepting RFC 4733.
    features until the suite passes. Done: `src/media/rooms/`, the local media plane in
    `deploy/sip-gateway/docker-compose.local.yml`.
 4. **Delete the wrtc media code** (`src/media/webrtc|bridge|dtmf|recording|playback`). The test
-   harness keeps `wrtc` for its simulated customers and agents.
+   harness keeps `wrtc` for its simulated customers and agents. Done: `wrtc` and `@discordjs/opus`
+   are dev dependencies now; `ffmpeg-static` and the in-Node recording upload are gone.
 5. **Failover-able call ownership**, with call inputs on Redis Streams.
 6. **Multi-party calls** and the primary-agent contract.
 
