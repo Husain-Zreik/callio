@@ -22,6 +22,7 @@ import { freeSwitch, FreeSwitch } from './FreeSwitch.js';
 import { rtpLegs } from './RtpLegs.js';
 import { mediaAudio } from './MediaAudio.js';
 import { roomRecorder } from './RoomRecorder.js';
+import { saveRoom, dropRoom } from './RoomSnapshot.js';
 import { CustomerLegMonitor } from './CustomerLegMonitor.js';
 import { primaryAudioOnly, withRejectedLines } from './sdpLines.js';
 import { config } from '../../../config/envConfig.js';
@@ -75,10 +76,19 @@ class RoomMedia {
         return this.rooms.get(String(callId)) ?? null;
     }
 
-    // Runs fn(room) after every earlier operation on the call.
+    // Runs fn(room) after every earlier operation on the call, then saves the
+    // room's state (RoomSnapshot) — a closed room isn't saved again.
     _serial(callId, fn) {
         const room = this._room(callId);
-        const run = room.chain.then(() => fn(room));
+        const run = room.chain.then(async () => {
+            try {
+                return await fn(room);
+            } finally {
+                if (this.rooms.get(String(room.callId)) === room) {
+                    await saveRoom(room).catch((err) => log.warn({ callId: room.callId, err }, 'Saving the room state failed'));
+                }
+            }
+        });
         room.chain = run.catch(() => { });
         return run;
     }
@@ -469,6 +479,7 @@ class RoomMedia {
             if (room.recording) await roomRecorder.stop(room.recording);
             const legs = [room.customer, room.pendingAgent, ...room.agents.values(), ...room.supervisors.values()].filter(Boolean);
             await Promise.all(legs.map((leg) => this._destroyLeg(leg)));
+            await dropRoom(callId).catch(() => { });
             log.debug({ callId }, `Room closed (${legs.length} legs)`);
         });
     }

@@ -24,6 +24,7 @@ import { callParticipants } from './CallParticipants.js';
 import { mediaLegs } from '../media/MediaLegs.js';
 import { callInbox } from '../../infra/cluster/CallInbox.js';
 import { deadlines } from '../../infra/cluster/Deadlines.js';
+import { callState } from '../../infra/cluster/CallState.js';
 import { EventTypes } from '../events/EventTypes.js';
 import { CallDirection } from '../constants/CallConstants.js';
 import { logger } from '../../infra/logging/logger.js';
@@ -138,6 +139,7 @@ class CallTerminator {
     async #closeMedia(callId, media) {
         // Its timers (reconnect window, network-loss grace) go with it.
         await deadlines.clearCall(callId).catch((err) => log.warn({ callId, err }, 'Clearing the call deadlines failed'));
+        await callState.dropAll(callId).catch((err) => log.warn({ callId, err }, 'Dropping the call state failed'));
         await mediaLegs.close(callId).catch((err) =>
             log.error({ callId, err }, 'Closing local media failed')
         );

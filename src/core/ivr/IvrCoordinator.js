@@ -14,6 +14,7 @@ import { IvrEngine } from './IvrEngine.js';
 import { ivrTransferHandler } from './IvrTransferHandler.js';
 import { callMedia } from '../media/CallMedia.js';
 import { logger } from '../../infra/logging/logger.js';
+import { callState } from '../../infra/cluster/CallState.js';
 
 const log = logger('core.ivr.IvrCoordinator');
 
@@ -145,6 +146,9 @@ class IvrCoordinator {
                     // Key presses count only on ivr_menu nodes — the only
                     // nodes where the caller is expected to press a digit.
                     callMedia.listenForDigits(callId, nodeType === 'ivr_menu');
+                    // Where the caller is, for a worker taking the call over.
+                    callState.save(callId, 'ivr', { flowId: menu.id, sessionId, nodeId, nodeType })
+                        .catch((err) => log.warn({ callId, err }, 'Saving the IVR position failed'));
 
                     logIvrLifecycle('logIvrNodeEntered', {
                         node_id: nodeId,
@@ -331,6 +335,7 @@ class IvrCoordinator {
         });
 
         this._sessions.delete(callId);
+        await callState.drop(callId, 'ivr').catch(() => { });
         log.info({ callId }, `Session stopped (outcome: ${outcome}, duration=${durationSeconds ?? 'n/a'}s)`);
     }
 

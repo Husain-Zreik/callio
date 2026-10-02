@@ -9,6 +9,7 @@
 //      made by worker 1 (the call's room stays on one worker) and bridges.
 // Run through run.mjs, which starts the workers and passes them in E2E_WORKERS.
 import { readFileSync } from 'fs';
+import { createRequire } from 'module';
 import {
     testDb, sleep, makeChecks, waitFor, hear, fakeMeta,
     connectAgent, accept, nextIncoming, api as makeApi,
@@ -22,6 +23,9 @@ if (workers.length < 2) {
 }
 const [W1, W2] = workers.map((w) => `http://127.0.0.1:${w.port}`);
 const { check, summary } = makeChecks();
+const Redis = createRequire(import.meta.url)('ioredis');
+const redis = new Redis({ host: process.env.REDIS_HOST, port: Number(process.env.REDIS_PORT), db: Number(process.env.REDIS_DB ?? 0) });
+const roomState = async (callId) => JSON.parse((await redis.get(`callio:call:${callId}:room`)) ?? 'null');
 const api = makeApi(W1, seed.api_key);
 const meta = fakeMeta({ callioUrl: W1, apiKey: seed.api_key, phoneNumberId: '111222333' });
 const db = await testDb();
@@ -66,7 +70,14 @@ try {
         cust1?.dominant() === 880 && agent1?.dominant() === 440, `customer=${cust1?.dominant()} agent=${agent1?.dominant()}`);
     check('the call\'s room is on worker 1 only', (await rooms(W1)) === 1 && (await rooms(W2)) === 0,
         `w1=${await rooms(W1)} w2=${await rooms(W2)}`);
+    const snap = await roomState(row1.id);
+    const legOk = (leg) => Boolean(leg?.uuid && leg?.dialogId && leg?.rtpKey && leg?.memberId != null);
+    check('the room state is in Redis for a worker taking it over (legs with channel uuid, dialog id, rtpengine key, member)',
+        legOk(snap?.customer) && legOk(snap?.agents?.[0]) && snap?.bridged === true,
+        JSON.stringify({ customer: snap?.customer && Object.keys(snap.customer).filter((k) => snap.customer[k] != null), agents: snap?.agents?.length, bridged: snap?.bridged }));
     await endByAgent(a1, row1.id);
+    await waitFor(async () => !(await redis.exists(`callio:call:${row1.id}:room`)), 5000, 'room state dropped').catch(() => { });
+    check('the room state goes when the call ends', !(await redis.exists(`callio:call:${row1.id}:room`)));
     check('a hang-up from worker 2 ends the call', (await callRow(row1.id)).status === 'TERMINATED');
     await waitFor(async () => (await rooms(W1)) === 0, 8000, 'worker 1 room closed').catch(() => { });
     await waitFor(async () => (await availability('agent-1')) !== 'ON_CALL', 8000, 'agent-1 released').catch(() => { });
@@ -101,6 +112,7 @@ try {
 } finally {
     if (summary() > 0) exitCode = 1;
     meta.close();
+    redis.disconnect();
     await db.end();
     process.exit(exitCode);
 }
