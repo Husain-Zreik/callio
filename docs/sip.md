@@ -170,6 +170,7 @@ npm run sip:trunk -- --name <name> --host <carrier signalling host> \
   [--port 5060] [--transport UDP|TCP] \
   [--cidr <ip>/32 --cidr <range>/24 …] \
   [--username <u> --password <p>] \
+  [--country <code> [--strip <prefix>]] \
   [--consumer <slug>]
 ```
 
@@ -188,6 +189,14 @@ npm run sip:trunk -- --name <name> --host <carrier signalling host> \
   every signalling IP the carrier may send from, not just the one in `--host`.
 - `--username` / `--password` are digest credentials for outbound calls,
   encrypted with `CALLIO_MASTER_KEY`.
+- `--country` (with `--strip`, the national prefix) is for a carrier that sends
+  the dialled number and the caller in national format: `--country 961 --strip 0`
+  reads `070123456` as `+96170123456`. A number with `+` or `00`, or starting
+  with the country code, is taken as international. The DID is first looked up
+  as sent; if no line matches, each trunk with number rules that may send from
+  the INVITE's source reads it its way, and only that trunk's lines match. The
+  caller is stored in E.164 the same way. Outbound calls still dial E.164
+  (without `+`). Leaving `--country` out of an update clears the rules.
 
 The SIP channel is created by the consumer through the Management API
 (`docs/management-api.md`):

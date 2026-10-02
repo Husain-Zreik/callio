@@ -186,6 +186,7 @@ matters only under `PRIORITY`.
 | `host`, `port`, `transport` | Where outbound INVITEs go; `transport` `UDP` / `TCP` / `TLS` (default `UDP`), used in the request URI (`src/channels/sip/SipChannel.js`). |
 | `credentials` | Encrypted JSON `{ username, password }` for digest auth. |
 | `inbound_source_cidrs` | JSON array of CIDRs inbound INVITEs may come from (`src/channels/sip/sipAddress.js`). Empty/NULL = any source (development only). |
+| `number_rules` | JSON `{ country_code, national_prefix? }` for a carrier that sends national numbers (`applyNumberRules` in `sipAddress.js`). NULL = numbers arrive in E.164. |
 | `status` | `ACTIVE` / `DISABLED`. |
 
 Created with `npm run sip:trunk`.

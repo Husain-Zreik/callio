@@ -34,7 +34,7 @@ pm2 start ecosystem.config.cjs    # multi-worker fleet (production shape)
 
 npm run consumer:create -- --name "Acme" --slug acme [--webhook-url URL] [--lookup-url URL]
 npm run seed:dev -- --phone-number-id <id> --whatsapp-token <token> [--sip-did +961…]   # dev consumer/tenant/agents/queue/channels
-npm run sip:trunk -- --name <name> --host <carrier> [--cidr <source/32>]   # create/update a SIP trunk (operator)
+npm run sip:trunk -- --name <name> --host <carrier> [--cidr <source/32>] [--country 961 --strip 0]   # create/update a SIP trunk (operator)
 npm run ivr:test -- --consumer <slug> --tenant <ref> --channel <ref> [--off]   # test IVR menu on a real line (DTMF)
 npm run agent:token -- --consumer <slug> --tenant <ref> --agent <ref>   # sign a test agent token
 npm run push:credentials -- --consumer <slug> --show   # also --fcm <sa.json> | --apns <key.p8> … | --remove fcm
