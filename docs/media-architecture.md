@@ -170,6 +170,10 @@ happen on a branch (or worktree) and merge green.
 
 ## Answered by the spike and step 3
 
+- **Real calls on the dev server (2026-10-02):** an inbound WhatsApp call (Meta's relay accepts
+  rtpengine's SDP, `a=ice-lite` kept) and an inbound SIP call, each answered in a browser agent
+  with two-way audio.
+
 - **Ogg Opus:** the image's `mod_opusfile` is read-only. Recordings are stereo WAV on the media
   server, encoded with `opusenc` and uploaded by presigned PUT from there
   (`callio-recording-upload`).
@@ -189,8 +193,6 @@ happen on a branch (or worktree) and merge green.
 
 ## Still open
 
-- **Meta's relay with rtpengine's SDP** (the rules in `whatsappSdp.js`, `a=ice-lite` kept) —
-  only a real WhatsApp call shows it. Manual test on the dev server.
 - **The production media plane** is in `deploy/sip-gateway/docker-compose.yml` (FreeSWITCH
   on host networking, bound to loopback; rtpengine's `external`/`internal` interfaces) and
   `docs/sip.md → Deploying the gateway`; first deployed to the dev server with this merge.
