@@ -5,6 +5,7 @@
 import { redisBaseService } from '../infra/redis/RedisBaseService.js';
 import { redisPubSubService } from '../infra/redis/RedisPubSubService.js';
 import { callInbox } from '../infra/cluster/CallInbox.js';
+import { deadlines } from '../infra/cluster/Deadlines.js';
 import { presenceService } from '../core/agents/PresenceService.js';
 import { redisCleanupService } from '../infra/cluster/RedisCleanupService.js';
 import { storageClient } from '../infra/storage/StorageClient.js';
@@ -68,6 +69,7 @@ export async function startCoreServices() {
     redisCleanupService.start();
     callCleanupService.start();
     queueTimeoutService.start();
+    deadlines.start();
     retentionService.start();
     outboxDispatcher.start();
 

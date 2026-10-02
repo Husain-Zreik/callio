@@ -4,25 +4,41 @@ import { callLifecycleLogger } from '../../calls/CallLifecycleLogger.js';
 import { callTerminator } from '../../calls/CallTerminator.js';
 import { callMedia } from '../../media/CallMedia.js';
 import { TerminationReason, TerminatedBy } from '../../constants/CallConstants.js';
+import { deadlines } from '../../../infra/cluster/Deadlines.js';
 import { logger } from '../../../infra/logging/logger.js';
 
 const log = logger('core.events.ConnectionEventHandler');
 
-// How long (ms) to wait for agent reconnect before terminating the call.
+// How long (ms) to wait for agent reconnect before terminating the call. A
+// stored deadline (infra/cluster/Deadlines.js): it holds even if the worker
+// that saw the disconnect dies, and expires on whichever worker claims it.
 const RECONNECT_TIMEOUT_MS = 120_000;
+const RECONNECT = 'agent-reconnect';
 
 export class ConnectionEventHandler {
     constructor() {
-        this._reconnectTimers = new Map(); // callId -> timeoutId
+        deadlines.on(RECONNECT, (callId) => this._reconnectExpired(callId));
     }
 
-    clearReconnectTimer(callId) {
-        const timerId = this._reconnectTimers.get(callId);
-        if (timerId !== undefined) {
-            clearTimeout(timerId);
-            this._reconnectTimers.delete(callId);
-            log.info({ callId }, 'Reconnect timer cleared');
-        }
+    async clearReconnectTimer(callId) {
+        await deadlines.clear(RECONNECT, callId).catch((err) => log.warn({ callId, err }, 'Clearing the reconnect deadline failed'));
+    }
+
+    async _reconnectExpired(callId) {
+        log.warn({ callId }, `Agent did not reconnect within ${RECONNECT_TIMEOUT_MS / 1000}s — terminating`);
+        // The agent is gone (browser closed, network died): end the call, tell
+        // the provider so the customer isn't left on a dead line, and release
+        // the agent OFFLINE — AVAILABLE would put an absent agent back into
+        // routing. A no-op if the call already ended meanwhile.
+        const call = await CallRepository.findById(callId);
+        if (!call) return;
+        await callTerminator.end(call, {
+            reason: TerminationReason.AGENT_DISCONNECTED,
+            terminatedBy: TerminatedBy.SYSTEM,
+            provider: 'terminate',
+            source: 'agent_disconnect_timeout',
+            agentAfter: 'offline',
+        });
     }
 
     async handleFrontendDisconnected(data) {
@@ -61,29 +77,7 @@ export class ConnectionEventHandler {
             log.error({ callId, err: error }, 'Dropping the agent leg failed');
         }
 
-        this.clearReconnectTimer(callId);
-        const timerId = setTimeout(async () => {
-            this._reconnectTimers.delete(callId);
-            log.warn({ callId }, `Agent did not reconnect within ${RECONNECT_TIMEOUT_MS / 1000}s — terminating`);
-            try {
-                // The agent is gone (browser closed, network died): end the call,
-                // tell the provider so the customer isn't left on a dead line, and
-                // release the agent OFFLINE — AVAILABLE would put an absent agent
-                // back into routing. A no-op if the call already ended meanwhile.
-                const call = await CallRepository.findById(callId);
-                if (!call) return;
-                await callTerminator.end(call, {
-                    reason: TerminationReason.AGENT_DISCONNECTED,
-                    terminatedBy: TerminatedBy.SYSTEM,
-                    provider: 'terminate',
-                    source: 'agent_disconnect_timeout',
-                    agentAfter: 'offline',
-                });
-            } catch (err) {
-                log.error({ callId, err }, 'Failed to end call after the agent disconnected');
-            }
-        }, RECONNECT_TIMEOUT_MS);
-        this._reconnectTimers.set(callId, timerId);
+        await deadlines.set(RECONNECT, callId, RECONNECT_TIMEOUT_MS);
     }
 
     // A client's trickled ICE candidate. rtpengine learns the client's address

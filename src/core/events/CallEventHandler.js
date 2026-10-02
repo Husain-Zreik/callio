@@ -81,7 +81,7 @@ export class CallEventHandler {
                     break;
 
                 case EventTypes.AGENT_RECONNECTED:
-                    this.connectionHandler.clearReconnectTimer(callId);
+                    await this.connectionHandler.clearReconnectTimer(callId);
                     await this.agentHandler.handleAgentReconnected(data);
                     break;
 
@@ -118,7 +118,7 @@ export class CallEventHandler {
                     break;
 
                 case EventTypes.CALL_TERMINATED:
-                    this.connectionHandler.clearReconnectTimer(callId);
+                    await this.connectionHandler.clearReconnectTimer(callId);
                     await this.terminationHandler.handleCallTerminated(data);
                     await this.#releaseIfEnded(callId);
                     break;
