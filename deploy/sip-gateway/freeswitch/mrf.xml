@@ -1,0 +1,25 @@
+<!-- The image's mrf dialplan (drachtio-fsmrf endpoints), plus two lines so an
+     endpoint outlives the Callio worker that created it: socket_resume carries
+     on with the dialplan when that worker's event socket goes away, and park
+     holds the channel there until the worker taking the call over drives it
+     (docs/media-architecture.md, "What survives a control worker's death").
+     Without them an endpoint not inside a conference at that moment (just
+     answered, a ringing agent's leg, a caller between IVR prompts) is hung up. -->
+<include>
+  <context name="mrf">
+
+    <!-- establish outbound event socket connection to the address specified in the X-esl-outbound header -->
+    <extension name="socket">
+      <condition field="${sip_user_agent}" expression="^drachtio-fsmrf:(.*)$">
+        <action application="answer"/>
+        <action application="set" data="send_silence_when_idle=-1"/>
+        <action application="set" data="hangup_after_bridge=false"/>
+        <action application="set" data="park_after_bridge=true"/>
+        <action application="set" data="playback_terminators=none"/>
+        <action application="set" data="socket_resume=true"/>
+        <action application="socket" data="${sip_h_X-esl-outbound} async full"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+  </context>
+</include>

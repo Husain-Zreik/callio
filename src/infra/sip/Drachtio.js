@@ -86,6 +86,26 @@ class Drachtio {
         if (!this.srf || !this.connected) throw new Error('drachtio-server is not connected');
         return this.srf;
     }
+
+    // A request inside an existing dialog, by drachtio's dialog id — works for
+    // a dialog another worker's connection set up (a call taken over after its
+    // worker died). Resolves with the final response; an INVITE is ACKed.
+    // Through the agent's in-dialog path: Srf#request insists on a request URI.
+    requestInDialog(dialogId, { method, body, headers = {} }, timeoutMs = 8000) {
+        const srf = this.require();
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error(`${method} in dialog: no final response`)), timeoutMs);
+            srf._app.request({ method, stackDialogId: dialogId, headers, body }, (err, req) => {
+                if (err) { clearTimeout(timer); return reject(err); }
+                req.on('response', (res, ack) => {
+                    if (res.status < 200) return;
+                    clearTimeout(timer);
+                    if (method === 'INVITE' && typeof ack === 'function') ack();
+                    resolve(res);
+                });
+            });
+        });
+    }
 }
 
 export const drachtio = new Drachtio();

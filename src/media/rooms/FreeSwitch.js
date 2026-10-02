@@ -12,6 +12,7 @@
 // the worker that controlled it is gone, and its RTP keeps flowing into
 // rtpengine ports that get handed to new calls.
 import { bootId } from '../../infra/cluster/WorkerBoot.js';
+import esl from 'drachtio-modesl';
 import Mrf from 'drachtio-fsmrf';
 import { drachtio } from '../../infra/sip/Drachtio.js';
 import { redisBaseService } from '../../infra/redis/RedisBaseService.js';
@@ -32,6 +33,9 @@ class FreeSwitch {
         this._mrf = null;
         this._heartbeat = null;
         this._connecting = null;
+        this._watched = new Map();      // channel uuid → RemoteEndpoint (adopted legs)
+        this._eventConn = null;
+        this._eventConnecting = null;
     }
 
     get enabled() {
@@ -147,6 +151,56 @@ class FreeSwitch {
         }
     }
 
+    // Events of channels this worker didn't create (legs of a call it took
+    // over): DTMF, hang-up, playback end — on one inbound event-socket
+    // connection, filtered to the watched channels' uuids. fsmrf delivers a
+    // channel's events only to the worker that created the endpoint.
+    async watch(uuid, ep) {
+        this._watched.set(uuid, ep);
+        const conn = await this._events();
+        await new Promise((resolve) => conn.filter('Unique-ID', uuid, () => resolve()));
+    }
+
+    unwatch(uuid) {
+        if (!this._watched.delete(uuid)) return;
+        try { this._eventConn?.filterDelete('Unique-ID', uuid, () => { }); } catch { /* closed */ }
+    }
+
+    _events() {
+        if (this._eventConn) return Promise.resolve(this._eventConn);
+        if (this._eventConnecting) return this._eventConnecting;
+        const fs = config.media.freeswitch;
+        this._eventConnecting = new Promise((resolve, reject) => {
+            const conn = new esl.Connection(fs.host, fs.port, fs.secret, () => {
+                // A filter first: an event socket with none gets every event.
+                conn.filter('Unique-ID', 'none', () => {
+                    conn.events('plain', 'DTMF CHANNEL_HANGUP_COMPLETE PLAYBACK_STOP', () => {
+                        this._eventConn = conn;
+                        resolve(conn);
+                    });
+                });
+            });
+            const forUuid = (evt) => this._watched.get(evt.getHeader('Unique-ID'));
+            conn.on('esl::event::DTMF::*', (evt) => forUuid(evt)?.emit('dtmf', { dtmf: evt.getHeader('DTMF-Digit') }));
+            conn.on('esl::event::PLAYBACK_STOP::*', (evt) => forUuid(evt)?.emit('playback-stop'));
+            conn.on('esl::event::CHANNEL_HANGUP_COMPLETE::*', (evt) => {
+                const uuid = evt.getHeader('Unique-ID');
+                const ep = this._watched.get(uuid);
+                if (!ep) return;
+                this.unwatch(uuid);
+                ep.emit('destroy');
+            });
+            conn.on('error', (err) => {
+                log.warn({ err }, 'FreeSWITCH event connection error');
+                this._eventConn = null;
+                this._eventConnecting = null;
+                reject(err);
+            });
+            conn.on('esl::end', () => { this._eventConn = null; this._eventConnecting = null; });
+        });
+        return this._eventConnecting;
+    }
+
     async stop() {
         clearInterval(this._heartbeat);
         this._heartbeat = null;
@@ -154,6 +208,9 @@ class FreeSwitch {
         for (const ms of [this.ms, this.msG711]) {
             try { ms?.disconnect(); } catch { /* already closed */ }
         }
+        try { this._eventConn?.disconnect(); } catch { /* already closed */ }
+        this._eventConn = null;
+        this._watched.clear();
         this.ms = null;
         this.msG711 = null;
     }

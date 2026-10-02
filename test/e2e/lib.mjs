@@ -180,8 +180,9 @@ export function fakeMeta({ callioUrl, apiKey, phoneNumberId, port = 3990 }) {
     const metadata = { display_phone_number: '96170000000', phone_number_id: phoneNumberId };
     const ts = () => String(Math.floor(Date.now() / 1000));
 
+    let target = callioUrl;   // retarget(): webhooks reach any worker
     async function post(value) {
-        const res = await fetch(`${callioUrl}/v1/webhooks/whatsapp/forward`, {
+        const res = await fetch(`${target}/v1/webhooks/whatsapp/forward`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
             body: JSON.stringify({ object: 'whatsapp_business_account', entry: [{ id: 'waba', changes: [{ field: 'calls', value: { messaging_product: 'whatsapp', metadata, ...value } }] }] }),
@@ -248,6 +249,7 @@ export function fakeMeta({ callioUrl, apiKey, phoneNumberId, port = 3990 }) {
         customers,
         calls,
         post,
+        retarget: (url) => { target = url; },
         listen: () => new Promise((r) => server.listen(port, '127.0.0.1', r)),
         close: () => { for (const c of customers.values()) c.close(); server.close(); },
         // A customer calls in; resolves with { id, customer } once the webhook is accepted.

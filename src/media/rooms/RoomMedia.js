@@ -22,7 +22,9 @@ import { freeSwitch, FreeSwitch } from './FreeSwitch.js';
 import { rtpLegs } from './RtpLegs.js';
 import { mediaAudio } from './MediaAudio.js';
 import { roomRecorder } from './RoomRecorder.js';
-import { saveRoom, dropRoom } from './RoomSnapshot.js';
+import { saveRoom, dropRoom, loadRoom } from './RoomSnapshot.js';
+import { RemoteEndpoint } from './RemoteEndpoint.js';
+import { callInbox } from '../../infra/cluster/CallInbox.js';
 import { CustomerLegMonitor } from './CustomerLegMonitor.js';
 import { primaryAudioOnly, withRejectedLines } from './sdpLines.js';
 import { config } from '../../../config/envConfig.js';
@@ -148,6 +150,9 @@ class RoomMedia {
         if (leg.memberId != null) return;
         const { memberId } = await leg.ep.join(room.name, { profile: config.media.freeswitch.conferenceProfile, flags });
         leg.memberId = memberId;
+        // In the room, the leg stays in it if this worker dies (the dialplan's
+        // socket_resume would break it out to park; that's for idle legs).
+        await freeSwitch.api(`uuid_setvar ${leg.ep.uuid} socket_resume false`).catch(() => { });
     }
 
     // The customer's endpoint: DTMF detection on from the start (in-band and
@@ -488,6 +493,53 @@ class RoomMedia {
         return this.rooms.has(String(callId));
     }
 
+    // Takes over a call whose worker died: rebuilds its room from the Redis
+    // snapshot (RoomSnapshot), each leg driven through a RemoteEndpoint — by
+    // channel uuid and dialog id — since the dead worker's fsmrf endpoints
+    // are gone. The media never stopped. False if there's nothing to take.
+    adopt(call) {
+        return this._serial(call.id, async (room) => {
+            if (room.customer || room.agents.size || room.supervisors.size) return true;
+            const snap = await loadRoom(call.id);
+            if (!snap) {
+                this.rooms.delete(String(call.id));   // the empty room _serial made
+                return false;
+            }
+            const legOf = async (s) => {
+                if (!s?.uuid) return null;
+                const ep = new RemoteEndpoint({ uuid: s.uuid, dialogId: s.dialogId });
+                await ep.watch();
+                return {
+                    kind: s.kind, ep, rtpKey: s.rtpKey, transport: s.transport, memberId: s.memberId,
+                    answered: s.answered, listening: s.listening, ...(s.agentId ? { agentId: s.agentId } : {}),
+                };
+            };
+            Object.assign(room, {
+                name: snap.name, legSeq: snap.legSeq, mode: snap.mode, agentPrivate: snap.agentPrivate,
+                bridged: snap.bridged, toneOn: snap.toneOn, holdOn: snap.holdOn,
+            });
+            const customer = await legOf(snap.customer);
+            if (customer) {
+                await this._armCustomer(room, customer);
+                customer.listening = Boolean(snap.customer.listening);
+            }
+            room.pendingAgent = await legOf(snap.pendingAgent);
+            for (const a of snap.agents ?? []) {
+                const leg = await legOf(a);
+                if (leg) room.agents.set(String(a.agentId), leg);
+            }
+            for (const sv of snap.supervisors ?? []) {
+                const leg = await legOf(sv);
+                if (leg) room.supervisors.set(String(sv.supervisorId), leg);
+            }
+            if (snap.recording) room.recording = { ...snap.recording, callId: room.callId };
+            this._watchCustomer(room);
+            const legs = [room.customer, room.pendingAgent, ...room.agents.values(), ...room.supervisors.values()].filter(Boolean);
+            log.info({ callId: room.callId }, `Room adopted (${legs.length} legs)`);
+            return true;
+        });
+    }
+
     activeCallIds() {
         return [...this.rooms.keys()].map(Number);
     }
@@ -525,12 +577,16 @@ class RoomMedia {
         // One liveness lookup per boot id per sweep, not per leg: a sweep
         // sees thousands of legs but only a handful of workers' boot ids.
         const alive = new Map();   // bootId → Promise<boolean>
+        const leased = new Map();  // callId → Promise<boolean>
         const dead = async (tag) => {
             const t = FreeSwitch.parseTag(tag);
             if (!t) return false;
             if (t.bootId === freeSwitch.bootId) return !this.rooms.has(String(t.callId));
             if (!alive.has(t.bootId)) alive.set(t.bootId, freeSwitch.isBootAlive(t.bootId));
-            return !await alive.get(t.bootId);
+            if (await alive.get(t.bootId)) return false;
+            // Its worker is gone, but a worker that took the call over keeps them.
+            if (!leased.has(t.callId)) leased.set(t.callId, callInbox.isLeased(t.callId).catch(() => true));
+            return !await leased.get(t.callId);
         };
         let killed = 0;
         for (const ch of await freeSwitch.channels()) {

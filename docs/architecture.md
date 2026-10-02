@@ -192,7 +192,8 @@ Every worker runs these background loops:
 | `RedisCleanupService`: stale ownership keys | 5 min | Yes, lock `cleanup:lock` |
 | `RetentionService`: old call detail, SDP, finished webhook deliveries, expired recordings ([data-model.md → Retention](data-model.md#retention)) | 1 h (`RETENTION_SWEEP_SECONDS`) | Yes, key `callio:retention:swept` with that TTL |
 | `CallCleanupService`: stuck calls, expired outbound intents, stale recordings, ended calls' local media, IVR agent ring timeout | 30 s | No lock. Every worker scans, and `CallTerminator`'s guarded commit applies side effects once. The media reconcile is per worker by design. |
-| `RoomMedia` orphan sweep: media-server endpoints and rtpengine legs of dead workers | 30 s, and at start | No lock: each leg is tagged with its worker's boot id, alive while that id is in Redis |
+| `RoomMedia` orphan sweep: media-server endpoints and rtpengine legs of dead workers | 30 s, and at start | No lock: each leg is tagged with its worker's boot id, alive while that id is in Redis — or while a worker that took the call over holds its lease |
+| `CallAdoption` (`src/core/calls/`): live calls whose lease lapsed (their worker stopped) are taken over — the lease claimed, the room rebuilt from its Redis snapshot, the inbox read from the cursor | 2 s | One worker wins each lease (`SET NX`) |
 | `Deadlines` (`src/infra/cluster/`): per-call timers in a Redis sorted set — the agent's 120 s reconnect window, the customer's network-loss warning (15 s) and end (20 s) | 0.5 s | Each due entry is claimed and removed in one script, so one worker runs it; they outlive the worker that set them |
 
 ## Inbound call

@@ -55,9 +55,11 @@ who hears it). All call logic stays in Callio.
 
 ## Call ownership and inputs
 
-- **One owner per live call**, holding a Redis lease (`CallOwnershipService`, as today). The owner
-  processes the call's inputs one at a time and commands media through the port. It holds no
-  media state.
+- **One owner per live call**, holding a Redis lease (`infra/cluster/CallInbox.js`: 15 s,
+  renewed every 5 s). The owner processes the call's inputs and commands media through the port.
+  What it would lose by dying is kept in Redis: the room (`media/rooms/RoomSnapshot.js` — each
+  leg's channel uuid, dialog id, rtpengine key, conference member; the room's rules), the IVR's
+  position, and the call's timers (`infra/cluster/Deadlines.js`).
 - **Inputs go through a Redis Stream per call**, keyed by call id: socket actions, API calls,
   channel events, media events. Pub/sub (`publishCallEvent` before step 5.1) is at-most-once, so a
   restarting owner would miss events. A stream lets the next owner read what it hasn't
@@ -144,7 +146,7 @@ field, and the other participants are added to the contract. Documented in
 
 | Fails | Result |
 |---|---|
-| Control worker | Calls continue; another worker takes the lease and continues from the stream |
+| Control worker | Calls continue: the media never stops. Within ~15–20 s another worker takes the lapsed lease, rebuilds the room from its snapshot (legs driven by channel uuid and dialog id) and continues from the inbox |
 | rtpengine node | Its calls drop, unless it runs with Redis-backed sessions **and** a floating IP (keepalived / VIP) for a standby to take over, because remote ends keep sending to the IP in the SDP |
 | FreeSWITCH node | Its rooms and calls drop. Re-anchoring legs on rtpengine to a new node is possible later, not in v1 |
 | drachtio node | Its SIP dialogs drop; new calls go to the other nodes through SRV / the load balancer |
@@ -179,7 +181,11 @@ both, so that flips to accepting RFC 4733.
 4. **Delete the wrtc media code** (`src/media/webrtc|bridge|dtmf|recording|playback`). The test
    harness keeps `wrtc` for its simulated customers and agents. Done: `wrtc` and `@discordjs/opus`
    are dev dependencies now; `ffmpeg-static` and the in-Node recording upload are gone.
-5. **Failover-able call ownership**, with call inputs on Redis Streams.
+5. **Failover-able call ownership**, with call inputs on Redis Streams. In progress: the inbox
+   and lease (5.1), stored timers and state (5.2), and taking a WhatsApp call over when its worker
+   dies (5.3a, `core/calls/CallAdoption.js`, `cluster.test.mjs`) are done; SIP calls (the carrier
+   dialog by id, a hang-up probe) and resuming an IVR, then handing calls over on a deploy (5.4),
+   are next.
 6. **Multi-party calls** and the primary-agent contract.
 
 Steps 2–4 break media until the suite passes again, and the dev server runs `main`, so they

@@ -5,6 +5,8 @@
 #   - opus-tools + curl: a recording is written as stereo WAV, encoded to Ogg
 #     Opus and uploaded to object storage by callio-recording-upload
 #   - Opus preferred over G.711 (the image prefers G.711)
+#   - mrf.xml: the image's dialplan, plus socket_resume + park, so an endpoint
+#     outlives the Callio worker that created it (a call another worker takes over)
 #   - a second endpoint profile, drachtio_mrf_g711 (port 5082), that offers
 #     G.711 only: Callio offers from it to SIP carriers. Offered Opus and
 #     answered G.711 in the re-INVITE, an endpoint stops sending the room and
@@ -26,6 +28,7 @@ RUN apt-get update \
         /usr/local/freeswitch/conf/sip_profiles/mrf.xml > /usr/local/freeswitch/conf/sip_profiles/mrf_g711.xml
 
 COPY start.sh /start.sh
+COPY mrf.xml /usr/local/freeswitch/conf/dialplan/mrf.xml
 COPY callio-recording-upload /usr/local/bin/callio-recording-upload
 RUN chmod +x /start.sh /usr/local/bin/callio-recording-upload
 ENTRYPOINT ["/start.sh"]

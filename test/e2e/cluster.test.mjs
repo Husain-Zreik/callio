@@ -106,6 +106,59 @@ try {
             `w1=${await rooms(W1)} w2=${await rooms(W2)}`);
         await endByAgent(a1, row2.id);
     }
+
+    // ── 3. The worker that owns a live call dies ──
+    // The media (rtpengine, FreeSWITCH) doesn't depend on the worker; worker 2
+    // takes the lease over once it lapses, rebuilds the room from its Redis
+    // snapshot and runs the call from there. Last: worker 1 stays dead.
+    await waitFor(async () => (await availability('agent-1')) !== 'ON_CALL', 8000, 'agent-1 released').catch(() => { });
+    await setAvailability(a1, 'AVAILABLE');
+    a1.incoming.length = 0;
+    const c3 = await meta.callIn('wacid.cl.3', { from: '96181030853' });
+    const row3 = await callByProvider(c3.id);
+    const offer3 = await nextIncoming(a1, row3.id);
+    await accept(a1, offer3, 880);
+    await waitFor(async () => (await callRow(row3.id)).status === 'IN_PROGRESS', 10000, 'call 3 in progress');
+    // Bridged for real before the kill (IN_PROGRESS is set a moment before the bridge).
+    const custBefore = await ear(c3.customer.received);
+    const agentBefore = await ear(a1.peer.received);
+    check('call 3 bridges both ways before its worker dies',
+        custBefore?.dominant() === 880 && agentBefore?.dominant() === 440, `customer=${custBefore?.dominant()} agent=${agentBefore?.dominant()}`);
+    const leaseKey = `callio:call:${row3.id}:lease`;
+    const ownerBefore = await redis.get(leaseKey);
+    check('call 3 is run by worker 1', (await rooms(W1)) === 1 && Boolean(ownerBefore), `w1 rooms=${await rooms(W1)} lease=${ownerBefore}`);
+
+    const killedAt = Date.now();
+    process.kill(workers[0].pid);
+    meta.retarget(W2);
+    const custGap = await ear(c3.customer.received);
+    const agentGap = await ear(a1.peer.received);
+    check('with its worker dead, the customer and the agent still hear each other',
+        custGap?.dominant() === 880 && agentGap?.dominant() === 440, `customer=${custGap?.dominant()} agent=${agentGap?.dominant()}`);
+
+    const ownerAfter = await waitFor(async () => {
+        const v = await redis.get(leaseKey);
+        return v && v !== ownerBefore ? v : null;
+    }, 30000, 'call 3 adopted').catch(() => null);
+    check('worker 2 takes the call over', Boolean(ownerAfter) && (await rooms(W2)) === 1,
+        `lease=${ownerAfter} w2 rooms=${await rooms(W2)} after ${Math.round((Date.now() - killedAt) / 1000)}s`);
+
+    // Past the dead worker's boot key (30 s) and a sweep (every 30 s): the
+    // adopted legs must not be swept as a dead worker's.
+    await sleep(Math.max(0, killedAt + 62000 - Date.now()));
+    const custLate = await ear(c3.customer.received);
+    const agentLate = await ear(a1.peer.received);
+    check('a minute later the adopted call still bridges both ways (the sweep spared its legs)',
+        custLate?.dominant() === 880 && agentLate?.dominant() === 440, `customer=${custLate?.dominant()} agent=${agentLate?.dominant()}`);
+
+    await endByAgent(a1, row3.id).catch(() => { });
+    const ended = await callRow(row3.id);
+    check('the adopted call hangs up cleanly: COMPLETED/AGENT', ended.status === 'TERMINATED'
+        && ended.termination_reason === 'COMPLETED' && ended.terminated_by === 'AGENT', `${ended.status} ${ended.termination_reason}/${ended.terminated_by}`);
+    await waitFor(async () => (await rooms(W2)) === 0, 8000, 'worker 2 room closed').catch(() => { });
+    check('its room, room state and lease are gone', (await rooms(W2)) === 0
+        && !(await redis.exists(`callio:call:${row3.id}:room`)) && !(await redis.exists(leaseKey)),
+        `w2 rooms=${await rooms(W2)} room=${await redis.exists(`callio:call:${row3.id}:room`)} lease=${await redis.exists(leaseKey)}`);
 } catch (err) {
     console.error('HARNESS ERROR:', err);
     exitCode = 1;

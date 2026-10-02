@@ -6,6 +6,7 @@ import { redisBaseService } from '../infra/redis/RedisBaseService.js';
 import { redisPubSubService } from '../infra/redis/RedisPubSubService.js';
 import { callInbox } from '../infra/cluster/CallInbox.js';
 import { deadlines } from '../infra/cluster/Deadlines.js';
+import { callAdoption } from '../core/calls/CallAdoption.js';
 import { presenceService } from '../core/agents/PresenceService.js';
 import { redisCleanupService } from '../infra/cluster/RedisCleanupService.js';
 import { storageClient } from '../infra/storage/StorageClient.js';
@@ -79,6 +80,8 @@ export async function startCoreServices() {
     drachtio.start();
     callMedia.register(roomMedia);
     await callMedia.start().catch((err) => log.error({ err }, 'Media plane not ready — calls fail until it connects'));
+    // Takes over calls whose worker stopped (needs the media plane to drive them).
+    callAdoption.start();
 
     // Channels that hold a connection to their provider (SIP's drachtio) take
     // calls from here on.

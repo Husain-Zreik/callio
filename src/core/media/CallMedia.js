@@ -52,6 +52,8 @@
 //   close(callId)                        every leg; a recording finishes uploading
 //   owns(callId)                         this worker holds legs of the call
 //   activeCallIds() → [callId]           calls with legs on this worker
+//   adopt(call) → bool                   take over a call whose worker died: rebuild its
+//                                        room from the stored snapshot (false: nothing to take)
 //   start() / stop() / stats()
 // Events it emits on EventBus: 'call:dtmf' { callId, digit }, 'customer:media:state'
 // { callId, state: 'drop'|'active' }, 'call:network:quality:customer' { callId, … },
@@ -63,7 +65,7 @@ const METHODS = [
     'bridge',
     'addSupervisor', 'setSupervisorMode', 'setAgentPrivate', 'removeSupervisor', 'hasSupervisor', 'monitorState',
     'player', 'listenForDigits', 'startHold', 'stopHold', 'audioUrl', 'errorAudio',
-    'close', 'owns', 'activeCallIds', 'start', 'stop', 'stats',
+    'close', 'owns', 'activeCallIds', 'adopt', 'start', 'stop', 'stats',
 ];
 
 class CallMedia {

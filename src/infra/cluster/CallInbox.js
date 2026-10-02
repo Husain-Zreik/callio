@@ -34,6 +34,7 @@ const RENEW_MS = 5_000;
 const BLOCK_MS = 5_000;
 const MAXLEN = 1000;
 const KEY_TTL_S = 24 * 3600;
+const LEASED = 'callio:calls:leased';   // live calls with a lease (lapsed ones are adoptable)
 
 const RENEW = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) end return 0";
 const RELEASE = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0";
@@ -139,6 +140,15 @@ class CallInbox {
     // Takes the call's lease and starts reading its inbox. False if another
     // live worker holds it.
     async own(callId, handler) {
+        if (!(await this.claim(callId))) return false;
+        await this.read(callId, handler);
+        return true;
+    }
+
+    // Takes the lease without reading the inbox yet (a worker adopting the
+    // call rebuilds its room first, then read()s). The lease is renewed from
+    // here on. False if another live worker holds it.
+    async claim(callId) {
         const id = String(callId);
         if (this.owned.has(id)) return true;
         const k = keys(id);
@@ -148,10 +158,40 @@ class CallInbox {
             return false;
         }
         const cursor = (await this.client.get(k.cursor)) ?? '0';
-        this.owned.set(id, { lastId: cursor, handler });
+        this.owned.set(id, { lastId: cursor, handler: null });
+        await this.client.sadd(LEASED, id);
+        return true;
+    }
+
+    // Starts handling the inbox of a call this worker claimed.
+    async read(callId, handler) {
+        const own = this.owned.get(String(callId));
+        if (!own) return false;
+        own.handler = handler;
         await this._wake();
         log.debug({ callId }, 'Owning call');
         return true;
+    }
+
+    // Live calls whose lease lapsed (their worker died, or gave them up at
+    // shutdown) — candidates for another worker to adopt.
+    async orphans() {
+        const ids = (await this.client.smembers(LEASED)).filter((id) => !this.owned.has(id));
+        if (!ids.length) return [];
+        const pipe = this.client.pipeline();
+        for (const id of ids) pipe.exists(keys(id).lease);
+        const res = await pipe.exec();
+        return ids.filter((_, i) => !Number(res[i]?.[1]));
+    }
+
+    async isLeased(callId) {
+        return Boolean(await this.client.exists(keys(callId).lease));
+    }
+
+    // A call nobody will run again (it ended while unowned): its inbox goes.
+    async forget(callId) {
+        const k = keys(callId);
+        await this.client.multi().srem(LEASED, String(callId)).del(k.inbox, k.cursor).exec();
     }
 
     owns(callId) {
@@ -165,7 +205,9 @@ class CallInbox {
         const k = keys(id);
         try {
             if (had) await this.client.eval(RELEASE, 1, k.lease, bootId);
-            if (purge) await this.client.del(k.inbox, k.cursor);
+            // Kept in the leased set unless the call ended: given up (shutdown),
+            // it's a live call for another worker to adopt.
+            if (purge) await this.client.multi().srem(LEASED, id).del(k.inbox, k.cursor).exec();
             if (had) await this._wake();
         } catch (err) {
             log.warn({ callId, err }, 'Releasing the call failed');
@@ -193,7 +235,7 @@ class CallInbox {
 
     async _readLoop() {
         while (this._running) {
-            const ids = [...this.owned.keys()];
+            const ids = [...this.owned.keys()].filter((id) => this.owned.get(id).handler);
             const streams = [this.wakeKey, ...ids.map((id) => keys(id).inbox)];
             const from = ['$', ...ids.map((id) => this.owned.get(id).lastId)];
             let res;

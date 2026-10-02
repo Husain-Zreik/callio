@@ -7,6 +7,7 @@ import { redisClient } from '../infra/redis/RedisClient.js';
 import { redisPubSubService } from '../infra/redis/RedisPubSubService.js';
 import { callInbox } from '../infra/cluster/CallInbox.js';
 import { deadlines } from '../infra/cluster/Deadlines.js';
+import { callAdoption } from '../core/calls/CallAdoption.js';
 import { redisCleanupService } from '../infra/cluster/RedisCleanupService.js';
 import { storageClient } from '../infra/storage/StorageClient.js';
 import { drachtio } from '../infra/sip/Drachtio.js';
@@ -174,6 +175,7 @@ export async function shutdown(server, io) {
         await redisCleanupService.stop();
         queueTimeoutService.stop();
         deadlines.stop();
+        callAdoption.stop();
         retentionService.stop();
         await outboxDispatcher.stop();
         for (const channel of customerChannels.all()) {
