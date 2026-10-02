@@ -188,6 +188,13 @@ class CallInbox {
         return Boolean(await this.client.exists(keys(callId).lease));
     }
 
+    // A live call: some worker runs it, or it's waiting to be adopted (its
+    // worker died or handed it over). Only a call that ended leaves the set.
+    async isLive(callId) {
+        const res = await this.client.multi().exists(keys(callId).lease).sismember(LEASED, String(callId)).exec();
+        return Boolean(Number(res[0][1]) || Number(res[1][1]));
+    }
+
     // A call nobody will run again (it ended while unowned): its inbox goes.
     async forget(callId) {
         const k = keys(callId);

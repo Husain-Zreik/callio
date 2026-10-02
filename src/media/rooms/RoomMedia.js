@@ -36,7 +36,6 @@ const log = logger('media.rooms.RoomMedia');
 const RECONNECT_TONE = 'tone_stream://%(200,0,600);%(200,0,750);%(200,0,900);%(1200,0,0)';
 const AGENT_AUDIO_TIMEOUT_MS = 5000;
 const DIGIT_DEBOUNCE_MS = 600;
-const ORPHAN_SWEEP_MS = 30_000;
 
 class Room {
     constructor(callId) {
@@ -557,7 +556,7 @@ class RoomMedia {
         if (!freeSwitch.enabled) return;
         await this.sweepOrphans().catch((err) => log.warn({ err }, 'Orphan sweep failed'));
         this._sweep = setInterval(() => this.sweepOrphans().catch((err) =>
-            log.warn({ err }, 'Orphan sweep failed')), ORPHAN_SWEEP_MS);
+            log.warn({ err }, 'Orphan sweep failed')), config.media.orphanSweepSeconds * 1000);
         this._sweep.unref();
     }
 
@@ -592,16 +591,24 @@ class RoomMedia {
         // One liveness lookup per boot id per sweep, not per leg: a sweep
         // sees thousands of legs but only a handful of workers' boot ids.
         const alive = new Map();   // bootId → Promise<boolean>
-        const leased = new Map();  // callId → Promise<boolean>
+        const live = new Map();    // callId → Promise<boolean>
+        // A live call's legs are never orphans: some worker runs the call, or
+        // it's waiting to be adopted — a handed-over call is in neither this
+        // worker's rooms nor anyone's lease for a moment, and its worker's
+        // boot id may already be gone.
+        const callLive = (callId) => {
+            if (!live.has(callId)) live.set(callId, callInbox.isLive(callId).catch(() => true));
+            return live.get(callId);
+        };
         const dead = async (tag) => {
             const t = FreeSwitch.parseTag(tag);
             if (!t) return false;
-            if (t.bootId === freeSwitch.bootId) return !this.rooms.has(String(t.callId));
-            if (!alive.has(t.bootId)) alive.set(t.bootId, freeSwitch.isBootAlive(t.bootId));
-            if (await alive.get(t.bootId)) return false;
-            // Its worker is gone, but a worker that took the call over keeps them.
-            if (!leased.has(t.callId)) leased.set(t.callId, callInbox.isLeased(t.callId).catch(() => true));
-            return !await leased.get(t.callId);
+            if (t.bootId === freeSwitch.bootId && this.rooms.has(String(t.callId))) return false;
+            if (t.bootId !== freeSwitch.bootId) {
+                if (!alive.has(t.bootId)) alive.set(t.bootId, freeSwitch.isBootAlive(t.bootId));
+                if (await alive.get(t.bootId)) return false;
+            }
+            return !await callLive(t.callId);
         };
         let killed = 0;
         for (const ch of await freeSwitch.channels()) {

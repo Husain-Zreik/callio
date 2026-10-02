@@ -99,6 +99,9 @@ const mediaEnv = {
     RTPENGINE_HOST: '127.0.0.1', RTPENGINE_NG_PORT: '22222',
     FREESWITCH_HOST: '127.0.0.1', FREESWITCH_ESL_PORT: '8021', FREESWITCH_ESL_PASSWORD: process.env.TEST_FREESWITCH_PASSWORD || 'CHANGE_ME',
     MEDIA_ESL_ADVERTISED_ADDRESS: DOCKER_HOST,
+    // A sweep every second: one lands in any window where a live call's legs
+    // look orphaned (a call being handed over), instead of every 30 s by luck.
+    MEDIA_ORPHAN_SWEEP_SECONDS: '1',
 };
 
 const env = {
@@ -158,6 +161,8 @@ async function startCallio(logFile, workerPort = port, workerId = 'e2e') {
     const out = openSync(logFile, 'w');
     const child = spawn(process.execPath, ['index.js'], { cwd: root, env: { ...env, NODE_PORT: String(workerPort), WORKER_ID: workerId }, stdio: ['ignore', out, out, 'ipc'] });
     child.port = workerPort;
+    child.workerId = workerId;
+    child.logFile = logFile;
     for (let i = 0; i < 120; i++) {   // up to 60 s: a cold first start (native modules, AV scanning) can be slow
         try {
             const res = await fetch(`http://127.0.0.1:${workerPort}/health`);
@@ -178,7 +183,24 @@ function workersFor(suite) {
 // A suite asks for a worker's graceful shutdown (as PM2 does on Windows, by
 // IPC message): POST <E2E_CONTROL_URL>/workers/<index>/shutdown.
 const CONTROL_PORT = Number(process.env.TEST_CONTROL_PORT || 3898);
-const control = http.createServer((req, res) => {
+// POST <E2E_CONTROL_URL>/workers/restart restarts them all, as `pm2 restart`
+// does: each stopped gracefully, then a fresh process on the same port.
+const control = http.createServer(async (req, res) => {
+    if (req.method === 'POST' && req.url === '/workers/restart') {
+        const old = callios.splice(0);
+        await Promise.all(old.map((c) => new Promise((resolve) => {
+            if (c.exitCode !== null || c.signalCode !== null) return resolve();
+            c.once('exit', resolve);
+            c.send('shutdown');
+        })));
+        try {
+            for (const c of old) callios.push(await startCallio(`${c.logFile}.restarted`, c.port, c.workerId));
+            res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(callios.map((c) => ({ port: c.port, pid: c.pid }))));
+        } catch (err) {
+            res.writeHead(500).end(err.message);
+        }
+        return;
+    }
     const m = /^\/workers\/(\d+)\/shutdown$/.exec(req.url);
     const child = m && callios[Number(m[1])];
     if (req.method !== 'POST' || !child) { res.writeHead(404).end(); return; }
@@ -276,7 +298,8 @@ try {
         const r = await new Promise((done) => spawn(process.execPath, [join(here, suite), seedFile, String(port)], { cwd: root, env: suiteEnv, stdio: 'inherit' })
             .on('exit', (status) => done({ status })));
         for (const c of callios.splice(0)) await stopCallio(c);
-        const errors = logFiles.flatMap((f) => readFileSync(f, 'utf8').split('\n'))
+        const errors = logFiles.flatMap((f) => [f, `${f}.restarted`]).filter((f) => existsSync(f))
+            .flatMap((f) => readFileSync(f, 'utf8').split('\n'))
             .filter((l) => /unhandled|exception|is not a function|unknown column|doesn't exist|AGENT STUCK/i.test(l));
         if (errors.length) console.log(`[e2e] Callio log problems (${logFiles.join(', ')}):\n  ${errors.slice(0, 20).join('\n  ')}`);
         if (r.status !== 0 || errors.length) failed++;

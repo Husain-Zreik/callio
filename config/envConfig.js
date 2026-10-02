@@ -210,6 +210,8 @@ export const config = {
         callbackUrl: (process.env.MEDIA_CALLBACK_URL || "").replace(/\/+$/, "") || null,
         // Recordings are written here on the media server before upload.
         recordingDir: process.env.MEDIA_RECORDING_DIR || "/tmp",
+        // How often each worker sweeps dead workers' media legs (seconds).
+        orphanSweepSeconds: parseInt(process.env.MEDIA_ORPHAN_SWEEP_SECONDS || "30", 10) || 30,
     },
     // URLs a consumer sets for itself (PUT /v1/webhook) must be https:// —
     // Callio POSTs to them. true only for local development and tests.
