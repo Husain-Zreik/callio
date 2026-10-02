@@ -205,7 +205,8 @@ export const config = {
             conferenceProfile: process.env.FREESWITCH_CONFERENCE_PROFILE || "callio",
         },
         // Where FreeSWITCH fetches Callio-served audio (local audio assets,
-        // the IVR error prompt): this Callio as the media servers reach it.
+        // the IVR error prompt). Unset: the worker that owns the call, at
+        // MEDIA_ESL_ADVERTISED_ADDRESS and its own port (media/rooms/MediaAudio.js).
         callbackUrl: (process.env.MEDIA_CALLBACK_URL || "").replace(/\/+$/, "") || null,
         // Recordings are written here on the media server before upload.
         recordingDir: process.env.MEDIA_RECORDING_DIR || "/tmp",

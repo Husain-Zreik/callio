@@ -72,10 +72,11 @@ services:
   # The media server (docs/media-architecture.md): every call is a conference
   # room here. Built from freeswitch/Dockerfile (Opus first, a G.711-only
   # profile for carrier legs, the recording upload script). MEDIA_BIND_IP
-  # 127.0.0.1 keeps its SIP profiles (5080, 5082), RTP (40000-40999) and event
+  # 127.0.0.1 keeps its SIP profiles (5080, 5082), RTP (10000-19999) and event
   # socket (8021) on loopback: only rtpengine (its `internal` interface),
   # drachtio and Callio on this host talk to it. Its RTP range must not
-  # overlap rtpengine's (30000-30500). ESL_PASSWORD (in .env) must equal
+  # overlap rtpengine's (20000-29999); both stay below Linux's ephemeral ports
+  # (32768+), which outgoing connections take. ESL_PASSWORD (in .env) must equal
   # Callio's FREESWITCH_ESL_PASSWORD. FreeSWITCH needs ~15 s to start.
   freeswitch:
     build: ./freeswitch
@@ -89,7 +90,7 @@ services:
       - .env
     environment:
       MEDIA_BIND_IP: 127.0.0.1
-    command: ["freeswitch", "--rtp-range-start", "40000", "--rtp-range-end", "40999"]
+    command: ["freeswitch", "--rtp-range-start", "10000", "--rtp-range-end", "19999"]
     volumes:
       - ./freeswitch/conference.local.conf.xml:/usr/local/freeswitch/conf/autoload_configs/conference.conf.xml:ro
 

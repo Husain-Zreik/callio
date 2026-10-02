@@ -511,11 +511,15 @@ class RoomMedia {
     // worker's own legs for calls it no longer holds: hang up / delete.
     async sweepOrphans() {
         if (!freeSwitch.connected) return;
+        // One liveness lookup per boot id per sweep, not per leg: a sweep
+        // sees thousands of legs but only a handful of workers' boot ids.
+        const alive = new Map();   // bootId → Promise<boolean>
         const dead = async (tag) => {
             const t = FreeSwitch.parseTag(tag);
             if (!t) return false;
             if (t.bootId === freeSwitch.bootId) return !this.rooms.has(String(t.callId));
-            return !await freeSwitch.isBootAlive(t.bootId);
+            if (!alive.has(t.bootId)) alive.set(t.bootId, freeSwitch.isBootAlive(t.bootId));
+            return !await alive.get(t.bootId);
         };
         let killed = 0;
         for (const ch of await freeSwitch.channels()) {

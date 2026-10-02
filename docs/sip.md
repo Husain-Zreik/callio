@@ -66,7 +66,7 @@ trunk.
 | Dialled number | The Request-URI user, or the To user if that doesn't parse, is the channel's DID. It may be written `+961…`, `961…` or `00961…`, and all three normalise to E.164. |
 | Caller | The From user. If it is a phone number (5–15 digits), the caller is stored as E.164. Otherwise the From URI is stored as a `SIP_URI` address. The display name is kept. |
 | Codecs | G.711 PCMU/PCMA (FreeSWITCH also offers G.722 and Opus); the room transcodes. |
-| RTP | UDP ports `port-min`–`port-max` from `rtpengine/rtpengine.conf` (30000–30500). |
+| RTP | UDP ports `port-min`–`port-max` from `rtpengine/rtpengine.conf` (20000–29999). |
 | DTMF | In-band. `sipSdp.js` strips `telephone-event` from the SDP, so the carrier falls back to in-band tones, which the media server detects (it detects RFC 4733 too). |
 
 **Callio's responses to an inbound INVITE:**
@@ -228,11 +228,12 @@ The three containers (drachtio, rtpengine, FreeSWITCH) use **host networking**, 
 and Docker's NAT would break them. The rtpengine service starts the binary
 directly instead of the image's entrypoint, which tries `sed -i` on the
 bind-mounted config and fails. FreeSWITCH listens on 127.0.0.1 only
-(`MEDIA_BIND_IP`): SIP 5080/5082, RTP 40000–40999, event socket 8021. Then set
+(`MEDIA_BIND_IP`): SIP 5080/5082, RTP 10000–19999, event socket 8021. Then set
 `DRACHTIO_*`, `RTPENGINE_*`, `FREESWITCH_*` and `MEDIA_*` in Callio's `.env`
 (`FREESWITCH_ESL_PASSWORD` = the gateway's `ESL_PASSWORD`,
-`MEDIA_ESL_ADVERTISED_ADDRESS=127.0.0.1`, `MEDIA_CALLBACK_URL=http://127.0.0.1:<a
-worker's port>`) and restart it. Each worker logs `Connected to
+`MEDIA_ESL_ADVERTISED_ADDRESS=127.0.0.1`; FreeSWITCH fetches IVR and hold audio
+from the worker that owns the call, so `MEDIA_CALLBACK_URL` stays unset) and
+restart it. Each worker logs `Connected to
 drachtio-server` and `Connected to FreeSWITCH`; FreeSWITCH connects back to
 each worker on its HTTP port + 1000 and + 2000 (loopback).
 

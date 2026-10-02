@@ -28,9 +28,18 @@ class MediaAudio {
         return createHmac('sha256', key).update(`media-audio:${payload}`).digest('base64url').slice(0, 32);
     }
 
+    // Audio is played by the worker that owns the call, so by default the
+    // media server fetches it from that worker (where it already reaches it
+    // for event-socket callbacks): no single worker serves every call's
+    // prompts. MEDIA_CALLBACK_URL overrides it (a load balancer, say).
+    _base() {
+        if (config.media.callbackUrl) return config.media.callbackUrl;
+        const host = config.media.freeswitch.advertisedAddress ?? '127.0.0.1';
+        return `http://${host}:${config.node.port}`;
+    }
+
     _url(source, name) {
-        const base = config.media.callbackUrl;
-        if (!base) throw new Error('MEDIA_CALLBACK_URL is not set — the media server cannot fetch audio');
+        const base = this._base();
         const payload = b64(JSON.stringify(source));
         const safeName = basename(String(name)).replace(/[^\w.-]/g, '_') || 'audio.wav';
         return `${base}/media/audio/${payload}.${this._sign(payload)}/${safeName}`;
