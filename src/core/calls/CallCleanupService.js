@@ -225,7 +225,7 @@ class CallCleanupService {
                 if (await autoOfflinePolicy.recordMiss({
                     callId: call.id, tenantId: call.tenant_id, queueId: call.queue_id, agentId: call.agent_id, anyQueue: true,
                 })) {
-                    await agentAssignmentCoordinator.emitQueueUpdate(call.tenant_id).catch(() => { });
+                    await agentAssignmentCoordinator.emitAgentQueues(call.tenant_id, call.agent_id).catch(() => { });
                 }
 
                 this.enqueue(call.id, call.tenant_id, TerminationReason.IVR_AGENT_NO_ANSWER);

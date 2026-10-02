@@ -1,6 +1,19 @@
 // Types for @callio/agent-sdk (docs/agent-protocol.md).
 
 export type Availability = 'AVAILABLE' | 'ON_CALL' | 'OFFLINE';
+
+export interface BoardFilter {
+    channelIds?: Array<number | string>;
+    queueIds?: Array<number | string>;
+    agentIds?: Array<number | string>;
+}
+
+export interface BoardCounters {
+    tenantId: number;
+    calls: { live: number; inIvr: number; waiting: number; ringing: number; inProgress: number };
+    agents: { total: number; available: number; onCall: number; offline: number };
+    at: string;
+}
 export type CallStatus = 'INITIATED' | 'RINGING' | 'ACCEPTED' | 'IN_PROGRESS' | 'TERMINATED' | 'FAILED' | 'CANCELLED';
 export type CallStateName = 'ringing' | 'dialing' | 'connecting' | 'active' | 'elsewhere' | 'ended';
 export type MonitorMode = 'listen' | 'whisper' | 'barge';
@@ -185,6 +198,13 @@ export class CallioAgent extends Emitter {
     /** Supervisors may set another agent's availability. */
     setAvailability(availability: 'AVAILABLE' | 'OFFLINE', opts?: { agentId?: number | string }): void;
     sync(): void;
+    /** Narrow this connection's board (any of the given lines, queues, agents); {} = the whole tenant. */
+    subscribeBoard(filter?: BoardFilter): Promise<BoardFilter | null>;
+    unsubscribeBoard(): Promise<void>;
+    /** A page of the live calls, newest first. */
+    boardCalls(query?: BoardFilter & { cursor?: number | string; limit?: number }): Promise<{ calls: CallData[]; nextCursor: number | null }>;
+    /** Supervisors: the tenant's counters now. */
+    boardCounters(): Promise<BoardCounters>;
     startOutbound(callId: number | string, opts?: { stream?: MediaStream }): Promise<Call>;
     call(callId: number | string): Call | null;
     /** Supervisors: listen to a call. */
@@ -195,6 +215,7 @@ export class CallioAgent extends Emitter {
     close(): void;
 
     on(event: 'ready' | 'sessionRefreshed', listener: (session: Session) => void): () => void;
+    on(event: 'counters', listener: (counters: BoardCounters) => void): () => void;
     on(event: 'incoming' | 'elsewhere', listener: (call: Call) => void): () => void;
     on(event: 'callState', listener: (call: Call, state: CallStateName, previous: CallStateName) => void): () => void;
     on(event: 'callEnded', listener: (call: Call, info: EndInfo) => void): () => void;

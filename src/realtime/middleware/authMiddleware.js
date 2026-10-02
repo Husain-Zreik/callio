@@ -8,6 +8,7 @@
 // membership is still managed through the Management API.
 import jwt from "jsonwebtoken";
 import { roomManager } from "../managers/RoomManager.js";
+import { board } from "../managers/Board.js";
 import AgentRepository from "../../persistence/AgentRepository.js";
 import ConsumerRepository from "../../persistence/ConsumerRepository.js";
 import TenantRepository from "../../persistence/TenantRepository.js";
@@ -104,10 +105,11 @@ export async function authMiddleware(socket, next) {
         // in presence tracking or reconnect redelivery.
         socket.connectionPurpose = socket.handshake.auth?.purpose || "session";
 
-        roomManager.joinTenantRoom(socket, tenant.id);
         roomManager.joinSigningKeyRoom(socket, consumer.id, kid);
         roomManager.joinUserRoom(socket, agent.id);
-        if (agent.role === AgentRole.SUPERVISOR) roomManager.joinSupervisorRoom(socket, tenant.id);
+        // The board (realtime/managers/Board.js): the whole tenant for a socket
+        // allowed to see it, until it narrows it with board:subscribe.
+        await board.subscribeDefault(socket);
 
         next();
     } catch (err) {

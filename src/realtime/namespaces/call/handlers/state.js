@@ -1,14 +1,17 @@
 // src/realtime/namespaces/call/handlers/state.js
+// Call state, agent statuses and queue snapshots: each to its audience — a
+// call's events to its call room and the board, an agent's status to their own
+// sockets and the board, queue snapshots to the board (managers/Board.js).
 import EventBus from '../../../../core/EventBus.js';
 import { roomManager } from '../../../managers/RoomManager.js';
+import { board, Tier } from '../../../managers/Board.js';
 import { logger } from '../../../../infra/logging/logger.js';
 
 const log = logger('realtime.state');
 
 export function registerCallStateListeners() {
     EventBus.on('call:status', (data) => {
-        const { tenantId } = data;
-        roomManager.broadcastToTenant(tenantId, 'call:status', data);
+        board.callEvent(Tier.TEAM, data.callId, 'call:status', data);
     });
 
     EventBus.on('call:success', (data) => {
@@ -24,7 +27,8 @@ export function registerCallStateListeners() {
     EventBus.on('call:handled', (data) => {
         const { callId, tenantId, userId, agentName, deviceId, action } = data;
         log.debug({ callId, agentId: userId }, `Call ${action} by ${agentName}`);
-        roomManager.broadcastToTenant(tenantId, 'call:handled', { callId, tenantId, userId, agentName, deviceId: deviceId ?? null, action });
+        board.callEvent(Tier.TEAM, callId, 'call:handled', { callId, tenantId, userId, agentName, deviceId: deviceId ?? null, action },
+            { extraAgentIds: [userId] });
     });
 
     // Only the socket that asked gets the answer: other devices in the call
@@ -35,19 +39,16 @@ export function registerCallStateListeners() {
     });
 
     EventBus.on('call:terminated', (data) => {
-        const { callId, tenantId, reason } = data;
+        const { callId, reason } = data;
         log.debug({ callId }, `Call terminated: reason=${reason}`);
-
-        roomManager.broadcastToTenant(tenantId, 'call:terminated', data);
+        board.callEvent(Tier.TEAM, callId, 'call:terminated', data);
     });
 
     EventBus.on('call:agent_queue', (data) => {
-        const { tenantId } = data;
-        roomManager.broadcastToTenant(tenantId, 'call:agent_queue', data);
+        board.queueSnapshot(data.tenantId, data.queueId, 'call:agent_queue', data);
     });
 
     EventBus.on('call:agent_availability', (data) => {
-        const { tenantId } = data;
-        roomManager.broadcastToTenant(tenantId, 'call:agent_availability', data);
+        board.agentStatus(data.tenantId, data.userId, 'call:agent_availability', data);
     });
 }

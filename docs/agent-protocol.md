@@ -102,17 +102,41 @@ assigned to that agent is still ringing, Callio sends that socket a fresh `call:
 Identity always comes from the token. Payload fields never identify who is
 acting. A socket receives:
 
-- its own agent's events (offers, withdrawals),
-- events of the calls it is on (after `call:accept` / `call:start` / `call:reconnect` / `call:monitor` succeeds, or while a call is offered to it),
-- tenant-wide call state updates (small, no customer data): `call:status`, `call:handled`, `call:terminated`, `call:agent_queue`, `call:agent_availability`,
-- supervisor-only events if the agent is a `SUPERVISOR`.
+- its own agent's events (offers, withdrawals, its own `call:agent_availability`),
+- events of the calls it is on (after `call:accept` / `call:start` / `call:reconnect` / `call:monitor` succeeds, while a call is offered to it, and — joined on connect — the calls its agent is already on),
+- the **board**, if it may see it (see [Board](#board)): other calls' `call:status`, `call:handled`, `call:terminated`, the team's `call:agent_availability`, `call:agent_queue` snapshots, and for supervisors the events under *Supervisors only* and `board:counters`.
+
+### Board
+
+The board is the tenant's live calls, its agents' statuses and its queues.
+Supervisors may always see it; agents only while the tenant's
+`settings.team_view` is not `false` (the default is `true`; a product whose
+agents are its end users turns it off, and then an agent only ever gets its
+own calls). A socket that may see the board is subscribed to the whole tenant
+when it connects, so a client that never subscribes gets the whole board as
+before. A dashboard watching part of a large tenant narrows it:
+
+| Event | Payload | Reply (ack, or the event of the same name) |
+|---|---|---|
+| `board:subscribe` | `{ channelIds?, queueIds?, agentIds? }` — events of calls on any of these lines / in these queues / with these agents, and those agents' statuses and those queues' snapshots; `{}` = the whole tenant | `{ filter }` (`board:subscribed`) |
+| `board:unsubscribe` | — | `{}` (`board:unsubscribed`) |
+| `board:calls` | `{ channelIds?, queueIds?, agentIds?, cursor?, limit? }` — the live calls, newest first, `limit` ≤ 200 (default 50) | `{ calls, nextCursor }` — pass `nextCursor` back for the next page; `null` on the last |
+| `board:counters` | — (supervisors) | the counters below |
+
+`board:counters` is also pushed to supervisors (whatever their filter) at
+most every 2 s while the tenant's board changes:
+`{ tenantId, calls: { live, inIvr, waiting, ringing, inProgress }, agents: { total, available, onCall, offline }, at }`.
+Ids must belong to the socket's tenant. A request the socket may not make
+(an agent without the team view, an agent asking for counters, an unknown
+id) answers `{ error: { code: 'BOARD_REQUEST_FAILED', message } }` and a
+`call:error` with that code.
 
 ## Client → server
 
 | Event | Payload | Notes |
 |---|---|---|
 | `session:refresh` | — | Replies with a fresh `session:ready` (new TURN credentials). |
-| `calls:sync` | — | Resync: replies `calls:list` (agents: their own calls; supervisors: the tenant's) and one `call:agent_queue` per queue. Send on every (re)connect. `call:ongoing` is an alias. |
+| `calls:sync` | — | Resync: replies `calls:list` (agents: their own calls; supervisors: the tenant's, unpaged — a dashboard on a large tenant pages with `board:calls`) and, if the socket may see the board, one `call:agent_queue` per queue. Send on every (re)connect. `call:ongoing` is an alias. |
 | `agent:availability:set` | `{ availability: 'AVAILABLE'\|'OFFLINE', agentId? }` | Set the agent's shift: whether queues offer them calls. `agentId` only for a supervisor setting someone else. A value other than these two, an unknown agent or a non-supervisor setting someone else → `AGENT_AVAILABILITY_SYNC_FAILED`. An agent on a live call keeps reporting `ON_CALL`; the new shift applies once the call ends (going `OFFLINE` mid-call means no queue call after it). |
 | `call:agent-availability:sync` | `{ userId? }` | Re-broadcast an agent's current availability as `call:agent_availability` (self by default; others for supervisors only). An agent still held by a call that has ended is released (back to their shift). |
 | `call:agent-queue:sync` | — | Replies with the tenant's queue snapshots. |
@@ -193,6 +217,10 @@ calls; `connected` means the agent has a live session socket; `waitingCount`
 is calls waiting in the queue with no agent.
 
 ### Supervisors only
+
+Through the board (narrowed by `board:subscribe` like the rest of it), except
+the `call:monitor:*` replies, which go to the supervisor's own socket or the
+call room.
 
 | Event | Payload |
 |---|---|
@@ -316,6 +344,7 @@ that aren't about one call. `message` is human-readable English text.
 | `AGENT_MEDIA_NOT_READY` | Your microphone track never arrived; the call ends `FAILED` |
 | `CALL_ALREADY_ENDED` | Accepting a call that ended, or while you are on another active call |
 | `AGENT_QUEUE_SYNC_FAILED`, `FAILED_FETCH_ACTIVE`, `MISSING_TENANT_CONTEXT` | `call:agent-queue:sync` / `calls:sync` failed |
+| `BOARD_REQUEST_FAILED` | a `board:*` request was not allowed or failed — see [Board](#board) |
 | `AGENT_AVAILABILITY_SYNC_FAILED` | `agent:availability:set` was not allowed or failed |
 | `EVENT_HANDLER_FAILED` | The core failed to carry out an action that passed the checks above — e.g. a transfer whose target isn't available, or a reconnect with no live call |
 | `null` or a provider's own code (e.g. a number) | The provider reported the call failed |

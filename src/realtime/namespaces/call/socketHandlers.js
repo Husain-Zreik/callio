@@ -8,6 +8,7 @@ import { callQueryService } from "../../../core/calls/CallQueryService.js";
 import { callEventHandler } from "../../../core/events/CallEventHandler.js";
 import { callAccess } from "../../../core/calls/CallAccess.js";
 import { roomManager } from "../../managers/RoomManager.js";
+import { board, BoardError, Tier } from "../../managers/Board.js";
 import { agentAssignmentCoordinator } from "../../../core/routing/AgentAssignmentCoordinator.js";
 import { EventTypes } from "../../../core/events/EventTypes.js";
 import { CallErrorCodes } from "../../../core/events/CallErrorCodes.js";
@@ -42,8 +43,10 @@ export default function registerCallSocketListeners(socket) {
             const ongoing = await callQueryService.getOngoingCalls(tenantId, agentId);
             socket.emit('calls:list', { ongoing });
 
-            for (const snapshot of await agentAssignmentCoordinator.getQueueSnapshots(tenantId)) {
-                socket.emit('call:agent_queue', snapshot);
+            if (board.canSee(socket)) {
+                for (const snapshot of await agentAssignmentCoordinator.getQueueSnapshots(tenantId)) {
+                    socket.emit('call:agent_queue', snapshot);
+                }
             }
         } catch (error) {
             log.error({ err: error }, 'Fetch ongoing calls error');
@@ -53,10 +56,55 @@ export default function registerCallSocketListeners(socket) {
     socket.on('calls:sync', syncCalls);
     socket.on('call:ongoing', syncCalls);
 
+    // ── The board (managers/Board.js) ─────────────────────────────────────────
+
+    // Replies through the ack when the client passed one, else as an event.
+    const reply = (ack, event, data) => (typeof ack === 'function' ? ack(data) : socket.emit(event, data));
+    const boardFailed = (ack, err) => {
+        if (!(err instanceof BoardError)) log.error({ err }, 'Board request failed');
+        const message = err instanceof BoardError ? err.message : 'Board request failed';
+        emitCallError({ callId: null, code: CallErrorCodes.BOARD_REQUEST_FAILED, message, socket });
+        if (typeof ack === 'function') ack({ error: { code: CallErrorCodes.BOARD_REQUEST_FAILED, message } });
+    };
+
+    // { channelIds?, queueIds?, agentIds? } — narrows this socket's board to
+    // what they match (any of them); {} or null = the whole tenant.
+    socket.on('board:subscribe', async (filter, ack) => {
+        try {
+            const applied = await board.subscribe(socket, filter ?? null);
+            reply(ack, 'board:subscribed', { filter: applied });
+        } catch (err) { boardFailed(ack, err); }
+    });
+
+    socket.on('board:unsubscribe', (_data, ack) => {
+        board.unsubscribe(socket);
+        reply(ack, 'board:unsubscribed', {});
+    });
+
+    // A page of the live calls: { channelIds?, queueIds?, agentIds?, cursor?, limit? }.
+    socket.on('board:calls', async (query, ack) => {
+        try {
+            if (!board.canSee(socket)) throw new BoardError('The board is not available to this agent');
+            const q = query ?? {};
+            const page = await callQueryService.getBoardPage(socket.tenant.id, {
+                channelIds: (q.channelIds ?? []).map(Number), queueIds: (q.queueIds ?? []).map(Number), agentIds: (q.agentIds ?? []).map(Number),
+                cursor: q.cursor != null ? Number(q.cursor) : null, limit: q.limit,
+            });
+            reply(ack, 'board:calls', page);
+        } catch (err) { boardFailed(ack, err); }
+    });
+
+    socket.on('board:counters', async (_data, ack) => {
+        try {
+            if (!board.canSee(socket, Tier.SUPERVISOR)) throw new BoardError('Counters are for supervisors');
+            reply(ack, 'board:counters', await board.counters(socket.tenant.id));
+        } catch (err) { boardFailed(ack, err); }
+    });
+
     socket.on('call:agent-queue:sync', async () => {
         try {
             const tenantId = socket.tenant?.id ?? null;
-            if (!tenantId) return;
+            if (!tenantId || !board.canSee(socket)) return;
             for (const snapshot of await agentAssignmentCoordinator.getQueueSnapshots(tenantId)) {
                 socket.emit('call:agent_queue', snapshot);
             }
@@ -123,7 +171,7 @@ export default function registerCallSocketListeners(socket) {
 
             // The SDP answer goes to this socket only.
             socket.emit('call:started', callData);
-            roomManager.broadcastToSupervisors(callData.tenantId, 'call:initiated', { ...callData, sdpOffer: undefined, sdpAnswer: undefined });
+            board.callEvent(Tier.SUPERVISOR, callData.callId, 'call:initiated', { ...callData, sdpOffer: undefined, sdpAnswer: undefined }, { callRoom: false });
         } catch (error) {
             log.error({ err: error }, 'Call start error');
             emitCallError({ callId: callId ?? null, code: CallErrorCodes.CALL_INITIATION_FAILED, message: error.message || 'Failed to start call', socket });

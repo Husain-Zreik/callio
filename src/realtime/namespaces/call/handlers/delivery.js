@@ -1,9 +1,10 @@
 // src/realtime/namespaces/call/handlers/delivery.js
 // Delivers ringing calls to agents: the call:incoming socket event to the
 // assigned (or, for RING_ALL, offered) agents and their pushes, and the
-// supervisor view of every new call.
+// supervisor view of every new call (to the supervisors' board).
 import EventBus from '../../../../core/EventBus.js';
 import { roomManager } from '../../../managers/RoomManager.js';
+import { board, Tier } from '../../../managers/Board.js';
 import { presenceService } from '../../../../core/agents/PresenceService.js';
 import { callLifecycleLogger } from '../../../../core/calls/CallLifecycleLogger.js';
 import { offerDelivery } from '../../../../core/routing/OfferDelivery.js';
@@ -43,7 +44,7 @@ export function registerCallDeliveryListeners() {
 
         // IVR calls have no agent yet — only supervisors see them.
         if (assignmentType === AssignmentType.IVR) {
-            roomManager.broadcastToSupervisors(tenantId, 'call:incoming:supervisor', supervisorView);
+            await board.callEvent(Tier.SUPERVISOR, callId, 'call:incoming:supervisor', supervisorView, { callRoom: false });
             return;
         }
 
@@ -59,7 +60,7 @@ export function registerCallDeliveryListeners() {
             return;
         }
 
-        roomManager.broadcastToSupervisors(tenantId, 'call:incoming:supervisor', supervisorView);
+        await board.callEvent(Tier.SUPERVISOR, callId, 'call:incoming:supervisor', supervisorView, { callRoom: false });
 
         const targets = agentId ? [agentId] : (offeredAgentIds ?? []);
         if (!targets.length) {
@@ -119,7 +120,7 @@ export function registerCallDeliveryListeners() {
     EventBus.on('call:transferred', (data) => {
         const { tenantId, oldAgentId, sdpOffer, ...safeData } = data;
         log.info({ callId: safeData.callId }, 'Call transferred');
-        roomManager.broadcastToSupervisors(tenantId, 'call:transferred', safeData);
+        board.callEvent(Tier.SUPERVISOR, safeData.callId, 'call:transferred', safeData, { callRoom: false, extraAgentIds: [oldAgentId] });
         if (oldAgentId) roomManager.emitToUser(oldAgentId, 'call:transferred', safeData);
     });
 

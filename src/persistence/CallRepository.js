@@ -171,6 +171,44 @@ class CallRepository {
         return rows;
     }
 
+    // A page of the tenant's live calls for the board, newest first: matching
+    // any of the given lines, queues or agents (none = all). cursor: the last
+    // id of the previous page.
+    async getOngoingPage(tenantId, { channelIds = [], queueIds = [], agentIds = [], cursor = null, limit = 50 } = {}) {
+        const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200));
+        const where = ['tenant_id = ?', `status IN ${ACTIVE_STATUSES}`];
+        const params = [tenantId];
+        const any = [];
+        const inList = (column, ids) => { if (ids.length) { any.push(`${column} IN (${ids.map(() => '?').join(',')})`); params.push(...ids); } };
+        inList('channel_id', channelIds);
+        inList('queue_id', queueIds);
+        inList('agent_id', agentIds);
+        if (any.length) where.push(`(${any.join(' OR ')})`);
+        if (cursor) { where.push('id < ?'); params.push(cursor); }
+        const [rows] = await connection.execute(
+            `SELECT * FROM calls WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ${safeLimit}`,
+            params
+        );
+        return rows;
+    }
+
+    // Live calls of a tenant by stage, for the board's counters.
+    async countLiveForTenant(tenantId) {
+        const [[row]] = await connection.execute(
+            `SELECT COUNT(*) AS live,
+                    COALESCE(SUM(state = 'IVR'), 0) AS in_ivr,
+                    COALESCE(SUM(status = 'RINGING' AND agent_id IS NULL AND (state IS NULL OR state = 'QUEUE')), 0) AS waiting,
+                    COALESCE(SUM(status = 'RINGING' AND agent_id IS NOT NULL), 0) AS ringing,
+                    COALESCE(SUM(status = 'IN_PROGRESS' AND (state IS NULL OR state <> 'IVR')), 0) AS in_progress
+             FROM calls WHERE tenant_id = ? AND status IN ${ACTIVE_STATUSES}`,
+            [tenantId]
+        );
+        return {
+            live: Number(row.live), inIvr: Number(row.in_ivr), waiting: Number(row.waiting),
+            ringing: Number(row.ringing), inProgress: Number(row.in_progress),
+        };
+    }
+
     async getOngoingCallsForAgent(tenantId, agentId) {
         const [rows] = await connection.execute(
             `SELECT * FROM calls

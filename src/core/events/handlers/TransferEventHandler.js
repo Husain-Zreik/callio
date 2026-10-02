@@ -124,7 +124,10 @@ export class TransferEventHandler {
                 targetQueueId: resolved.queueId,
                 transferTarget: { type: resolved.targetType, queueId: resolved.queueId },
             });
-            await agentAssignmentCoordinator.emitQueueUpdate(tenantId);
+            // Both agents' queues, and the queue the call moved into.
+            await agentAssignmentCoordinator.emitAgentQueues(tenantId, resolved.newAgentId);
+            if (oldAgentId) await agentAssignmentCoordinator.emitAgentQueues(tenantId, oldAgentId);
+            if (resolved.queueId) await agentAssignmentCoordinator.emitQueueUpdate(tenantId, resolved.queueId);
 
             log.info({ callId, toAgentId: resolved.newAgentId }, 'Call transferred to an agent');
         } catch (error) {

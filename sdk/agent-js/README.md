@@ -94,7 +94,21 @@ An agent whose token has `role: 'SUPERVISOR'` (`agent.isSupervisor`) also gets:
 | `agent.setAvailability(value, { agentId })` | set an agent's availability |
 
 Board events: `board` (the whole board, after each sync), `boardCall` (a call
-appeared or changed), `boardCallEnded` (view, { terminationReason, terminatedBy }).
+appeared or changed), `boardCallEnded` (view, { terminationReason, terminatedBy }),
+`counters` (the tenant's live counts, pushed at most every 2 s).
+
+A dashboard on a large tenant narrows and pages the board instead of holding
+all of it (agents may too where the tenant has the team view):
+
+| | |
+|---|---|
+| `agent.subscribeBoard({ channelIds?, queueIds?, agentIds? })` | only these lines / queues / agents from now on; `{}` = the whole tenant |
+| `agent.unsubscribeBoard()` | no board on this connection |
+| `agent.boardCalls({ …filter, cursor?, limit? })` | `{ calls, nextCursor }`, newest first |
+| `agent.boardCounters()` | supervisors: the counters now |
+
+`agent.board` is still rebuilt from `sync()` (the whole tenant); a narrowed
+dashboard keeps its own list from `boardCalls()` and the board events.
 
 ```js
 const monitor = await agent.monitor(callId);            // asks for the microphone

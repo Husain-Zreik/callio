@@ -22,6 +22,22 @@ class CallQueryService {
         const calls = agentId
             ? await CallRepository.getOngoingCallsForAgent(tenantId, agentId)
             : await CallRepository.getOngoingCallsForTenant(tenantId);
+        return this.#views(tenantId, calls);
+    }
+
+    /**
+     * One page of the tenant's live calls for the board (filter: channelIds /
+     * queueIds / agentIds, any of them; cursor from the previous page).
+     * Returns { calls, nextCursor } — nextCursor null on the last page.
+     */
+    async getBoardPage(tenantId, { channelIds = [], queueIds = [], agentIds = [], cursor = null, limit = 50 } = {}) {
+        const rows = await CallRepository.getOngoingPage(tenantId, { channelIds, queueIds, agentIds, cursor, limit });
+        const calls = await this.#views(tenantId, rows);
+        const full = rows.length >= Math.max(1, Math.min(Number(limit) || 50, 200));
+        return { calls, nextCursor: full && rows.length ? rows[rows.length - 1].id : null };
+    }
+
+    async #views(tenantId, calls) {
         const now = Date.now();
 
         callCleanupService.processCleanupQueue(tenantId);

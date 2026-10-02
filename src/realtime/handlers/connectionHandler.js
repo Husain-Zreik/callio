@@ -57,6 +57,15 @@ export async function handleConnection(socket) {
     // and an event that arrives before its listener exists is silently dropped.
     // Both before anything that can deliver a call to this socket.
     registerAllSocketListeners(socket);
+    // A call's events go to its room, no longer to the whole tenant: a socket
+    // that connects while its agent is on (or offered) calls joins their rooms.
+    if (userId !== "Unknown" && tenantId !== "Unknown") {
+        try {
+            for (const call of await CallRepository.getOngoingCallsForAgent(tenantId, userId)) socket.join(`call:${call.id}`);
+        } catch (error) {
+            log.error({ agentId: userId, err: error }, 'Joining the agent\'s call rooms failed');
+        }
+    }
     socket.on("session:refresh", () => socket.emit("session:ready", sessionReady(socket)));
     socket.emit("session:ready", sessionReady(socket));
 
@@ -78,7 +87,7 @@ export async function handleConnection(socket) {
         // Notify managers that this agent just came online (first socket only —
         // opening a second tab should not re-broadcast).
         if (isFirstSocket) {
-            agentAssignmentCoordinator.emitQueueUpdate(tenantId).catch((err) =>
+            agentAssignmentCoordinator.emitAgentQueues(tenantId, userId).catch((err) =>
                 log.error({ agentId: userId, err }, 'Queue update failed on agent connect')
             );
         }
@@ -93,7 +102,7 @@ export async function handleConnection(socket) {
             // closing one tab when another is still open should not flip the indicator).
             const remainingSockets = await presenceService.getUserSocketCount(userId).catch(() => -1);
             if (remainingSockets === 0) {
-                agentAssignmentCoordinator.emitQueueUpdate(tenantId).catch((err) =>
+                agentAssignmentCoordinator.emitAgentQueues(tenantId, userId).catch((err) =>
                     log.error({ agentId: userId, err }, 'Queue update failed on agent disconnect')
                 );
             }

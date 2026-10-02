@@ -99,9 +99,15 @@ the stored object as a whole when given, and is kept when omitted:
 ```json
 {
   "auto_offline": { "enabled": true, "missed_threshold": 3 },
-  "recording": { "storage_limit_bytes": 5368709120, "retention_days": 90 }
+  "recording": { "storage_limit_bytes": 5368709120, "retention_days": 90 },
+  "team_view": true
 }
 ```
+
+`team_view` (default `true`): whether agents see the tenant's board — other
+agents' calls and statuses and the queues (agent-protocol.md → Board).
+Supervisors always do. Set it to `false` when the agents are a product's end
+users, who must only ever see their own calls.
 
 `recording.retention_days` deletes this tenant's recordings that many days
 after they were made (`0` keeps them; default: the deployment's

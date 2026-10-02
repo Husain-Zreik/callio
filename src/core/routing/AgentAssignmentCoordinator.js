@@ -143,7 +143,7 @@ class AgentAssignmentCoordinator {
                 log.error({ tenantId, err }, 'Drain after availability change failed')
             );
         }
-        await this.emitQueueUpdate(tenantId).catch(() => { });
+        await this.emitAgentQueues(tenantId, targetAgentId).catch(() => { });
         return reported;
     }
 
@@ -179,7 +179,7 @@ class AgentAssignmentCoordinator {
 
             if (availability === AgentAvailability.AVAILABLE) {
                 const assigned = await this.drainForTenant(tenantId);
-                if (!assigned) await this.emitQueueUpdate(tenantId);
+                if (!assigned) await this.emitAgentQueues(tenantId, targetAgentId);
             }
         } catch (error) {
             log.error({ tenantId, agentId: targetAgentId, err: error }, 'Availability sync failed');

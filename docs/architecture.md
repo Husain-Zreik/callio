@@ -131,7 +131,12 @@ implementations are registered at startup:
 - **`agentConnections`** (`src/core/agents/AgentConnections.js`): emit to one
   socket, cluster-wide liveness, detach a socket from a call. Registered by
   `realtime/server.js` (RoomManager). Everything else the core tells sockets
-  goes out as an `EventBus` event that `realtime/` relays.
+  goes out as an `EventBus` event that `realtime/` relays, each to its
+  audience: a call's events to its call room plus the board, an agent's status
+  to their own sockets plus the board. The board (`realtime/managers/Board.js`)
+  is Socket.IO rooms per tenant, narrowed by line, queue and agent, that only
+  subscribed sockets join — supervisors always, agents where the tenant has
+  the team view — so no event fans out to a whole tenant.
 - **`callNotifications`** (`src/core/calls/CallNotifications.js`): stop other
   devices ringing when a call is answered or declined. Registered by
   `server/bootstrap.js` (CallPushNotifier).

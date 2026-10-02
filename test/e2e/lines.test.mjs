@@ -4,6 +4,9 @@
 // the line's ring timeout; a decline ends it REJECTED; an owner nobody can
 // reach → NO_ANSWER at once; only the owner calls out from the line, and doing
 // so leaves their shift alone; a shared line with no queue rejects the call.
+// The board (A3) with the tenant's team view off: other agents get none of the
+// line's call events, a supervisor narrowed to the line gets its events (and
+// not another line's), pages its live calls and gets counters.
 import { readFileSync } from 'fs';
 import {
     testDb, sleep, makeChecks, waitFor, newPeer, hear, gathered, eventReceiver,
@@ -28,19 +31,25 @@ const callRow = async (id) => (await q('SELECT * FROM calls WHERE id = ?', [id])
 const agentRow = async (ref) => (await q('SELECT id, availability, busy_call_id FROM agents WHERE external_ref = ?', [ref]))[0];
 const finalStatus = (call) => call.answered.then(() => 200, (err) => err.status);
 const ended = (id) => waitFor(async () => { const r = await callRow(id); return ['TERMINATED', 'FAILED'].includes(r.status) ? r : null; }, 15000, `call ${id} ended`);
+const ask = (agent, event, data) => Promise.race([new Promise((resolve) => agent.socket.emit(event, data, resolve)), sleep(5000).then(() => ({ timeout: true }))]);
+const eventsFor = (agent, callIds) => agent.events.filter((e) => callIds.map(String).includes(String(e.payload?.callId)));
 const endedEvent = (callId) => waitFor(() => receiver.events.find((e) => e.callId === callId && e.type === 'call.ended'), 15000, `call.ended for ${callId}`);
 
 await receiver.listen();
 await carrier.listen();
 let exitCode = 0;
+const tenantBefore = (await api('GET', '/v1/tenants/demo')).body.tenant;
 
 try {
+    // A product whose agents are its end users: no team view.
+    await api('PUT', '/v1/tenants/demo', { name: tenantBefore.name, settings: { ...(tenantBefore.settings ?? {}), team_view: false } });
     const trunkId = (await q("SELECT id FROM sip_trunks WHERE name = 'dev-trunk'"))[0].id;
     await api('PUT', '/v1/tenants/demo/agents/line-user-1', { name: 'Line User 1' });
     await api('PUT', '/v1/tenants/demo/agents/line-user-2', { name: 'Line User 2' });
     const u1 = await connectAgent(CALLIO, seed, 'line-user-1');
     const u1Phone = await connectAgent(CALLIO, seed, 'line-user-1', 'AGENT', 'line-user-1-phone');
     const a2 = await connectAgent(CALLIO, seed, 'agent-2');
+    const sup = await connectAgent(CALLIO, seed, 'sup-1', 'SUPERVISOR');
     const u1Id = (await agentRow('line-user-1')).id;
 
     // ── Provisioning ──
@@ -59,7 +68,17 @@ try {
     check('a line with an owner and a queue, or an unknown owner, is refused', both.status === 400 && noOwner.status === 400,
         `both=${both.status} unknown=${noOwner.status}`);
     await api('PUT', '/v1/tenants/demo/channels/line-2', { type: 'SIP', address: UNREACHABLE_LINE, sip_trunk_id: trunkId, owner_agent_ref: 'line-user-2' });
-    await api('PUT', '/v1/tenants/demo/channels/shared-no-queue', { type: 'SIP', address: SHARED_NO_QUEUE, sip_trunk_id: trunkId });
+    const shared = await api('PUT', '/v1/tenants/demo/channels/shared-no-queue', { type: 'SIP', address: SHARED_NO_QUEUE, sip_trunk_id: trunkId });
+    const line1Id = put.body.channel.id;
+
+    // ── The board: who may watch ──
+    const refused = await ask(a2, 'board:subscribe', {});
+    check('with team view off, an agent may not subscribe to the board', refused?.error?.code === 'BOARD_REQUEST_FAILED', JSON.stringify(refused));
+    const narrowed = await ask(sup, 'board:subscribe', { channelIds: [line1Id] });
+    check('a supervisor narrows their board to one line', narrowed?.filter?.channelIds?.[0] === line1Id, JSON.stringify(narrowed));
+    const foreign = await ask(sup, 'board:subscribe', { channelIds: [999999] });
+    check('a filter naming another tenant\'s (or no) line is refused', foreign?.error?.code === 'BOARD_REQUEST_FAILED', JSON.stringify(foreign));
+    await ask(sup, 'board:subscribe', { channelIds: [line1Id] });
 
     // ── 1. The line rings its owner (OFFLINE shift) on every device; nobody else ──
     check('the owner starts OFFLINE (their shift)', (await agentRow('line-user-1')).availability === 'OFFLINE');
@@ -77,6 +96,14 @@ try {
     await waitFor(async () => (await callRow(row1.id)).status === 'IN_PROGRESS', 15000, 'line call answered');
     const ownerEar = await hear(await u1.peer.received);
     check('the owner hears the caller', ownerEar.dominant() === 440, `tone=${ownerEar.dominant()}`);
+
+    const page = await ask(sup, 'board:calls', { channelIds: [line1Id], limit: 10 });
+    const otherLine = await ask(sup, 'board:calls', { channelIds: [shared.body.channel.id] });
+    check('board:calls pages the live calls of a line', page?.calls?.some((c) => String(c.callId) === String(row1.id)) && otherLine?.calls?.length === 0,
+        `line=${page?.calls?.map((c) => c.callId)} other=${otherLine?.calls?.length}`);
+    const counters = await ask(sup, 'board:counters');
+    check('board:counters counts the tenant\'s live calls and agents', counters?.calls?.inProgress >= 1 && counters?.agents?.onCall >= 1,
+        JSON.stringify(counters));
 
     // ── 2. Busy: a second call while the owner is on the first ──
     const c2 = await carrier.callIn({ from: '+96181030902', to: LINE });
@@ -179,11 +206,25 @@ try {
         && !a2.incoming.some((p) => String(p.callId) === String(end8.id)) && !u1.incoming.some((p) => String(p.callId) === String(end8.id)),
         `${end8.termination_reason}/${end8.terminated_by} status=${status8}`);
 
-    for (const a of [u1, u1Phone, a2]) a.socket.close();
+    // ── The board, after all of it ──
+    const lineCalls = [row1.id, row2.id, row3.id, row4.id, outId, row6.id];
+    check('an agent not on the calls received none of their events (no team view)', eventsFor(a2, [...lineCalls, end7.id, end8.id]).length === 0
+        && !a2.events.some((e) => e.event === 'call:agent_availability' && String(e.payload?.userId) === String(u1Id)),
+        eventsFor(a2, lineCalls).map((e) => e.event).join(','));
+    check('the owner still gets their own status changes', u1.events.some((e) => e.event === 'call:agent_availability' && e.payload?.availability === 'ON_CALL'));
+    const supEvents = new Set(eventsFor(sup, [row1.id]).map((e) => e.event));
+    check('the supervisor narrowed to the line got its calls (offer, status, end)',
+        ['call:incoming:supervisor', 'call:terminated'].every((e) => supEvents.has(e)), [...supEvents].join(','));
+    check('… and nothing about calls on other lines', eventsFor(sup, [end7.id, end8.id]).length === 0,
+        eventsFor(sup, [end7.id, end8.id]).map((e) => `${e.event}:${e.payload.callId}`).join(','));
+    check('the supervisor got pushed counters', sup.events.some((e) => e.event === 'board:counters' && e.payload?.calls));
+
+    for (const a of [u1, u1Phone, a2, sup]) a.socket.close();
 } catch (err) {
     console.error('HARNESS ERROR:', err);
     exitCode = 1;
 } finally {
+    await api('PUT', '/v1/tenants/demo', { name: tenantBefore.name, settings: tenantBefore.settings ?? {} }).catch(() => { });
     carrier.close(); receiver.close();
     await db.end();
 }

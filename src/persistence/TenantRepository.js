@@ -46,6 +46,13 @@ class TenantRepository {
         };
     }
 
+    // Who sees the tenant's board: supervisors always; agents too unless
+    // settings.team_view is false (a product whose agents are its end users).
+    async getBoardSettings(tenantId) {
+        const tenant = await this.findById(tenantId);
+        return { teamView: tenant?.settings?.team_view !== false };
+    }
+
     // Storage quota for recordings, in bytes (null = the platform default).
     async getRecordingStorageLimitBytes(tenantId) {
         const tenant = await this.findById(tenantId);

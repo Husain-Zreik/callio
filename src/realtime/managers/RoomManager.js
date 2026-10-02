@@ -65,8 +65,10 @@ class RoomManager {
 
     // ── Business broadcasts ───────────────────────────────────────────────────
 
-    broadcastToTenant(tenantId, event, data) {
-        this.io.to(`tenant:${tenantId}`).emit(event, data);
+    // One emit to several rooms: a socket in more than one gets it once
+    // (the board's rooms, realtime/managers/Board.js).
+    emitToRooms(rooms, event, data) {
+        if (rooms?.length) this.io.to(rooms).emit(event, data);
     }
 
     // Several agents at once (e.g. the members a RING_ALL call is offered to).
@@ -80,10 +82,6 @@ class RoomManager {
         if (rooms.length) await this.io.in(rooms).socketsJoin(`call:${callId}`);
     }
 
-    broadcastToSupervisors(tenantId, event, data) {
-        this.io.to(`supervisors:${tenantId}`).emit(event, data);
-    }
-
     // ── Domain broadcasts ─────────────────────────────────────────────────────
 
     broadcastToCall(callId, event, data) {
@@ -94,14 +92,6 @@ class RoomManager {
 
     joinUserRoom(socket, userId) {
         socket.join(`user:${userId}`);
-    }
-
-    joinTenantRoom(socket, tenantId) {
-        socket.join(`tenant:${tenantId}`);
-    }
-
-    joinSupervisorRoom(socket, tenantId) {
-        socket.join(`supervisors:${tenantId}`);
     }
 
     // Every socket authenticated with one consumer signing key, so revoking the

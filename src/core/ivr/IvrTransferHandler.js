@@ -155,8 +155,8 @@ class IvrTransferHandler {
             ).catch((err) =>
                 log.error({ callId, err }, 'assignTransferredCall error')
             );
-        } else if (tenantId) {
-            await agentAssignmentCoordinator.emitQueueUpdate(tenantId).catch(() => { });
+        } else if (tenantId && targetType === 'queue' && targetId) {
+            await agentAssignmentCoordinator.emitQueueUpdate(tenantId, targetId).catch(() => { });
         }
     }
 

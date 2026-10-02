@@ -96,6 +96,12 @@ try {
     const boardView = await onBoard;
     await waitFor(() => String(sup.board.get(String(row1.id))?.agentId) === String(a1.agent.id), 8000, 'board shows who answered');
     const view1 = sup.board.get(String(row1.id));
+    const page1 = await sup.boardCalls({ limit: 5 }).catch((err) => ({ err: err.message }));
+    const counters1 = await sup.boardCounters().catch((err) => ({ err: err.message }));
+    const refusedBoard = await a1.boardCounters().then(() => null, (err) => err.code);
+    check('boardCalls() pages the live calls, boardCounters() counts them; counters are for supervisors',
+        page1.calls?.some((c) => String(c.callId) === String(row1.id)) && counters1.calls?.inProgress >= 1 && refusedBoard === 'BOARD_REQUEST_FAILED',
+        JSON.stringify({ page: page1.calls?.map((c) => c.callId) ?? page1, counters: counters1.calls ?? counters1, refusedBoard }));
     check('the board shows the new call, then who answered it', String(boardView.callId) === String(row1.id)
         && view1?.status === 'IN_PROGRESS', `first=${boardView.callId} status=${view1?.status} agent=${view1?.agentId}`);
     const monitor = await sup.monitor(row1.id, { stream: mic(660) });

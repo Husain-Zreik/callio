@@ -13,6 +13,7 @@
 //   'availability'  ({ availability, reason? })          this agent
 //   'team'          ({ agentId, availability, reason? }) any agent of the tenant
 //   'queue'         (snapshot)         one per queue, on change and on sync
+//   'counters'      (counters)         supervisors: the tenant's live counts, pushed at most every 2 s
 //   'error'         ({ callId, code, message } | Error)
 //   'disconnected'  (reason)
 // Supervisors only (agent.board = the tenant's live calls):
@@ -112,6 +113,32 @@ export class CallioAgent extends Emitter {
         this._send('calls:sync');
     }
 
+    // ── The board (docs/agent-protocol.md → Board) ────────────────────────────
+
+    /**
+     * Narrow this connection's board to some lines, queues or agents (any of
+     * them): { channelIds?, queueIds?, agentIds? }; {} = the whole tenant.
+     * Resolves with the filter applied.
+     */
+    async subscribeBoard(filter = {}) {
+        return (await this._ask('board:subscribe', filter)).filter ?? null;
+    }
+
+    /** Stop receiving the board on this connection. */
+    async unsubscribeBoard() {
+        await this._ask('board:unsubscribe', {});
+    }
+
+    /** A page of the live calls: { channelIds?, queueIds?, agentIds?, cursor?, limit? } → { calls, nextCursor }. */
+    boardCalls(query = {}) {
+        return this._ask('board:calls', query);
+    }
+
+    /** Supervisors: the tenant's counters now (they are also pushed as 'counters'). */
+    boardCounters() {
+        return this._ask('board:counters', {});
+    }
+
     /**
      * Start an outbound call the consumer created (POST /v1/tenants/{t}/calls):
      * connects this agent's leg; Callio then dials the customer.
@@ -174,6 +201,18 @@ export class CallioAgent extends Emitter {
 
     _send(event, payload) {
         this.socket.emit(event, payload);
+    }
+
+    // A request answered through the socket's acknowledgement.
+    _ask(event, payload, timeoutMs = 10000) {
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error(`${event} timed out`)), timeoutMs);
+            this.socket.emit(event, payload, (res) => {
+                clearTimeout(timer);
+                if (res?.error) reject(Object.assign(new Error(res.error.message), { code: res.error.code }));
+                else resolve(res);
+            });
+        });
     }
 
     async _getMicrophone() {
@@ -388,6 +427,7 @@ export class CallioAgent extends Emitter {
             this.queues.set(String(snapshot.queueId), snapshot);
             this.emit('queue', snapshot);
         });
+        s.on('board:counters', (p) => this.emit('counters', p));
         s.on('call:error', (p) => {
             this.emit('error', p);
             if (p.code === 'MONITOR_FAILED') forMonitor(p)?._end('failed');
