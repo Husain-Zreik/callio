@@ -201,6 +201,25 @@ void main() {
       expect(call.endReason?.reason, 'media_failed');
     });
 
+    test('a direct call reconnects by answering the offer Callio sends', () async {
+      final (agent, transport, media) = await connected();
+      transport.server('call:incoming', {...callPayload(31), 'mediaTopology': 'DIRECT'});
+      final call = agent.call(31)!;
+      expect(call.data.isDirect, isTrue);
+      await call.accept();
+      media.lastPeer.failed();
+      await settle();
+      final reconnect = transport.last('call:reconnect')!.map;
+      expect(reconnect.containsKey('sdpOffer'), isFalse);
+      expect(reconnect['reconnectTrigger'], 'ice_failure');
+      transport.server('call:reconnected', {'callId': 31, 'sdpOffer': 'srv-reoffer'});
+      await settle();
+      expect(media.lastPeer.remote?.sdp, 'srv-reoffer');
+      expect(media.lastPeer.remote?.type, 'offer');
+      expect(transport.last('call:reconnect:answer')!.map['callId'], 31);
+      expect(transport.last('call:reconnect:answer')!.map['sdpAnswer'], startsWith('answer-'));
+    });
+
     test('resync: a ringing call rings, a call on another device is elsewhere, ours reconnects, stale ones end', () async {
       final (agent, transport, _) = await connected();
       transport.server('call:incoming', callPayload(40));   // held locally, gone from Callio's list
@@ -314,6 +333,43 @@ void main() {
       transport.server('call:terminated', {'callId': 80, 'terminationReason': 'COMPLETED'});
       expect(await m.ended, 'call_ended');
       expect(agent.monitorOf(80), isNull);
+    });
+
+    test('monitoring a direct call: no microphone, Callio offers, we answer', () async {
+      final (agent, transport, media) = await connected(role: 'SUPERVISOR');
+      transport.server('calls:list', {'ongoing': [{...callPayload(82, agentId: 9, status: 'IN_PROGRESS'), 'mediaTopology': 'DIRECT'}]});
+      await agent.monitor(82);
+      final pc = media.lastPeer;
+      expect(pc.lines, isEmpty);
+      expect(transport.last('call:monitor')!.map, {'callId': '82'});
+      transport.server('call:monitor:offer', {'callId': 82, 'sdpOffer': 'subscribe-offer'});
+      await settle();
+      expect(pc.remote?.sdp, 'subscribe-offer');
+      expect(transport.last('call:monitor:answer')!.map['sdpAnswer'], startsWith('answer-'));
+      transport.server('call:monitor:started', {'callId': 82});
+      await settle();
+      expect(pc.remote?.sdp, 'subscribe-offer');
+    });
+
+    test('the board: subscribe, a page of calls, counters; a refused request fails', () async {
+      final (agent, transport, _) = await connected(role: 'SUPERVISOR');
+      final subscribed = agent.subscribeBoard(channelIds: [3]);
+      expect(transport.last('board:subscribe')!.map, {'channelIds': [3]});
+      transport.server('board:subscribed', {'filter': {'channelIds': [3], 'queueIds': <int>[], 'agentIds': <int>[]}});
+      expect((await subscribed)?['channelIds'], [3]);
+      final page = agent.boardCalls(limit: 10);
+      transport.server('board:calls', {'calls': [callPayload(90, status: 'IN_PROGRESS', sdp: false)], 'nextCursor': 90});
+      final result = await page;
+      expect(result.calls.single.callId, '90');
+      expect(result.nextCursor, 90);
+      final pushed = <Map<String, dynamic>>[];
+      agent.onCounters.listen(pushed.add);
+      transport.server('board:counters', {'calls': {'live': 1}, 'agents': {'onCall': 1}});
+      await settle();
+      expect(pushed.single['calls'], {'live': 1});
+      final refused = agent.boardCounters();
+      transport.server('call:error', {'callId': null, 'code': 'BOARD_REQUEST_FAILED', 'message': 'Counters are for supervisors'});
+      await expectLater(refused, throwsA(isA<CallioError>()));
     });
 
     test('a reconnect ends monitoring', () async {

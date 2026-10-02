@@ -67,6 +67,12 @@ of your devices.
 `agent.board` — the tenant's live calls (`CallData`: status, customer, agent,
 queue, `ivr` position), kept current and rebuilt on every sync.
 
+A dashboard on a large tenant narrows and pages instead (docs/agent-protocol.md
+→ Board): `agent.subscribeBoard(channelIds: […], queueIds: […], agentIds: […])`,
+`agent.unsubscribeBoard()`, `agent.boardCalls(cursor: …, limit: …)` →
+`(calls, nextCursor)`, `agent.boardCounters()` and the pushed
+`agent.onCounters` stream.
+
 ```dart
 final monitor = await agent.monitor(callId);   // asks for the microphone
 monitor.setMode(MonitorMode.whisper);           // listen | whisper | barge

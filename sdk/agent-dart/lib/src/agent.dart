@@ -106,6 +106,9 @@ class CallioAgent extends ChangeNotifier {
   final _callStates = StreamController<CallStateChange>.broadcast();
   final _errors = StreamController<Object>.broadcast();
   final _boardEnded = StreamController<BoardCallEnded>.broadcast();
+  final _counters = StreamController<Map<String, dynamic>>.broadcast();
+  // Board requests waiting for their reply event (one at a time per kind).
+  final Map<String, Completer<Map<String, dynamic>>> _boardReplies = {};
 
   // ── State ─────────────────────────────────────────────────────────────────
 
@@ -153,6 +156,11 @@ class CallioAgent extends ChangeNotifier {
   Stream<Object> get onError => _errors.stream;
   Stream<BoardCallEnded> get onBoardCallEnded => _boardEnded.stream;
 
+  /// Supervisors: the tenant's live counts ({ calls: { live, inIvr, waiting,
+  /// ringing, inProgress }, agents: { total, available, onCall, offline } }),
+  /// pushed at most every 2 s while the board changes.
+  Stream<Map<String, dynamic>> get onCounters => _counters.stream;
+
   // ── Actions ───────────────────────────────────────────────────────────────
 
   /// Go AVAILABLE or OFFLINE (ON_CALL is Callio's). Supervisors may set another agent's.
@@ -189,6 +197,50 @@ class CallioAgent extends ChangeNotifier {
       rethrow;
     }
     return m;
+  }
+
+  // ── The board (docs/agent-protocol.md → Board) ────────────────────────────
+
+  /// Narrow this connection's board to some lines, queues or agents (any of
+  /// them); no ids = the whole tenant. Completes with the filter applied.
+  Future<Map<String, dynamic>?> subscribeBoard({List<Object>? channelIds, List<Object>? queueIds, List<Object>? agentIds}) async {
+    final reply = await _boardRequest('board:subscribe', 'board:subscribed', {
+      if (channelIds != null) 'channelIds': channelIds,
+      if (queueIds != null) 'queueIds': queueIds,
+      if (agentIds != null) 'agentIds': agentIds,
+    });
+    return reply['filter'] is Map ? Map<String, dynamic>.from(reply['filter'] as Map) : null;
+  }
+
+  /// Stop receiving the board on this connection.
+  Future<void> unsubscribeBoard() => _boardRequest('board:unsubscribe', 'board:unsubscribed', const {});
+
+  /// A page of the live calls, newest first: (calls, nextCursor — null on the last page).
+  Future<({List<CallData> calls, Object? nextCursor})> boardCalls(
+      {List<Object>? channelIds, List<Object>? queueIds, List<Object>? agentIds, Object? cursor, int? limit}) async {
+    final reply = await _boardRequest('board:calls', 'board:calls', {
+      if (channelIds != null) 'channelIds': channelIds,
+      if (queueIds != null) 'queueIds': queueIds,
+      if (agentIds != null) 'agentIds': agentIds,
+      if (cursor != null) 'cursor': cursor,
+      if (limit != null) 'limit': limit,
+    });
+    final calls = [for (final c in (reply['calls'] as List? ?? const [])) CallData(Map<String, dynamic>.from(c as Map))];
+    return (calls: calls, nextCursor: reply['nextCursor']);
+  }
+
+  /// Supervisors: the tenant's counters now (also pushed: [onCounters]).
+  Future<Map<String, dynamic>> boardCounters() => _boardRequest('board:counters', 'board:counters', const {});
+
+  Future<Map<String, dynamic>> _boardRequest(String event, String replyEvent, Map<String, dynamic> payload) {
+    _boardReplies.remove(replyEvent)?.completeError(StateError('Superseded by a newer $event'));
+    final completer = Completer<Map<String, dynamic>>();
+    _boardReplies[replyEvent] = completer;
+    send(event, payload);
+    return completer.future.timeout(const Duration(seconds: 10), onTimeout: () {
+      if (identical(_boardReplies[replyEvent], completer)) _boardReplies.remove(replyEvent);
+      throw TimeoutException('$event timed out');
+    });
   }
 
   /// Supervisors: move any call to an agent or into a queue.
@@ -487,10 +539,26 @@ class CallioAgent extends ChangeNotifier {
       _queues[snapshot.queueId] = snapshot;
       notifyListeners();
     });
+    // Board replies (no acknowledgements on this transport: Callio answers
+    // with the event of the same name). Counters are also pushed.
+    for (final event in const ['board:subscribed', 'board:unsubscribed', 'board:calls']) {
+      t.on(event, (raw) => _boardReplies.remove(event)?.complete(m(raw)));
+    }
+    t.on('board:counters', (raw) {
+      final p = m(raw);
+      _boardReplies.remove('board:counters')?.complete(p);
+      _counters.add(p);
+    });
     t.on('call:error', (raw) {
       final p = m(raw);
       final error = CallioError(callId: p['callId'] == null ? null : idOf(p['callId']), code: '${p['code']}', message: '${p['message']}');
       _errors.add(error);
+      if (error.code == 'BOARD_REQUEST_FAILED') {
+        for (final c in _boardReplies.values) {
+          c.completeError(error);
+        }
+        _boardReplies.clear();
+      }
       if (error.code == 'MONITOR_FAILED') forMonitor(p)?.end('failed');
       if (error.callId != null && _endingErrors.contains(error.code)) forCall(p)?.end('error', {'code': error.code, 'message': error.message});
     });
@@ -505,6 +573,7 @@ class CallioAgent extends ChangeNotifier {
     _callStates.close();
     _errors.close();
     _boardEnded.close();
+    _counters.close();
     super.dispose();
   }
 }
