@@ -217,26 +217,35 @@ firewall them, because the drachtio secret controls every call.
 
 ```bash
 cd deploy/sip-gateway
-cp .env.example .env               # set DRACHTIO_SECRET (a long random value)
-# edit rtpengine/rtpengine.conf: interface = <public IP> (or <private>!<public>)
-docker compose up -d
+cp .env.example .env               # set DRACHTIO_SECRET and ESL_PASSWORD (long random values)
+# edit rtpengine/rtpengine.conf: interface = external/<public IP>;internal/127.0.0.1
+#   (external/<private>!<public> behind NAT)
+docker compose up -d --build       # builds the FreeSWITCH image the first time
 docker compose logs -f
 ```
 
-Both containers use **host networking**, because SDP carries real IPs and ports
+The three containers (drachtio, rtpengine, FreeSWITCH) use **host networking**, because SDP carries real IPs and ports
 and Docker's NAT would break them. The rtpengine service starts the binary
 directly instead of the image's entrypoint, which tries `sed -i` on the
-bind-mounted config and fails. Then set `DRACHTIO_*` / `RTPENGINE_*` in
-Callio's `.env` and restart it. Each worker logs `Connected to
-drachtio-server`.
+bind-mounted config and fails. FreeSWITCH listens on 127.0.0.1 only
+(`MEDIA_BIND_IP`): SIP 5080/5082, RTP 40000–40999, event socket 8021. Then set
+`DRACHTIO_*`, `RTPENGINE_*`, `FREESWITCH_*` and `MEDIA_*` in Callio's `.env`
+(`FREESWITCH_ESL_PASSWORD` = the gateway's `ESL_PASSWORD`,
+`MEDIA_ESL_ADVERTISED_ADDRESS=127.0.0.1`, `MEDIA_CALLBACK_URL=http://127.0.0.1:<a
+worker's port>`) and restart it. Each worker logs `Connected to
+drachtio-server` and `Connected to FreeSWITCH`; FreeSWITCH connects back to
+each worker on its HTTP port + 1000 and + 2000 (loopback).
 
 **Firewall.** Docker publishes nothing here; the host firewall does all the
 restricting:
 
 - `5060/udp` and `5060/tcp` only from the carrier's **signalling** IPs.
-- The RTP range (`port-min`–`port-max`) only from the carrier's **media** IPs,
-  which can differ from the signalling IPs.
-- 9022 and 22222 must not be reachable from outside.
+- The RTP range (`port-min`–`port-max`) from **anywhere**: every leg's audio
+  lands there — the carrier's media IPs, WhatsApp's media relay, and agents'
+  and supervisors' browsers (WebRTC). It carries only media for sessions
+  Callio set up.
+- 9022, 22222 and FreeSWITCH's ports (loopback anyway) must not be reachable
+  from outside.
 
 SIP scanners probe any open 5060 within minutes, sending INVITEs to random
 numbers from unknown IPs. Callio answers them `404` or `403` (rate-limited

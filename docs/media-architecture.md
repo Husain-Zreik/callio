@@ -191,9 +191,9 @@ happen on a branch (or worktree) and merge green.
 
 - **Meta's relay with rtpengine's SDP** (the rules in `whatsappSdp.js`, `a=ice-lite` kept) —
   only a real WhatsApp call shows it. Manual test on the dev server.
-- **The production media plane:** FreeSWITCH in `deploy/sip-gateway/docker-compose.yml`
-  (host networking), rtpengine's `external`/`internal` interfaces there, `MEDIA_*` in the
-  dev server's `.env`.
+- **The production media plane** is in `deploy/sip-gateway/docker-compose.yml` (FreeSWITCH
+  on host networking, bound to loopback; rtpengine's `external`/`internal` interfaces) and
+  `docs/sip.md → Deploying the gateway`; first deployed to the dev server with this merge.
 - **Trickled client ICE** is ignored (rtpengine learns the client from its checks); forwarding
   it to rtpengine would help clients behind strict NATs without TURN.
 - **Latency** of the two hops (rtpengine → FreeSWITCH → rtpengine) on one host — measure on the

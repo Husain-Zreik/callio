@@ -23,7 +23,9 @@
 # provider's NAT/floating IP (AWS/GCP/DigitalOcean etc.), use the
 # "private!public" form so rtpengine advertises the externally-reachable
 # address in SDP, not the private one — the single most common cause of
-# one-way/no audio in any SIP+RTP stack. (This note lives here, not in
+# one-way/no audio in any SIP+RTP stack. It names two logical interfaces:
+# `external` (the public address, for carriers, Meta and agents' WebRTC) and
+# `internal` (127.0.0.1, toward FreeSWITCH). (This note lives here, not in
 # rtpengine.conf itself, because that file cannot contain any comment lines
 # at all — see the rtpengine service's own comments below for why.)
 services:
@@ -66,6 +68,30 @@ services:
       # comment, regardless of position or content. Put explanatory notes in
       # this docker-compose.yml instead, never in rtpengine.conf itself.
       - ./rtpengine/rtpengine.conf:/etc/rtpengine.conf:ro
+
+  # The media server (docs/media-architecture.md): every call is a conference
+  # room here. Built from freeswitch/Dockerfile (Opus first, a G.711-only
+  # profile for carrier legs, the recording upload script). MEDIA_BIND_IP
+  # 127.0.0.1 keeps its SIP profiles (5080, 5082), RTP (40000-40999) and event
+  # socket (8021) on loopback: only rtpengine (its `internal` interface),
+  # drachtio and Callio on this host talk to it. Its RTP range must not
+  # overlap rtpengine's (30000-30500). ESL_PASSWORD (in .env) must equal
+  # Callio's FREESWITCH_ESL_PASSWORD. FreeSWITCH needs ~15 s to start.
+  freeswitch:
+    build: ./freeswitch
+    image: callio-freeswitch:latest
+    container_name: callio-freeswitch
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - SYS_NICE
+    env_file:
+      - .env
+    environment:
+      MEDIA_BIND_IP: 127.0.0.1
+    command: ["freeswitch", "--rtp-range-start", "40000", "--rtp-range-end", "40999"]
+    volumes:
+      - ./freeswitch/conference.local.conf.xml:/usr/local/freeswitch/conf/autoload_configs/conference.conf.xml:ro
 
 volumes:
   drachtio-log:
