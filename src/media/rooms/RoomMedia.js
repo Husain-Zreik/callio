@@ -400,6 +400,12 @@ class RoomMedia {
         return (this._get(callId)?.supervisors.size ?? 0) > 0;
     }
 
+    monitorState(callId) {
+        const room = this._get(callId);
+        if (!room?.supervisors.size) return null;
+        return { mode: room.mode, agentPrivate: room.agentPrivate };
+    }
+
     // ── customer audio ─────────────────────────────────────────────────────────
 
     player(callId) {

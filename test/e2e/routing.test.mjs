@@ -162,6 +162,30 @@ try {
     a1.socket.emit('call:agent:private', { callId: row3.id, active: true });
     await sleep(1000);
     check('agent-private in whisper is on', JSON.stringify(privateAfter(mark)) === '[true]', JSON.stringify(privateAfter(mark)));
+
+    // The agent's leg is rebuilt (call:reconnect): their UI gets the supervisor's
+    // mode and agent-private back.
+    mark = a1.events.length;
+    const previousPeer = a1.peer;
+    a1.peer = newPeer(880);
+    await a1.peer.pc.setLocalDescription(await a1.peer.pc.createOffer());
+    await gathered(a1.peer.pc);
+    a1.socket.emit('call:reconnect', { callId: row3.id, sdpOffer: a1.peer.pc.localDescription.sdp });
+    const rejoined = await waitFor(() => a1.events.slice(mark).find((e) => e.event === 'call:reconnected')?.payload, 10000, 'call:reconnected').catch(() => null);
+    if (rejoined) {
+        await a1.peer.pc.setRemoteDescription({ type: 'answer', sdp: rejoined.sdpAnswer });
+        for (const c of a1.pendingCandidates.splice(0)) await a1.peer.pc.addIceCandidate(c).catch(() => { });
+    }
+    previousPeer.close();
+    await sleep(1000);
+    const afterReconnect = a1.events.slice(mark);
+    const restored = {
+        announced: afterReconnect.some((e) => e.event === 'call:monitor:agent:reconnected'),
+        mode: afterReconnect.find((e) => e.event === 'call:supervisor:mode')?.payload?.mode ?? null,
+        private: afterReconnect.find((e) => e.event === 'call:agent:private:changed')?.payload?.active ?? null,
+    };
+    check('after an agent reconnect the agent gets the supervisor mode and agent-private back',
+        Boolean(rejoined) && restored.announced && restored.mode === 'whisper' && restored.private === true, JSON.stringify(restored));
     mark = a1.events.length;
     sup.socket.emit('call:monitor:mode', { callId: row3.id, mode: 'listen' });
     await sleep(1000);

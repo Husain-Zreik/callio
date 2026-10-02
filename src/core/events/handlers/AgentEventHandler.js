@@ -28,6 +28,16 @@ const log = logger('core.events.AgentEventHandler');
 
 export class AgentEventHandler {
 
+    // A supervisor on the call hears the (new) agent leg again; the agent's UI
+    // gets the supervisor's mode and agent-private back (the relay re-sends them).
+    _announceToMonitor(callId) {
+        const monitor = callMedia.monitorState(callId);
+        if (!monitor) return;
+        EventBus.emit('call:monitor:agent:reconnected', {
+            callId, supervisorMode: monitor.mode, agentPrivate: monitor.agentPrivate,
+        });
+    }
+
     async handleAgentJoined(data) {
         const { callId, userId, tenantId, sdpAnswer, socketId, deviceId } = data;
 
@@ -158,7 +168,7 @@ export class AgentEventHandler {
             // The agent and the customer are both up: into the room. A supervisor
             // already listening hears this (new) agent from now on.
             await callMedia.bridge(callRecord ?? { id: callId, tenant_id: tenantId });
-            if (callMedia.hasSupervisor(callId)) EventBus.emit('call:monitor:agent:reconnected', { callId });
+            this._announceToMonitor(callId);
 
             await callParticipants.join(callRecord ?? { id: callId, tenant_id: tenantId }, {
                 kind: ParticipantKind.AGENT, agentId: userId, deviceId: deviceId ?? null,
@@ -395,7 +405,7 @@ export class AgentEventHandler {
             // The new leg replaces the agent's old one, then joins the room.
             const sdpAnswer = await mediaLegs.answerAgent(call, userId, sdpOffer, deviceId);
             await callMedia.bridge(call);
-            if (callMedia.hasSupervisor(callId)) EventBus.emit('call:monitor:agent:reconnected', { callId });
+            this._announceToMonitor(callId);
 
             await callParticipants.agentDevice(callId, userId, deviceId ?? null);
             const agentName = await AgentRepository.getNameById(userId);

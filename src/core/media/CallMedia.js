@@ -39,6 +39,7 @@
 //   setAgentPrivate(callId, active) → isPrivate               only while whispering
 //   removeSupervisor(callId, supervisorId) → wasPrivate
 //   hasSupervisor(callId)
+//   monitorState(callId) → { mode, agentPrivate } | null   null with no supervisor
 // Customer audio (IVR, queue)
 //   player(callId) → { play(audio) → Promise, stop() }   a prompt to the customer alone;
 //                                        `audio` is from audioUrl()
@@ -60,7 +61,7 @@ const METHODS = [
     'answerCustomer', 'offerCustomer', 'customerAnswered', 'customerAudio',
     'offerAgent', 'agentAccepted', 'answerAgent', 'dropAgent', 'hasAgentOffer',
     'bridge',
-    'addSupervisor', 'setSupervisorMode', 'setAgentPrivate', 'removeSupervisor', 'hasSupervisor',
+    'addSupervisor', 'setSupervisorMode', 'setAgentPrivate', 'removeSupervisor', 'hasSupervisor', 'monitorState',
     'player', 'listenForDigits', 'startHold', 'stopHold', 'audioUrl', 'errorAudio',
     'close', 'owns', 'activeCallIds', 'start', 'stop', 'stats',
 ];
