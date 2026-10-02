@@ -620,7 +620,7 @@ class RoomMedia {
         }
         let deleted = 0;
         for (const id of await rtpLegs.list().catch(() => [])) {
-            if (await dead(id)) { await rtpLegs.delete(id); deleted++; }
+            if (await dead(id)) { await rtpLegs.delete(id, { now: true }); deleted++; }
         }
         if (killed || deleted) log.info(`Orphan sweep: ${killed} media endpoints hung up, ${deleted} rtpengine legs deleted`);
     }

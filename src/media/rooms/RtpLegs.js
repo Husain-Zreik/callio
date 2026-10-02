@@ -87,8 +87,8 @@ class RtpLegs {
         };
     }
 
-    delete(key) {
-        return this._rtp().delete(key);
+    delete(key, opts) {
+        return this._rtp().delete(key, opts);
     }
 
     list() {

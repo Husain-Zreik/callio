@@ -133,8 +133,11 @@ export class RtpEngineClient {
     }
 
     // Always on hang-up, or rtpengine keeps the ports allocated.
-    async delete(callId) {
-        return this.send({ command: 'delete', 'call-id': callId }).catch((err) => {
+    // now: skip rtpengine's delete-delay (an orphan needs no grace period for
+    // late packets; with the delay a sweep every delete-delay seconds would
+    // keep re-deleting it and it would never go).
+    async delete(callId, { now = false } = {}) {
+        return this.send({ command: 'delete', 'call-id': callId, ...(now ? { 'delete-delay': 0 } : {}) }).catch((err) => {
             log.warn({ callId, err }, 'delete failed');
             return null;
         });
