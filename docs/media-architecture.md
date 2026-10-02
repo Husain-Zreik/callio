@@ -71,6 +71,23 @@ who hears it). All call logic stays in Callio.
   `markOnCall`, `withdrawOffer` and the other guarded `UPDATE … WHERE <expected state>` stay.
 - No actor framework: the lease, the stream and rebuild-from-DB are enough.
 
+**What survives a control worker's death (spike, 2026-10-02, local media plane):**
+
+- A FreeSWITCH endpoint created through drachtio-fsmrf **survives** its worker being killed:
+  the channel and its conference membership stay (the fsmrf event socket closing doesn't hang
+  it up). Today the orphan sweep is what kills it, once the worker's boot key expires.
+- Another worker can drive the dead worker's SIP dialogs by drachtio's dialog id
+  (`stackDialogId`, through the agent's in-dialog request path): a **re-INVITE** (what
+  `ep.modify` does) and a **BYE** both get `200 OK`. Conference commands work by name and
+  channel uuid from any event-socket connection.
+- In-dialog requests **from the far end** (a carrier's BYE, FreeSWITCH hanging up) go only to
+  the drachtio connection that owned the dialog; after its death no worker sees them. A new
+  owner learns of a SIP customer's hang-up from the media (rtpengine stops counting packets) or
+  FreeSWITCH channel events, not from the BYE.
+- Not adoptable: the fsmrf `Endpoint` objects (DTMF listener, `ep.join`/`ep.play`), the
+  carrier dialog's srf object. Their replacements: keypad digits from FreeSWITCH events
+  filtered by channel uuid, `conference`/`uuid_*` commands, in-dialog requests by dialog id.
+
 ## Media port
 
 The core's only way to touch media. Room-shaped:
