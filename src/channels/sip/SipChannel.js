@@ -109,7 +109,7 @@ async function onCommand({ action, providerCallId }) {
     const leg = sipDialogs.get(providerCallId);
     if (!leg) return;
     log.debug({ providerCallId, action }, 'Routed action to the owning worker');
-    await endLeg(leg);
+    await endLeg(leg, { status: action === 'reject-busy' ? 486 : 480 });
 }
 
 async function initiate(call, sdpOffer) {
@@ -185,8 +185,9 @@ export const sipChannel = Object.freeze({
         await acceptLeg(leg, sdpAnswer);
     },
 
-    async reject(call) {
-        await runOnOwner(call, 'reject', (leg) => endLeg(leg, { status: 480 }));
+    // 480 Temporarily Unavailable; 486 Busy Here when the callee is on another call.
+    async reject(call, { busy = false } = {}) {
+        await runOnOwner(call, busy ? 'reject-busy' : 'reject', (leg) => endLeg(leg, { status: busy ? 486 : 480 }));
     },
 
     async terminate(call) {

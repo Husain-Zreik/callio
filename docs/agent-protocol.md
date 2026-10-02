@@ -136,7 +136,7 @@ acting. A socket receives:
 
 | Event | Payload |
 |---|---|
-| `call:incoming` | A call offered to this agent — see *Call payloads*. `assignmentType`: `DIRECT` (claimed for you), `QUEUED` (from a queue; with `agentId: null` it's a `RING_ALL` offer — first accept wins), `TRANSFERRED`. Carries `sdpOffer`. |
+| `call:incoming` | A call offered to this agent — see *Call payloads*. `assignmentType`: `DIRECT` (claimed for you — also every call to your personal line), `QUEUED` (from a queue; with `agentId: null` it's a `RING_ALL` offer — first accept wins), `TRANSFERRED`. Carries `sdpOffer`. |
 | `call:offer_withdrawn` | `{ callId, reason, takenBy? }` — stop ringing for this call. `reason`: `declined` (you declined, possibly on another device), `taken` (another member answered a `RING_ALL` call; `takenBy` is their agent id), `timeout` (the queue's ring timeout passed it to someone else, or a live call transferred to you wasn't accepted within `CALL_TRANSFER_TIMEOUT_SECONDS` — it went back to its queue), `overflow` (it waited too long and moved to another queue). |
 | `call:started` | Reply to `call:start` — see *Call payloads*. |
 | `call:success` | `{ callId, message, code: 'CALL_ACCEPTED' }` — to the call room once an accept went through. |

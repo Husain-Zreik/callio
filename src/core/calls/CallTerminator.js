@@ -26,11 +26,13 @@ import { callInbox } from '../../infra/cluster/CallInbox.js';
 import { deadlines } from '../../infra/cluster/Deadlines.js';
 import { callState } from '../../infra/cluster/CallState.js';
 import { EventTypes } from '../events/EventTypes.js';
-import { CallDirection } from '../constants/CallConstants.js';
+import { CallDirection, CallStatus } from '../constants/CallConstants.js';
 import { logger } from '../../infra/logging/logger.js';
 import { recordCallEnded } from '../../infra/monitoring/metrics.js';
 
 const log = logger('core.calls.CallTerminator');
+
+const LIVE_STATUSES = new Set([CallStatus.INITIATED, CallStatus.RINGING, CallStatus.IN_PROGRESS]);
 
 class CallTerminator {
     /**
@@ -41,8 +43,8 @@ class CallTerminator {
      *   failure       { errors } — end as FAILED instead of TERMINATED
      *   onlyIfStatus  end only if the call is still in this status (e.g. RINGING)
      *   provider      what to tell the provider: 'end' (reject an inbound call
-     *                 nobody answered, otherwise terminate), 'terminate', 'reject'
-     *                 or 'none'
+     *                 nobody answered, otherwise terminate), 'terminate', 'reject',
+     *                 'busy' (reject as busy: SIP 486) or 'none'
      *   media         'broadcast' (default) | 'local' — see #closeMedia
      *   source        short label for logs and call:terminated (e.g. 'queue_max_wait')
      *   log           extra lifecycle-log fields
@@ -61,7 +63,11 @@ class CallTerminator {
             : await CallRepository.terminateCallIfNotTerminated(call.id, reason, terminatedBy, null, onlyIfStatus);
 
         if (!committed) {
-            // Someone else ended it (or it moved on); only local media is ours to close.
+            // A guarded end (onlyIfStatus) lost because the call moved on — e.g.
+            // a ring timeout firing just after the answer: the call is live, so
+            // its media is left alone.
+            if (onlyIfStatus && LIVE_STATUSES.has(await CallRepository.getStatus(call.id))) return false;
+            // Someone else ended it; only local media is ours to close.
             await this.#closeMedia(call.id, 'local');
             return false;
         }
@@ -107,7 +113,9 @@ class CallTerminator {
                 ? (call.direction === CallDirection.INBOUND && !call.answered_at ? 'reject' : 'terminate')
                 : provider;
             try {
-                await (action === 'reject' ? customerChannels.reject(call) : customerChannels.terminate(call));
+                await (action === 'reject' || action === 'busy'
+                    ? customerChannels.reject(call, { busy: action === 'busy' })
+                    : customerChannels.terminate(call));
             } catch (err) {
                 log.warn({ callId, err }, `Provider ${action} failed`);
             }
@@ -123,8 +131,10 @@ class CallTerminator {
             ...lifecycleFields,
         }).catch((err) => log.error({ callId, err }, 'Lifecycle log failed'));
 
-        agentAssignmentCoordinator.emitQueueUpdate(call.tenant_id, call.queue_id ?? null)
-            .catch((err) => log.error({ callId, err }, 'Queue update failed'));
+        if (call.queue_id) {
+            agentAssignmentCoordinator.emitQueueUpdate(call.tenant_id, call.queue_id)
+                .catch((err) => log.error({ callId, err }, 'Queue update failed'));
+        }
 
         recordCallEnded(call, { reason, terminatedBy });
         log.info({ callId }, `Call ended — ${reason}/${terminatedBy}${source ? ` (${source})` : ''}`);

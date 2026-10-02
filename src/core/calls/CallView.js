@@ -53,12 +53,13 @@ export function toCallView(call, { agentName = null, deviceId = undefined } = {}
 
 // Consumer-facing view: adds the terminal outcome, durations and the
 // consumer's own metadata. Never includes SDP.
-export function toConsumerCallView(call, { tenantRef = null, agentRef = null, agentName = null } = {}) {
+export function toConsumerCallView(call, { tenantRef = null, agentRef = null, agentName = null, channelRef = null } = {}) {
     const view = toCallView(call, { agentName });
     if (!view) return null;
     return {
         ...view,
         tenantRef,
+        channelRef,
         agentRef,
         providerCallId: call.provider_call_id ?? null,
         ivrFlowId: call.ivr_flow_id ?? null,

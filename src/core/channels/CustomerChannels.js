@@ -77,9 +77,10 @@ class CustomerChannels {
         return channel.accept(call, sdpAnswer);
     }
 
-    async reject(callOrId) {
+    // opts.busy: decline as busy (the callee is on another call).
+    async reject(callOrId, opts = {}) {
         const { call, channel } = await this.forCall(callOrId);
-        return channel.reject(call);
+        return channel.reject(call, opts);
     }
 
     async terminate(callOrId) {

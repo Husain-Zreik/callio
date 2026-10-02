@@ -68,6 +68,7 @@ const ok = crypto.timingSafeEqual(Buffer.from(v1), Buffer.from(expected))
       "channel": "WHATSAPP",
       "channelId": 1,
       "channelAddress": "+96170000000",
+      "channelRef": "support-line",
       "queueId": 1,
       "direction": "INBOUND",
       "status": "TERMINATED",
@@ -125,7 +126,7 @@ Management API returns), plus the extra fields below.
 
 ## Values
 
-- `terminationReason`: `COMPLETED`, `CANCELLED`, `REJECTED`,
+- `terminationReason`: `COMPLETED`, `CANCELLED`, `REJECTED`, `BUSY`,
   `NO_ANSWER`, `TIMEOUT`, `AGENT_DISCONNECTED`, `AGENT_MEDIA_NOT_READY`,
   `SYSTEM_ERROR`, `NETWORK_ERROR`, `PROVIDER_ERROR`,
   `PROVIDER_TRIGGER_FAILED`, `SERVICE_MAINTENANCE`, `CUSTOMER_NETWORK_LOSS`,
@@ -133,6 +134,10 @@ Management API returns), plus the extra fields below.
   `COMPLETED` means the customer talked to an agent (or the IVR ended the call
   itself). A customer who hangs up before any agent answered — including while
   waiting after an IVR — is `CANCELLED` (within 5 s) or `NO_ANSWER`.
+  On a personal line (`management-api.md` → Channels) a missed call is `BUSY`
+  (the owner was on another call), `NO_ANSWER` (rang out, or no device to
+  ring) or `REJECTED` (the owner declined); `agentRef` is the owner and
+  `channelRef` the line.
   A live call transferred to an agent who doesn't accept it in time goes back
   to its queue (inbound) — it keeps ringing agents — or ends as
   `TIMEOUT` / `SYSTEM` (outbound calls, calls without a queue).

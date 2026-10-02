@@ -187,18 +187,19 @@ class AgentRepository {
     // ── Busy: claims and releases ───────────────────────────────────────────────
 
     // Claim an on-shift agent for a waiting inbound call and assign it, in one
-    // transaction.
+    // transaction. anyShift: the agent's own line rings them whatever their
+    // shift — only busy stops it.
     //   { claimed: false }                  agent not free — give up
     //   { claimed: true, assigned: false }  call taken by another worker — try the next call
     //   { claimed: true, assigned: true }   success
-    async claimAgentAndAssignCall(agentId, callId) {
+    async claimAgentAndAssignCall(agentId, callId, { anyShift = false } = {}) {
         const conn = await connection.getConnection();
         try {
             await conn.beginTransaction();
 
             const [agentResult] = await conn.execute(
                 `UPDATE agents SET busy_call_id = ?, updated_at = NOW()
-                 WHERE id = ? AND busy_call_id IS NULL AND ${ON_SHIFT} AND deleted_at IS NULL AND ${noOtherActiveCall()}`,
+                 WHERE id = ? AND busy_call_id IS NULL ${anyShift ? '' : `AND ${ON_SHIFT}`} AND deleted_at IS NULL AND ${noOtherActiveCall()}`,
                 [callId, agentId]
             );
             if (agentResult.affectedRows === 0) {

@@ -72,6 +72,7 @@ Some errors add `details` (for `in_use`: what is using the entity).
 | `403` | `consumer_suspended` | The consumer is suspended |
 | `404` | `not_found` | The entity doesn't exist or isn't yours |
 | `404` | `not_enabled` | `POST /webhooks/whatsapp` when direct Meta ingress isn't configured |
+| `403` | `line_not_owned` | `POST …/calls` from another agent's personal line — see [Outbound calls](#outbound-calls) |
 | `409` | `invalid_channel`, `channel_disabled`, `unsupported_channel`, `invalid_agent`, `agent_busy`, `invalid_customer` | `POST …/calls` — see [Outbound calls](#outbound-calls) |
 | `409` | `call_ended` | `POST /v1/calls/{id}/terminate` on a call that already ended |
 | `409` | `call_active`, `recording_in_progress` | [Deleting data](#deleting-data) before the call ended or its recording was saved |
@@ -296,8 +297,21 @@ SIP line (a DID on a carrier trunk):
 }
 ```
 
+Personal line (a DID that belongs to one agent — e.g. a product's end user):
+
+```json
+{
+  "type": "SIP",
+  "address": "+96170123456",
+  "sip_trunk_id": 1,
+  "owner_agent_ref": "user-7",
+  "ring_timeout_seconds": 30
+}
+```
+
 `channel`: `{ id, ref, type, displayName, address, providerAccountId,
-sipTrunkId, inboundQueueId, recordingEnabled, status }`.
+sipTrunkId, inboundQueueId, ownerAgentId, ringTimeoutSeconds,
+recordingEnabled, status }`.
 
 | Field | Values | Omitted |
 |---|---|---|
@@ -307,7 +321,9 @@ sipTrunkId, inboundQueueId, recordingEnabled, status }`.
 | `provider_account_id` | required for `WHATSAPP` (Meta `phone_number_id`) | `null` |
 | `sip_trunk_id` | required for `SIP` | `null` |
 | `credentials` | object; `null` clears them | kept |
-| `inbound_queue_ref` | a queue of this tenant | `null` |
+| `inbound_queue_ref` | a queue of this tenant — a shared line | `null` |
+| `owner_agent_ref` | an agent of this tenant — a personal line; not together with `inbound_queue_ref` | `null` |
+| `ring_timeout_seconds` | 5–60: how long a personal line rings its owner | `null` (30) |
 | `recording_enabled` | boolean | `false` |
 | `status` | `ACTIVE`, `DISABLED` | `ACTIVE` |
 
@@ -316,6 +332,24 @@ that number reach this channel, and outbound calls from it show it as the
 caller. `sip_trunk_id` is a trunk the Callio operator set up
 (`npm run sip:trunk`): a platform trunk or one of this consumer's own.
 Outbound customers are E.164 numbers or `sip:` URIs.
+
+**Shared and personal lines.** A line with `inbound_queue_ref` is shared:
+inbound calls go to its IVR flow (if one takes the call) or wait in the
+queue, and any agent of the tenant may call out from it. A line with
+`owner_agent_ref` is personal:
+
+- An inbound call rings the owner on all their devices (`call:incoming`,
+  `assignmentType: DIRECT`), whatever their availability — the shift only
+  matters to queues.
+- The owner on another call: the caller gets busy (SIP `486`) and the call
+  ends `BUSY`. The owner with no connected device and no push token: it ends
+  `NO_ANSWER` at once. Unanswered after `ring_timeout_seconds`: `NO_ANSWER`.
+  The owner declines: `REJECTED`. Each of these names the owner (`agentRef`)
+  and the line (`channelRef`) in `call.ended`.
+- Only the owner may place outbound calls from it (`403 line_not_owned`).
+
+A line with neither has no route: its inbound calls are rejected (`REJECTED`,
+`terminatedBy: SYSTEM`) rather than ringing anyone.
 
 Credentials are encrypted at rest and never returned. An address or
 `provider_account_id` can belong to only one channel (`400` otherwise).
@@ -562,6 +596,7 @@ to check.
   (`E164`, `WHATSAPP_USER`, `SIP_URI`) is inferred when omitted;
   `customer.name` ≤255 chars; `external_ref` ≤191 chars.
 - An unknown `channel_ref` is `400`; an unknown `agent_ref` is `404`.
+- `403 line_not_owned`: the channel is another agent's personal line.
 - `409` codes: `invalid_channel` / `invalid_agent` (not this tenant's),
   `channel_disabled` (channel not `ACTIVE`), `unsupported_channel` (the
   channel type can't place outbound calls), `agent_busy` (the agent already
@@ -571,8 +606,8 @@ to check.
 Give `callId` to that agent's client, which sends
 `call:start { callId, sdpOffer }` over its socket; Callio then dials the
 customer. An intent not started within 2 minutes ends as `CANCELLED`
-(`terminatedBy: SYSTEM`). When an outbound call ends, the agent goes
-`OFFLINE`, not `AVAILABLE`.
+(`terminatedBy: SYSTEM`). The agent is `ON_CALL` during the call and back
+to their shift (unchanged) when it ends.
 
 ## Events
 

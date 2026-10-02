@@ -170,7 +170,7 @@ class IvrTransferHandler {
             return agent.availability === AgentAvailability.ON_CALL ? 'busy' : 'offline';
         }
         const queue = targetId ? await QueueRepository.findForTenant(targetId, tenantId) : null;
-        const stats = await queueRouter.availabilityStats(queue, tenantId);
+        const stats = await queueRouter.availabilityStats(queue);
         if (stats.available > 0) return 'available';
         return stats.on_call > 0 ? 'busy' : 'offline';
     }

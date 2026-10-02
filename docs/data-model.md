@@ -199,7 +199,9 @@ Created with `npm run sip:trunk`.
 | `provider_account_id` | WhatsApp: the Meta `phone_number_id` inbound webhooks resolve by. |
 | `sip_trunk_id` | SIP: the trunk it arrives on / dials out through. |
 | `credentials` | Encrypted JSON (WhatsApp: `{ access_token }`). |
-| `inbound_queue_id` | Where inbound calls wait when no IVR flow takes them. |
+| `inbound_queue_id` | A shared line: where inbound calls wait when no IVR flow takes them. |
+| `owner_agent_id` | A personal line: the agent its inbound calls ring and the only one who may call out from it. Never together with `inbound_queue_id` (API-enforced). FK, `SET NULL` on delete. |
+| `ring_timeout_seconds` | Personal line: how long it rings the owner before `NO_ANSWER` (NULL = 30). |
 | `recording_enabled`, `display_name`, `status` (`ACTIVE` / `DISABLED`) | |
 
 Unique: (`tenant_id`, `external_ref`), (`type`, `address`),

@@ -32,6 +32,7 @@ const queueView = (q) => q && ({
 const channelView = (c) => c && ({
     id: c.id, ref: c.external_ref, type: c.type, displayName: c.display_name, address: c.address,
     providerAccountId: c.provider_account_id, sipTrunkId: c.sip_trunk_id ?? null, inboundQueueId: c.inbound_queue_id,
+    ownerAgentId: c.owner_agent_id ?? null, ringTimeoutSeconds: c.ring_timeout_seconds ?? null,
     recordingEnabled: Boolean(c.recording_enabled), status: c.status,
 });
 const tenantView = (t) => t && ({ id: t.id, ref: t.external_ref, name: t.name, status: t.status, settings: t.settings });
@@ -174,7 +175,7 @@ export default async function managementRoutes(fastify) {
         const queue = await QueueRepository.upsert(tenant.id, ref(request.params.queueRef, 'queue'), {
             name: requireString(body, 'name'),
             strategy: oneOf(body, 'strategy', ['RING_ALL', 'ROUND_ROBIN', 'PRIORITY'], { optional: true, fallback: 'ROUND_ROBIN' }),
-            ring_timeout_seconds: optionalInt(body, 'ring_timeout_seconds', { min: 5, max: 600 }),
+            ring_timeout_seconds: optionalInt(body, 'ring_timeout_seconds', { min: 5, max: 60 }),
             max_active_calls: optionalInt(body, 'max_active_calls', { min: 1, max: 10000 }),
             max_wait_seconds: optionalInt(body, 'max_wait_seconds', { min: 5, max: 86400 }),
             overflow_queue_id: overflow?.id ?? null,
@@ -221,6 +222,14 @@ export default async function managementRoutes(fastify) {
         const body = request.body ?? {};
         const type = oneOf(body, 'type', Object.values(Channel));
         const inboundQueue = await resolveQueueRef(tenant, body.inbound_queue_ref, 'inbound_queue_ref');
+        // A personal line: it rings its owner, and only they call out from it.
+        let owner = null;
+        if (body.owner_agent_ref != null) {
+            owner = await AgentRepository.findByExternalRef(tenant.id, ref(body.owner_agent_ref, 'owner_agent_ref'));
+            if (!owner) throw badRequest('owner_agent_ref does not match an agent');
+            if (inboundQueue) throw badRequest('A line has an owner or an inbound queue, not both');
+        }
+        const ringTimeout = optionalInt(body, 'ring_timeout_seconds', { min: 5, max: 60 });
         const credentials = body.credentials === undefined ? undefined : optionalObject(body, 'credentials');
         // Each channel adapter validates its own provider fields.
         const configError = customerChannels.has(type) ? customerChannels.get(type).validateChannelConfig?.(body) : null;
@@ -241,6 +250,8 @@ export default async function managementRoutes(fastify) {
                 sip_trunk_id: sipTrunkId,
                 credentials,
                 inbound_queue_id: inboundQueue?.id ?? null,
+                owner_agent_id: owner?.id ?? null,
+                ring_timeout_seconds: ringTimeout ?? null,
                 recording_enabled: Boolean(body.recording_enabled),
                 status: oneOf(body, 'status', ['ACTIVE', 'DISABLED'], { optional: true, fallback: 'ACTIVE' }),
             });

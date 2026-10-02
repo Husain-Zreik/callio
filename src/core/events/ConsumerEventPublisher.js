@@ -6,6 +6,7 @@
 import EventBus from '../EventBus.js';
 import CallRepository from '../../persistence/CallRepository.js';
 import AgentRepository from '../../persistence/AgentRepository.js';
+import ChannelRepository from '../../persistence/ChannelRepository.js';
 import TenantRepository from '../../persistence/TenantRepository.js';
 import OutboxRepository from '../../persistence/OutboxRepository.js';
 import ConsumerRepository from '../../persistence/ConsumerRepository.js';
@@ -94,6 +95,7 @@ class ConsumerEventPublisher {
             if (!await subscribed(ctx.consumerId, eventType)) return null;
 
             const agent = call.agent_id ? await AgentRepository.findById(call.agent_id) : null;
+            const channelRef = (await ChannelRepository.getRefsByIds([call.channel_id])).get(String(call.channel_id)) ?? null;
             const payload = {
                 event_type: eventType,
                 api_version: API_VERSION,
@@ -104,6 +106,7 @@ class ConsumerEventPublisher {
                         tenantRef: ctx.tenantRef,
                         agentRef: agent?.external_ref ?? null,
                         agentName: agent?.name ?? null,
+                        channelRef,
                     }),
                     ...data,
                 },

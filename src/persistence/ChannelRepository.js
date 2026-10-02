@@ -1,10 +1,12 @@
 // src/persistence/ChannelRepository.js
 // Customer-facing lines (WhatsApp numbers, SIP DIDs) and their credentials.
+// A line is shared (inbound_queue_id: routed by its queue / IVR) or personal
+// (owner_agent_id: it rings that agent, and only they call out from it).
 import connection from '../../config/dbConnection.js';
 import { decryptJson, encryptJson } from '../infra/crypto/secretBox.js';
 
 const CHANNEL_COLUMNS = `id, tenant_id, external_ref, type, display_name, address, provider_account_id,
-    sip_trunk_id, inbound_queue_id, recording_enabled, status`;
+    sip_trunk_id, inbound_queue_id, owner_agent_id, ring_timeout_seconds, recording_enabled, status`;
 
 class ChannelRepository {
     async findById(channelId) {
@@ -30,6 +32,17 @@ class ChannelRepository {
             [tenantId, externalRef]
         );
         return rows[0] ?? null;
+    }
+
+    // id → external_ref, for call views.
+    async getRefsByIds(channelIds) {
+        const ids = [...new Set((channelIds || []).filter((id) => id != null))];
+        if (!ids.length) return new Map();
+        const [rows] = await connection.execute(
+            `SELECT id, external_ref FROM channels WHERE id IN (${ids.map(() => '?').join(',')})`,
+            ids
+        );
+        return new Map(rows.map((r) => [String(r.id), r.external_ref]));
     }
 
     async listForTenant(tenantId) {
@@ -79,23 +92,25 @@ class ChannelRepository {
     async upsert(tenantId, externalRef, fields) {
         const {
             type, display_name = null, address, provider_account_id = null, sip_trunk_id = null,
-            credentials, inbound_queue_id = null, recording_enabled = false, status = 'ACTIVE',
+            credentials, inbound_queue_id = null, owner_agent_id = null, ring_timeout_seconds = null,
+            recording_enabled = false, status = 'ACTIVE',
         } = fields;
         // credentials: undefined = keep existing, null = clear, object = replace.
         const encrypted = credentials === undefined ? undefined : encryptJson(credentials);
         await connection.execute(
             `INSERT INTO channels (tenant_id, external_ref, type, display_name, address, provider_account_id,
-                                   sip_trunk_id, credentials, inbound_queue_id, recording_enabled, status,
-                                   created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+                                   sip_trunk_id, credentials, inbound_queue_id, owner_agent_id, ring_timeout_seconds,
+                                   recording_enabled, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
              ON DUPLICATE KEY UPDATE
                  type = VALUES(type), display_name = VALUES(display_name), address = VALUES(address),
                  provider_account_id = VALUES(provider_account_id), sip_trunk_id = VALUES(sip_trunk_id),
                  credentials = ${encrypted === undefined ? 'credentials' : 'VALUES(credentials)'},
-                 inbound_queue_id = VALUES(inbound_queue_id), recording_enabled = VALUES(recording_enabled),
+                 inbound_queue_id = VALUES(inbound_queue_id), owner_agent_id = VALUES(owner_agent_id),
+                 ring_timeout_seconds = VALUES(ring_timeout_seconds), recording_enabled = VALUES(recording_enabled),
                  status = VALUES(status), updated_at = NOW()`,
             [tenantId, externalRef, type, display_name, address, provider_account_id, sip_trunk_id,
-                encrypted ?? null, inbound_queue_id, recording_enabled ? 1 : 0, status]
+                encrypted ?? null, inbound_queue_id, owner_agent_id, ring_timeout_seconds, recording_enabled ? 1 : 0, status]
         );
         return this.findByExternalRef(tenantId, externalRef);
     }

@@ -61,9 +61,13 @@ async function ownedCall(request) {
 async function views(calls, tenant) {
     const agentIds = [...new Set(calls.map((c) => c.agent_id).filter(Boolean))];
     const agents = new Map((await AgentRepository.findByIds(agentIds)).map((a) => [String(a.id), a]));
+    const channelRefs = await ChannelRepository.getRefsByIds(calls.map((c) => c.channel_id));
     return calls.map((c) => {
         const agent = c.agent_id ? agents.get(String(c.agent_id)) : null;
-        return toConsumerCallView(c, { tenantRef: tenant.external_ref, agentRef: agent?.external_ref ?? null, agentName: agent?.name ?? null });
+        return toConsumerCallView(c, {
+            tenantRef: tenant.external_ref, agentRef: agent?.external_ref ?? null, agentName: agent?.name ?? null,
+            channelRef: channelRefs.get(String(c.channel_id)) ?? null,
+        });
     });
 }
 
@@ -93,7 +97,7 @@ export default async function callRoutes(fastify) {
             const [view] = await views([call], tenant);
             return reply.code(201).send({ call: view });
         } catch (err) {
-            if (err instanceof OutboundCallError) throw new HttpError(409, err.code, err.message);
+            if (err instanceof OutboundCallError) throw new HttpError(err.code === 'line_not_owned' ? 403 : 409, err.code, err.message);
             throw err;
         }
     });

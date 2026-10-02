@@ -15,11 +15,11 @@ class CallAccess {
         return call;
     }
 
-    // An unassigned call is offered to the members of a RING_ALL queue (or, with
-    // no queue, to every agent of the tenant).
+    // An unassigned call is offered to the members of its RING_ALL queue. A call
+    // without a queue is only ever offered to the agent it is assigned to.
     async #isOffered(call, agentId) {
         if (call.agent_id != null) return false;
-        if (!call.queue_id) return true;
+        if (!call.queue_id) return false;
         const queue = await QueueRepository.findById(call.queue_id);
         if (!queue || queue.strategy !== QueueStrategy.RING_ALL) return false;
         return QueueRepository.isMember(queue.id, agentId);

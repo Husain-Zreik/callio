@@ -202,16 +202,24 @@ Every worker runs these background loops:
    (`SipIngress`) reaches `ChannelIngress.inboundCall`, which claims ownership.
 2. **Pre-checks.** A tombstone means the end came first: record a missed call. An active call
    from the same customer is a duplicate: record CANCELLED. Otherwise run `CustomerLookup`.
-3. **Route.** `QueueRouter.selectIvrFlow` runs first. Callio writes the `calls` row and the
-   CUSTOMER `call_connections` row (the customer's offer) and publishes `call.created`. With no
-   IVR, `claimForNewCall` claims an agent for the new row and assigns it in one transaction:
-   ROUND_ROBIN or PRIORITY only, and never ahead of older waiting calls.
+3. **Route.** `InboundRouter` decides from the line: a personal line (`owner_agent_id`) goes to
+   its owner; a shared line to its IVR flow (`QueueRouter.selectIvrFlow`) or its active queue;
+   a line with neither has no route. Callio writes the `calls` row and the CUSTOMER
+   `call_connections` row (the customer's offer) and publishes `call.created`. Then:
+   - queue: `claimForNewCall` claims a member for the new row and assigns it in one
+     transaction (ROUND_ROBIN or PRIORITY only, never ahead of older waiting calls);
+   - owner: the same guarded claim, whatever the owner's shift. Busy → the call ends `BUSY`
+     (SIP `486`); no socket and no push token → `NO_ANSWER` at once. Otherwise it is offered
+     `DIRECT` like a claimed queue call, with a `line-ring` deadline (`Deadlines`, the line's
+     `ring_timeout_seconds`) that ends it `NO_ANSWER` if still ringing;
+   - no route: the call ends `REJECTED` (`SYSTEM`).
 4. **IVR branch.** `mediaLegs.answerCustomer(sdpProfile)` → `channel.accept` →
    `markIvrAutoAccepted`. Supervisors get `call:incoming:supervisor`. The IVR session starts and
    plays once the caller's audio arrives ([IVR](#ivr)).
 5. **Queue branch.** This worker subscribes to the call's events and `mediaLegs.offerAgent`
    creates the agent leg.
-   `call:incoming` and a push go to the claimed agent, or to every available member (RING_ALL).
+   `call:incoming` and a push go to the claimed agent (or the line's owner), or to every
+   available member (RING_ALL).
    If nobody can take it yet, Callio emits `call:waiting` and calls
    `assignOldestUnassignedCall`.
 6. **Accept.** `call:accept` (with the agent's SDP answer) passes `CallAccess`, and the socket
@@ -299,10 +307,11 @@ timing. These code paths end calls:
 
 All in `src/core/routing/`.
 
+- **`InboundRouter`** decides a new inbound call's first destination from its line: owner,
+  IVR, queue or none. It looks the owner up by id and never scans a tenant.
 - **`QueueRouter`** is the only reader of `queues.strategy`. It also enforces `max_active_calls`
   and selects IVR flows.
-  - `RING_ALL` offers to every available member, and the first accept wins. A call with no
-    queue rings all of the tenant's agents.
+  - `RING_ALL` offers to every available member, and the first accept wins.
   - `ROUND_ROBIN` picks the longest-available member.
   - `PRIORITY` picks the lowest `priority`, then the lowest id.
 - **`CallAgentAssignmentService`** holds a per-queue Redis lock (5 s), so two workers never claim

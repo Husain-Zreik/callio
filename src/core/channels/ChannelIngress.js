@@ -34,6 +34,8 @@ import { redisCleanupService } from '../../infra/cluster/RedisCleanupService.js'
 import { redisBaseService } from '../../infra/redis/RedisBaseService.js';
 import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinator.js';
 import { queueRouter } from '../routing/QueueRouter.js';
+import { inboundRouter, RouteKind } from '../routing/InboundRouter.js';
+import { deadlines } from '../../infra/cluster/Deadlines.js';
 import { callLifecycleLogger } from '../calls/CallLifecycleLogger.js';
 import { customerLookup } from '../calls/CustomerLookup.js';
 import { consumerEventPublisher } from '../events/ConsumerEventPublisher.js';
@@ -57,6 +59,10 @@ import {
 } from '../constants/CallConstants.js';
 import { logger } from '../../infra/logging/logger.js';
 
+// A personal line rings its owner until this stored deadline (it outlives the
+// worker that set it), then the call ends NO_ANSWER.
+const LINE_RING = 'line-ring';
+
 const log = logger('core.channels.ChannelIngress');
 
 // Tombstone written when the provider's end-of-call arrives before its
@@ -73,6 +79,10 @@ const tombstoneKey = (channel, providerCallId) => `${TERMINATE_TOMBSTONE_PREFIX}
 const toDate = (value) => (value ? new Date(value) : null);
 
 class ChannelIngress {
+    constructor() {
+        deadlines.on(LINE_RING, (callId) => this._lineRingExpired(callId));
+    }
+
 
     // A call row may only be touched by events for its own line.
     _belongsTo(call, channel) {
@@ -192,11 +202,11 @@ class ChannelIngress {
                 customerName: baseRow.customer_name,
             });
 
-            const queue = await queueRouter.getQueue(channel.inbound_queue_id);
-
-            // IVR is an overlay on the queue: a flow whose trigger holds takes the
-            // call first; it reaches the queue when the flow transfers it.
-            const ivrFlowId = lookup.reject ? null : await queueRouter.selectIvrFlow(channel, queue);
+            // Where the call goes first: its line's owner, the IVR, the queue, or
+            // nowhere (InboundRouter).
+            const route = lookup.reject ? { kind: RouteKind.NONE } : await inboundRouter.route(channel);
+            const queue = route.queue ?? null;
+            const ivrFlowId = route.ivrFlowId ?? null;
 
             const callId = await CallRepository.create({
                 ...baseRow,
@@ -208,14 +218,28 @@ class ChannelIngress {
                 // could see this call as assignable before IVR claims it.
                 state: ivrFlowId ? 'IVR' : null,
                 // An IVR call enters the queue when the flow transfers it.
-                queued_at: ivrFlowId ? null : ringingAt,
+                queued_at: route.kind === RouteKind.QUEUE ? ringingAt : null,
                 metadata,
             });
             consumerEventPublisher.publishForCall(callId, 'call.created');
 
-            // A free member takes the call at once (guarded: claims the agent
-            // for this call and assigns it in one transaction).
-            const assignedAgent = (!lookup.reject && !ivrFlowId) ? await queueRouter.claimForNewCall(queue, callId) : null;
+            // A free member, or the line's owner whatever their shift, takes the
+            // call at once (guarded: claims the agent for this call and assigns it
+            // in one transaction). An owner who can't be reached or is on another
+            // call misses it (lineMiss).
+            let assignedAgent = null;
+            let lineMiss = null;
+            if (route.kind === RouteKind.QUEUE) {
+                assignedAgent = await queueRouter.claimForNewCall(queue, callId);
+            } else if (route.kind === RouteKind.OWNER) {
+                if (!await inboundRouter.reachable(route.owner.id)) {
+                    lineMiss = 'unreachable';
+                } else if ((await AgentRepository.claimAgentAndAssignCall(route.owner.id, callId, { anyShift: true })).assigned) {
+                    assignedAgent = route.owner;
+                } else {
+                    lineMiss = 'busy';
+                }
+            }
             const userId = assignedAgent?.id ?? null;
 
             await CallConnectionRepository.create({
@@ -255,12 +279,22 @@ class ChannelIngress {
                 return;
             }
 
+            if (route.kind === RouteKind.NONE) {
+                await this._rejectUnrouted(callId, channel);
+                return;
+            }
+            if (lineMiss) {
+                await this._lineMissed(callId, route.owner, lineMiss);
+                return;
+            }
+
             await callParticipants.join({ id: callId, tenant_id: tenantId }, { kind: ParticipantKind.CUSTOMER, at: ringingAt });
 
             if (userId) {
                 const agentSocketCount = await presenceService.getUserSocketCount(userId);
                 await callLifecycleLogger.logAssigned(callId, tenantId, userId, {
                     assignment_type: AssignmentType.DIRECT,
+                    personal_line: route.kind === RouteKind.OWNER,
                     queue_id: queue?.id ?? null,
                     queue_strategy: queue?.strategy ?? null,
                     agent_connected: agentSocketCount > 0,
@@ -336,8 +370,9 @@ class ChannelIngress {
                     availability: AgentAvailability.ON_CALL,
                     updatedAt: new Date().toISOString(),
                 });
+                if (route.kind === RouteKind.OWNER) await deadlines.set(LINE_RING, callId, inboundRouter.ringTimeoutMs(channel));
             } else if (queueRouter.isRingAll(queue)) {
-                const offered = await queueRouter.ringAllTargets(queue, tenantId);
+                const offered = await queueRouter.ringAllTargets(queue);
                 EventBus.emit('call:incoming', IncomingCallPayload.fromCall(callRow, {
                     agentId: null,
                     offeredAgentIds: offered.map((a) => a.id),
@@ -353,10 +388,46 @@ class ChannelIngress {
                 );
             }
 
-            await agentAssignmentCoordinator.emitQueueUpdate(tenantId, queue?.id ?? null);
+            if (queue) await agentAssignmentCoordinator.emitQueueUpdate(tenantId, queue.id);
         } catch (error) {
             log.error({ providerCallId, err: error }, 'Handling the inbound call failed');
         }
+    }
+
+    // A shared line with no active queue and no IVR flow taking the call:
+    // nobody to ring, so it is declined rather than left ringing.
+    async _rejectUnrouted(callId, channel) {
+        log.warn({ callId, channelId: channel.id }, 'No route for the call (no owner, no active queue, no IVR) — rejecting');
+        await callTerminator.end(callId, {
+            reason: TerminationReason.REJECTED,
+            terminatedBy: TerminatedBy.SYSTEM,
+            provider: 'reject',
+            source: 'no_route',
+        });
+    }
+
+    // A personal line's owner missed the call before it rang: on another call
+    // (the caller gets busy) or with no socket and no device to push to (no
+    // answer at once). The call names the owner, so the consumer can show a
+    // missed call.
+    async _lineMissed(callId, owner, why) {
+        await CallRepository.assignCallToAgentIfUnassigned(callId, owner.id);
+        log.info({ callId, agentId: owner.id }, why === 'busy' ? 'Line owner busy' : 'Line owner unreachable');
+        await callTerminator.end(callId, why === 'busy'
+            ? { reason: TerminationReason.BUSY, terminatedBy: TerminatedBy.SYSTEM, provider: 'busy', source: 'line_busy' }
+            : { reason: TerminationReason.NO_ANSWER, terminatedBy: TerminatedBy.SYSTEM, provider: 'reject', source: 'line_unreachable' });
+    }
+
+    // A personal line rang out: the owner didn't answer in time.
+    async _lineRingExpired(callId) {
+        const ended = await callTerminator.end(callId, {
+            reason: TerminationReason.NO_ANSWER,
+            terminatedBy: TerminatedBy.SYSTEM,
+            onlyIfStatus: CallStatus.RINGING,
+            provider: 'end',
+            source: 'line_ring_timeout',
+        });
+        if (ended) log.info({ callId }, 'Line rang out');
     }
 
     // The consumer's lookup hook asked to reject this call.

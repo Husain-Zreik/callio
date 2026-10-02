@@ -85,6 +85,8 @@ export const TerminationReason = Object.freeze({
     //   OUTBOUND → business cancelled before the client answered
     CANCELLED: 'CANCELLED',
     REJECTED: 'REJECTED',
+    // A personal line's owner was on another call: the caller got busy.
+    BUSY: 'BUSY',
     AGENT_DISCONNECTED: 'AGENT_DISCONNECTED',
     AGENT_MEDIA_NOT_READY: 'AGENT_MEDIA_NOT_READY',
     SYSTEM_ERROR: 'SYSTEM_ERROR',

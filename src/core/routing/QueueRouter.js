@@ -23,7 +23,7 @@ class QueueRouter {
     }
 
     isRingAll(queue) {
-        return !queue || queue.strategy === QueueStrategy.RING_ALL;
+        return queue?.strategy === QueueStrategy.RING_ALL;
     }
 
     // Picks and claims one member with claimFn, per the queue's strategy.
@@ -41,7 +41,7 @@ class QueueRouter {
      * them) — the call then waits and the drain offers it.
      */
     async claimForNewCall(queue, callId) {
-        if (this.isRingAll(queue)) return null;
+        if (!queue || this.isRingAll(queue)) return null;
         try {
             if (await CallRepository.hasUnassignedCalls(queue.id, callId)) return null;
         } catch (err) {
@@ -81,10 +81,8 @@ class QueueRouter {
     }
 
     // RING_ALL: every available member is offered the call at once.
-    async ringAllTargets(queue, tenantId) {
-        const members = queue
-            ? await this.getMembers(queue)
-            : (await AgentRepository.getTenantAgents(tenantId)).filter((a) => a.role === 'AGENT');
+    async ringAllTargets(queue) {
+        const members = await this.getMembers(queue);
         return members.filter((a) => a.availability === AgentAvailability.AVAILABLE);
     }
 
@@ -95,8 +93,9 @@ class QueueRouter {
         return active >= queue.max_active_calls;
     }
 
-    async availabilityStats(queue, tenantId) {
-        if (!queue) return AgentRepository.getTenantAvailabilityStats(tenantId);
+    // A line without a queue has no agents to count.
+    async availabilityStats(queue) {
+        if (!queue) return { total: 0, available: 0, on_call: 0, offline: 0 };
         const memberIds = await QueueRepository.getMemberIds(queue.id);
         return AgentRepository.getAvailabilityStatsForAgentIds(memberIds);
     }
@@ -105,14 +104,15 @@ class QueueRouter {
      * The IVR flow that takes an inbound call on this channel, or null.
      * Channel-specific flows are evaluated before tenant-wide ones; within
      * each scope, the first flow whose trigger condition holds wins.
-     * Conditions are evaluated against the channel's inbound queue.
+     * Conditions are evaluated against the channel's inbound queue (without
+     * one there are no agents: only ALWAYS and ALL_AGENTS_UNAVAILABLE hold).
      */
     async selectIvrFlow(channel, queue) {
         const flows = await IvrRepository.findCandidateFlows(channel.tenant_id, channel.id);
         if (!flows.length) return null;
 
         let stats = null;
-        const getStats = async () => (stats ??= await this.availabilityStats(queue, channel.tenant_id));
+        const getStats = async () => (stats ??= await this.availabilityStats(queue));
 
         const holds = async (condition) => {
             switch ((condition ?? 'ALWAYS').toUpperCase()) {

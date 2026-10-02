@@ -1,6 +1,6 @@
 # Personal lines and the direct media path (plan)
 
-**Status: A1 done (2026-10-02); A2 next.** Step 5 of [media-architecture.md](media-architecture.md)
+**Status: A1, A2 and A6 done (2026-10-02); A3 next.** Step 5 of [media-architecture.md](media-architecture.md)
 (failover-able call ownership) is done (2026-10-02), so this can start. Update this doc as steps
 land; the contract changes go into the API, event and protocol docs in the same change.
 
@@ -126,7 +126,8 @@ through the SDK exactly as a contact-center agent does.
 - `channels.owner_agent_id` (nullable, FK agents, indexed). Empty: a **shared line** (queue /
   IVR, today's behaviour). Set: a **personal line** of that agent. A line has an owner or an
   `inbound_queue_id`, never both (API validation). Personal-line settings:
-  `channels.ring_timeout_seconds` (default 30). The API takes `owner_agent_ref`.
+  `channels.ring_timeout_seconds` (default 30, at most 60: the stuck-call cleanup ends any call
+  still ringing after a minute). The API takes `owner_agent_ref`.
 - `core/routing/InboundRouter` decides a new call's first destination, so `ChannelIngress` stops
   mixing routing into intake: **owner**, **IVR**, **queue**, or **no route**. `QueueRouter` stays
   the only interpreter of `queues.strategy`.
@@ -142,8 +143,8 @@ through the SDK exactly as a contact-center agent does.
 - **Shared line without an active queue and without IVR → no route**: rejected, `warn` logged.
   The "ring every agent of the tenant" fallback is removed, and `CallAccess` lets only the
   offered or assigned agent act on a call without a queue.
-- IVR triggers count a queue's members with a counting query; without a queue they no longer load
-  every agent of the tenant.
+- IVR triggers count a queue's members; without a queue there are no agents to count (only
+  `ALWAYS` and `ALL_AGENTS_UNAVAILABLE` hold), instead of loading every agent of the tenant.
 - **Outbound:** from a personal line only its owner may call (`403 line_not_owned` on
   `POST /v1/tenants/{t}/calls`); shared lines as today.
 - Auto-offline only changes `availability`, so it only affects queues, and only counts misses on

@@ -52,6 +52,11 @@ class PushTokenRepository {
         return rows;
     }
 
+    async hasAny(agentId) {
+        const [rows] = await connection.execute('SELECT 1 FROM agent_push_tokens WHERE agent_id = ? LIMIT 1', [agentId]);
+        return rows.length > 0;
+    }
+
     // Called when a provider reports a token as invalid/unregistered.
     async removeToken(provider, token) {
         const [result] = await connection.execute(

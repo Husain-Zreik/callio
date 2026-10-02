@@ -48,6 +48,9 @@ export class InitiationEventHandler {
             throw new OutboundCallError('unsupported_channel', `Outbound calls are not supported on ${channel.type} channels yet`);
         }
         if (String(agent.tenant_id) !== String(tenantId)) throw new OutboundCallError('invalid_agent', 'Agent does not belong to this tenant');
+        if (channel.owner_agent_id != null && String(channel.owner_agent_id) !== String(agent.id)) {
+            throw new OutboundCallError('line_not_owned', 'This line belongs to another agent');
+        }
         if (await CallRepository.hasAgentActiveCall(agent.id, 0)) {
             throw new OutboundCallError('agent_busy', 'Agent already has an active call');
         }

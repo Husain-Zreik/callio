@@ -49,6 +49,15 @@ class AgentAssignmentCoordinator {
         }
     }
 
+    // Fresh snapshots for the queues this agent is a member of (their status
+    // changed); nothing for an agent in no queue.
+    async emitAgentQueues(tenantId, agentId) {
+        if (!tenantId || !agentId) return;
+        for (const queueId of await QueueRepository.getQueueIdsForAgent(agentId)) {
+            await this.emitQueueUpdate(tenantId, queueId);
+        }
+    }
+
     async getQueueSnapshots(tenantId) {
         const queues = await QueueRepository.listForTenant(tenantId);
         return Promise.all(queues.map(async (queue) =>
@@ -72,18 +81,22 @@ class AgentAssignmentCoordinator {
         if (!agentId || !callId) return false;
         const released = await AgentRepository.releaseFromCall(agentId, callId);
         if (offline) await AgentRepository.updateAgentAvailability(agentId, AgentAvailability.OFFLINE);
-        if (released || offline) await this._broadcastCurrent(agentId);
+        if (released || offline) {
+            const agent = await this._broadcastCurrent(agentId);
+            if (agent) await this.emitAgentQueues(agent.tenantId, agentId).catch((err) => log.error({ agentId, err }, 'Queue update failed'));
+        }
         return released;
     }
 
-    // An agent's reported status, read back and broadcast. Centralized so the
-    // "tell the agent's own socket" broadcast can't be forgotten.
+    // An agent's reported status, read back and broadcast ({ tenantId,
+    // availability }). Centralized so the "tell the agent's own socket"
+    // broadcast can't be forgotten.
     async _broadcastCurrent(agentId, extra = {}) {
         try {
             const agent = await AgentRepository.findById(agentId);
             if (!agent) return null;
             this._broadcast(agent.tenant_id, agentId, agent.availability, extra);
-            return agent.availability;
+            return { tenantId: agent.tenant_id, availability: agent.availability };
         } catch (err) {
             log.error({ agentId, err }, 'Failed to broadcast availability');
             return null;
@@ -383,7 +396,7 @@ class AgentAssignmentCoordinator {
     async #offerToAll(queue, callId) {
         const call = await CallRepository.findById(callId);
         if (!call) return;
-        const offered = (await offerHistory.eligible(callId, await queueRouter.ringAllTargets(queue, call.tenant_id)));
+        const offered = (await offerHistory.eligible(callId, await queueRouter.ringAllTargets(queue)));
         if (!offered.length) {
             EventBus.emit('call:waiting', { callId, tenantId: call.tenant_id, queueId: queue.id });
             return;
