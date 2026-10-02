@@ -345,6 +345,7 @@ that aren't about one call. `message` is human-readable English text.
 | `CALL_ALREADY_ENDED` | Accepting a call that ended, or while you are on another active call |
 | `AGENT_QUEUE_SYNC_FAILED`, `FAILED_FETCH_ACTIVE`, `MISSING_TENANT_CONTEXT` | `call:agent-queue:sync` / `calls:sync` failed |
 | `BOARD_REQUEST_FAILED` | a `board:*` request was not allowed or failed — see [Board](#board) |
+| `MONITOR_MODE_NOT_ALLOWED` | the tenant's `settings.monitoring.modes` doesn't allow this mode (`call:monitor:mode`), or doesn't allow `listen`, so no monitoring at all (`call:monitor`) |
 | `AGENT_AVAILABILITY_SYNC_FAILED` | `agent:availability:set` was not allowed or failed |
 | `EVENT_HANDLER_FAILED` | The core failed to carry out an action that passed the checks above — e.g. a transfer whose target isn't available, or a reconnect with no live call |
 | `null` or a provider's own code (e.g. a number) | The provider reported the call failed |

@@ -42,7 +42,7 @@ const tenantBefore = (await api('GET', '/v1/tenants/demo')).body.tenant;
 
 try {
     // A product whose agents are its end users: no team view.
-    await api('PUT', '/v1/tenants/demo', { name: tenantBefore.name, settings: { ...(tenantBefore.settings ?? {}), team_view: false } });
+    await api('PUT', '/v1/tenants/demo', { name: tenantBefore.name, settings: { ...(tenantBefore.settings ?? {}), team_view: false, monitoring: { modes: ['listen'] } } });
     const trunkId = (await q("SELECT id FROM sip_trunks WHERE name = 'dev-trunk'"))[0].id;
     await api('PUT', '/v1/tenants/demo/agents/line-user-1', { name: 'Line User 1' });
     await api('PUT', '/v1/tenants/demo/agents/line-user-2', { name: 'Line User 2' });
@@ -101,6 +101,31 @@ try {
     const otherLine = await ask(sup, 'board:calls', { channelIds: [shared.body.channel.id] });
     check('board:calls pages the live calls of a line', page?.calls?.some((c) => String(c.callId) === String(row1.id)) && otherLine?.calls?.length === 0,
         `line=${page?.calls?.map((c) => c.callId)} other=${otherLine?.calls?.length}`);
+    // A listen-only tenant: the supervisor listens; whisper and barge are refused.
+    sup.peer = newPeer([660], { audioLines: 2 });
+    await sup.peer.pc.setLocalDescription(await sup.peer.pc.createOffer());
+    await gathered(sup.peer.pc);
+    const monitorStarted = new Promise((resolve) => sup.socket.once('call:monitor:started', resolve));
+    sup.socket.emit('call:monitor', { callId: row1.id, sdpOffer: sup.peer.pc.localDescription.sdp });
+    const monitoring = await Promise.race([monitorStarted, sleep(8000).then(() => null)]);
+    if (monitoring) {
+        await sup.peer.pc.setRemoteDescription({ type: 'answer', sdp: monitoring.sdpAnswer });
+        for (const c of sup.pendingCandidates.splice(0)) await sup.peer.pc.addIceCandidate(c).catch(() => { });
+    }
+    const supEar = monitoring ? await Promise.race([sup.peer.received, sleep(8000).then(() => null)]) : null;
+    if (supEar) await hear(supEar);
+    check('a listen-only tenant\'s supervisor listens to the line call', Boolean(supEar?.has(440)), monitoring ? `hears 440: ${Boolean(supEar?.has(440))}` : 'not started');
+    sup.errors.length = 0;
+    sup.socket.emit('call:monitor:mode', { callId: row1.id, mode: 'whisper' });
+    sup.socket.emit('call:monitor:mode', { callId: row1.id, mode: 'barge' });
+    await waitFor(() => sup.errors.filter((e) => e.code === 'MONITOR_MODE_NOT_ALLOWED').length >= 2, 5000, 'modes refused').catch(() => { });
+    check('whisper and barge are refused (MONITOR_MODE_NOT_ALLOWED), nothing changes for the caller or the owner',
+        sup.errors.filter((e) => e.code === 'MONITOR_MODE_NOT_ALLOWED').length === 2
+        && !sup.events.some((e) => e.event === 'call:monitor:mode:changed'), JSON.stringify(sup.errors));
+    sup.socket.emit('call:monitor:stop', { callId: row1.id });
+    await waitFor(() => sup.events.some((e) => e.event === 'call:monitor:ended'), 5000, 'monitor stopped').catch(() => { });
+    sup.peer?.close(); sup.peer = null;
+
     const counters = await ask(sup, 'board:counters');
     check('board:counters counts the tenant\'s live calls and agents', counters?.calls?.inProgress >= 1 && counters?.agents?.onCall >= 1,
         JSON.stringify(counters));
@@ -188,6 +213,16 @@ try {
     }
     u1.peer?.close(); u1.peer = null;
 
+    // ── 6b. A carrier sending national numbers (the trunk's number rules) ──
+    await q(`UPDATE sip_trunks SET number_rules = '{"country_code":"961","national_prefix":"0"}' WHERE id = ?`, [trunkId]);
+    const c6b = await carrier.callIn({ from: '03123456', to: '070000101' });
+    const row6b = await sipCall(c6b.callId).catch(() => null);
+    if (row6b) await nextIncoming(u1, row6b.id).catch(() => null);
+    check('a DID and caller in national format reach the line, the caller stored as E.164',
+        row6b?.channel_id === line1Id && row6b?.customer_address === '+9613123456', JSON.stringify(row6b && { ch: row6b.channel_id, from: row6b.customer_address }));
+    if (row6b) { u1.socket.emit('call:reject', { callId: row6b.id }); await ended(row6b.id); }
+    await q('UPDATE sip_trunks SET number_rules = NULL WHERE id = ?', [trunkId]);
+
     // ── 7. An owner nobody can reach ──
     const c7 = await carrier.callIn({ from: '+96181030907', to: UNREACHABLE_LINE });
     const t7 = Date.now();
@@ -225,6 +260,7 @@ try {
     exitCode = 1;
 } finally {
     await api('PUT', '/v1/tenants/demo', { name: tenantBefore.name, settings: tenantBefore.settings ?? {} }).catch(() => { });
+    await q('UPDATE sip_trunks SET number_rules = NULL').catch(() => { });
     carrier.close(); receiver.close();
     await db.end();
 }

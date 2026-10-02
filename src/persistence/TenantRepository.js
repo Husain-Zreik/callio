@@ -7,6 +7,8 @@ function parseSettings(raw) {
     try { return JSON.parse(raw) ?? {}; } catch { return {}; }
 }
 
+
+const MONITOR_MODES = ['listen', 'whisper', 'barge'];
 class TenantRepository {
     async findById(tenantId) {
         const [rows] = await connection.execute(
@@ -51,6 +53,15 @@ class TenantRepository {
     async getBoardSettings(tenantId) {
         const tenant = await this.findById(tenantId);
         return { teamView: tenant?.settings?.team_view !== false };
+    }
+
+    // The supervisor modes this tenant allows (settings.monitoring.modes; all
+    // three by default). Without 'listen' nobody may monitor its calls.
+    async getMonitoringModes(tenantId) {
+        const tenant = await this.findById(tenantId);
+        const modes = tenant?.settings?.monitoring?.modes;
+        if (!Array.isArray(modes)) return [...MONITOR_MODES];
+        return MONITOR_MODES.filter((m) => modes.map((x) => String(x).toLowerCase()).includes(m));
     }
 
     // Storage quota for recordings, in bytes (null = the platform default).

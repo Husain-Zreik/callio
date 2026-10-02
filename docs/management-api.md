@@ -100,7 +100,8 @@ the stored object as a whole when given, and is kept when omitted:
 {
   "auto_offline": { "enabled": true, "missed_threshold": 3 },
   "recording": { "storage_limit_bytes": 5368709120, "retention_days": 90 },
-  "team_view": true
+  "team_view": true,
+  "monitoring": { "modes": ["listen", "whisper", "barge"] }
 }
 ```
 
@@ -108,6 +109,11 @@ the stored object as a whole when given, and is kept when omitted:
 agents' calls and statuses and the queues (agent-protocol.md → Board).
 Supervisors always do. Set it to `false` when the agents are a product's end
 users, who must only ever see their own calls.
+
+`monitoring.modes` (default all three): the supervisor modes allowed on the
+tenant's calls. `["listen"]` lets supervisors listen but never be heard;
+without `listen` nobody may monitor. A refused mode is a `call:error`
+`MONITOR_MODE_NOT_ALLOWED` (agent-protocol.md).
 
 `recording.retention_days` deletes this tenant's recordings that many days
 after they were made (`0` keeps them; default: the deployment's

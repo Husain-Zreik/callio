@@ -16,18 +16,37 @@ export function toE164(value) {
     return digits.length >= 5 ? `+${digits}` : null;
 }
 
-// The number a call was placed to: the Request-URI user, else the To user.
-export function dialledNumber(req) {
-    const fromUri = (uri) => { try { return parseUri(uri)?.user ?? null; } catch { return null; } };
-    return toE164(fromUri(req.uri)) ?? toE164(fromUri(req.getParsedHeader('To')?.uri));
+/**
+ * A number as a trunk's carrier sends it, in E.164 terms. rules (the trunk's
+ * number_rules): { country_code, national_prefix? }. A number with '+' or '00'
+ * is international; one starting with the country code is international
+ * without the '+'; anything else is national: the national prefix is stripped
+ * and the country code prepended. Without rules the number is returned as is.
+ */
+export function applyNumberRules(value, rules) {
+    if (value == null || !rules?.country_code) return value;
+    const s = String(value).trim();
+    if (s.startsWith('+') || s.startsWith('00') || !/^\d+$/.test(s)) return s;
+    const cc = String(rules.country_code).replace(/\D/g, '');
+    if (s.startsWith(cc)) return `+${s}`;
+    const prefix = rules.national_prefix != null ? String(rules.national_prefix) : '';
+    return `+${cc}${prefix && s.startsWith(prefix) ? s.slice(prefix.length) : s}`;
 }
 
-// The caller: a phone number when the From user is one, else the SIP URI.
-export function callerOf(req) {
+const uriUser = (uri) => { try { return parseUri(uri)?.user ?? null; } catch { return null; } };
+
+// The number a call was placed to (E.164), read with the trunk's number rules.
+export function dialledNumber(req, rules = null) {
+    return toE164(applyNumberRules(uriUser(req.uri), rules)) ?? toE164(applyNumberRules(uriUser(req.getParsedHeader('To')?.uri), rules));
+}
+
+// The caller: a phone number when the From user is one (read with the trunk's
+// number rules), else the SIP URI.
+export function callerOf(req, rules = null) {
     const from = req.getParsedHeader('From') ?? {};
     let user = null;
     try { user = parseUri(from.uri)?.user ?? null; } catch { /* unparsable From */ }
-    const e164 = toE164(user);
+    const e164 = toE164(applyNumberRules(user, rules));
     const name = from.name ? String(from.name).replace(/^"|"$/g, '').trim() || null : null;
     return e164
         ? { address: e164, addressType: CustomerAddressType.E164, name }

@@ -19,10 +19,27 @@ const log = logger('channels.sip.SipIngress');
 
 const TERMINAL = new Set([CallStatus.TERMINATED, CallStatus.FAILED, CallStatus.CANCELLED]);
 
+// The line a call was placed to. The number as sent first (E.164, or
+// international without '+'); else, for each trunk that reads numbers in its
+// own format (number_rules) and may send from this source, the number read
+// that way — on a line of that trunk.
+async function resolveLine(req, source) {
+    const did = dialledNumber(req);
+    const channel = did ? await ChannelRepository.findActiveByAddress(Channel.SIP, did) : null;
+    if (channel) return { did, channel };
+    for (const trunk of await SipTrunkRepository.listWithNumberRules()) {
+        if (trunk.status !== 'ACTIVE' || !sourceAllowed(trunk, source)) continue;
+        const local = dialledNumber(req, trunk.number_rules);
+        const line = local && local !== did ? await ChannelRepository.findActiveByAddress(Channel.SIP, local) : null;
+        if (line && String(line.sip_trunk_id) === String(trunk.id)) return { did: local, channel: line };
+    }
+    return { did, channel: null };
+}
+
 export async function handleInvite(req, res) {
     const providerCallId = req.get('Call-ID');
-    const did = dialledNumber(req);
     const source = req.source_address;
+    const { did, channel } = await resolveLine(req, source);
     log.debug({ providerCallId, did, source }, 'INVITE received');
 
     // Refusals are rate-limited per source: an internet scanner sends many a second.
@@ -32,7 +49,6 @@ export async function handleInvite(req, res) {
         if (repeated !== null) log.warn({ source, did, uri: req.uri, ...fields, ...(repeated ? { repeated } : {}) }, msg);
         return res.send(status);
     };
-    const channel = did ? await ChannelRepository.findActiveByAddress(Channel.SIP, did) : null;
     if (!channel) return refuse(404, 'INVITE for a number with no active SIP channel — 404');
     const trunk = await SipTrunkRepository.findById(channel.sip_trunk_id);
     if (!trunk || trunk.status !== 'ACTIVE' || !sourceAllowed(trunk, source)) {
@@ -60,7 +76,7 @@ export async function handleInvite(req, res) {
     res.send(180);
     await channelIngress.inboundCall(channel, {
         providerCallId,
-        customer: callerOf(req),
+        customer: callerOf(req, trunk.number_rules),
         sdpOffer,
         offeredAt: new Date(),
         providerMetadata: {

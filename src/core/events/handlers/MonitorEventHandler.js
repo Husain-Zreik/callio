@@ -1,5 +1,6 @@
 // src/core/events/handlers/MonitorEventHandler.js
 import CallRepository from '../../../persistence/CallRepository.js';
+import TenantRepository from '../../../persistence/TenantRepository.js';
 import { agentConnections } from '../../agents/AgentConnections.js';
 import EventBus from '../../EventBus.js';
 import { callMedia } from '../../media/CallMedia.js';
@@ -20,6 +21,14 @@ export class MonitorEventHandler {
         try {
             const call = await CallRepository.getInProgressCall(tenantId, callId);
             if (!call) throw new Error('Call not found or already ended');
+
+            // The tenant's allowed modes (settings.monitoring.modes): monitoring
+            // starts in listen, so without it nobody monitors.
+            if (!(await TenantRepository.getMonitoringModes(tenantId)).includes('listen')) {
+                await agentConnections.detachSocketFromCall(socketId, callId).catch(() => { });
+                emitCallError({ callId, code: CallErrorCodes.MONITOR_MODE_NOT_ALLOWED, message: 'This tenant does not allow monitoring calls', socketId });
+                return;
+            }
 
             if (callMedia.hasSupervisor(callId)) {
                 throw new Error('Another supervisor is monitoring this call right now.');
@@ -59,6 +68,11 @@ export class MonitorEventHandler {
         }
 
         try {
+            const call = await CallRepository.findById(callId);
+            if (call && !(await TenantRepository.getMonitoringModes(call.tenant_id)).includes(mode)) {
+                emitCallError({ callId, code: CallErrorCodes.MONITOR_MODE_NOT_ALLOWED, message: `This tenant does not allow '${mode}'`, socketId });
+                return;
+            }
             const endedPrivate = await callMedia.setSupervisorMode(callId, mode);
             // Confirm to the supervisor, and reflect the mode to the agent so their
             // active-call UI can show "supervisor is whispering" / "joined the call".

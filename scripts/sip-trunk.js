@@ -4,6 +4,7 @@
 //   npm run sip:trunk -- --name digitalk --host 185.231.78.58 [--port 5060] [--transport UDP]
 //                        [--cidr 185.231.78.58/32 --cidr …] [--username u --password p]
 //                        [--consumer <slug>]      (omit = a platform trunk every consumer may use)
+//                        [--country 961 [--strip 0]]   (the carrier sends national numbers: read them as +961…)
 import SipTrunkRepository from '../src/persistence/SipTrunkRepository.js';
 import ConsumerRepository from '../src/persistence/ConsumerRepository.js';
 import connection from '../config/dbConnection.js';
@@ -32,6 +33,7 @@ try {
         transport: String(arg('transport', 'UDP')).toUpperCase(),
         credentials: arg('username') ? { username: arg('username'), password: arg('password') ?? '' } : undefined,
         inboundSourceCidrs: cidrs.length ? cidrs : null,
+        numberRules: arg('country') ? { country_code: String(arg('country')), ...(arg('strip') != null ? { national_prefix: String(arg('strip')) } : {}) } : null,
     });
     if (!cidrs.length) console.warn('No --cidr given: INVITEs from any source are accepted for this trunk (development only).');
     console.log(JSON.stringify({ sip_trunk: trunk }, null, 2));
