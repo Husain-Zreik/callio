@@ -1,7 +1,7 @@
 // src/infra/logging/context.js
 // Fields bound to an async flow: every record logged inside it (and in what it
 // awaits) carries them. Bound once where a flow starts — call events
-// (RedisPubSubService), socket events (connectionHandler), HTTP requests
+// (CallInbox), socket events (connectionHandler), HTTP requests
 // (http/accessLog.js) — so modules never repeat them.
 import { AsyncLocalStorage } from 'async_hooks';
 

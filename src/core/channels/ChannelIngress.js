@@ -29,7 +29,7 @@ import { callEventHandler } from '../events/CallEventHandler.js';
 import { mediaLegs } from '../media/MediaLegs.js';
 import { ivrCoordinator } from '../ivr/IvrCoordinator.js';
 import { callOwnershipService } from '../../infra/cluster/CallOwnershipService.js';
-import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
+import { callInbox } from '../../infra/cluster/CallInbox.js';
 import { redisCleanupService } from '../../infra/cluster/RedisCleanupService.js';
 import { redisBaseService } from '../../infra/redis/RedisBaseService.js';
 import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinator.js';
@@ -282,13 +282,11 @@ class ChannelIngress {
                 const ivrAnsweredAt = new Date();
                 const flowHeader = await IvrRepository.findFlowHeader(ivrFlowId, tenantId).catch(() => null);
                 try {
-                    // This worker holds the media from here on, and nothing else
-                    // subscribes it yet (that's the AGENT offer, after the flow
-                    // transfers). Without it a CALL_TERMINATED published during the
-                    // IVR — API terminate, supervisor hang-up — reaches no worker.
-                    // The later AGENT offer's subscribe is a no-op; closing the
-                    // call's peers unsubscribes.
-                    await redisPubSubService.subscribeToCallEvents(callId, callEventHandler.handleCallEvent);
+                    // This worker holds the media from here on: it takes the call's
+                    // lease now, so inputs posted during the IVR (API terminate,
+                    // supervisor hang-up) reach it. The later AGENT offer's own()
+                    // is a no-op; the lease goes when the call ends.
+                    await callInbox.own(callId, callEventHandler.handleCallEvent);
                     const adapter = customerChannels.get(channel.type);
                     const customerSdpAnswer = await mediaLegs.answerCustomer(callRow, sdpOffer, adapter.sdp);
                     await adapter.accept(callRow, customerSdpAnswer);
@@ -321,7 +319,7 @@ class ChannelIngress {
             }
 
             // This worker holds the call's media: agents' answers come back here.
-            await redisPubSubService.subscribeToCallEvents(callId, callEventHandler.handleCallEvent);
+            await callInbox.own(callId, callEventHandler.handleCallEvent);
             const agentSdpOffer = await mediaLegs.offerAgent(callRow);
 
             if (userId) {
@@ -456,7 +454,7 @@ class ChannelIngress {
         }
         // The worker holding the agent's media applies the answer.
         await this._withOwnership(channel, providerCallId, () =>
-            redisPubSubService.publishCallEvent(existingCall.id, EventTypes.CUSTOMER_ANSWER_RECEIVED, {
+            callInbox.post(existingCall.id, EventTypes.CUSTOMER_ANSWER_RECEIVED, {
                 callId: existingCall.id,
                 providerCallId,
                 sdpAnswer,

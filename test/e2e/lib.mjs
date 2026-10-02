@@ -6,7 +6,31 @@ import jwt from 'jsonwebtoken';
 import { io } from 'socket.io-client';
 
 const require = createRequire(import.meta.url);
-export const wrtc = require('@roamhq/wrtc');
+const wrtcModule = require('@roamhq/wrtc');
+
+// Simulated customers and agents run on this machine; the media plane runs in
+// Docker and reaches them only through its port forwarding. Their SDP carries
+// no ICE candidates, so rtpengine pairs with the address their checks arrive
+// from (peer-reflexive) instead of trying each of this machine's interfaces
+// (VPN, Hyper-V, WSL) — some of which it can reach one way only, which made
+// random legs silent. Real clients keep their candidates.
+const stripCandidates = (desc) => desc && {
+    type: desc.type,
+    sdp: desc.sdp.split(/\r?\n/).filter((l) => !/^a=(candidate|end-of-candidates)/.test(l)).join('\r\n'),
+};
+const DESCRIPTIONS = new Set(['localDescription', 'currentLocalDescription', 'pendingLocalDescription']);
+function NatPathPeerConnection(config) {
+    const pc = new wrtcModule.RTCPeerConnection(config);
+    return new Proxy(pc, {
+        get(target, prop) {
+            if (DESCRIPTIONS.has(prop)) return stripCandidates(target[prop]);
+            const value = target[prop];
+            return typeof value === 'function' ? value.bind(target) : value;
+        },
+        set(target, prop, value) { target[prop] = value; return true; },
+    });
+}
+export const wrtc = { ...wrtcModule, RTCPeerConnection: NatPathPeerConnection };
 export const mysql = require('mysql2/promise');
 const { RTCPeerConnection, nonstandard: { RTCAudioSource, RTCAudioSink } } = wrtc;
 

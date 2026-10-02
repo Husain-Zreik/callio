@@ -151,13 +151,14 @@ async function resetState() {
     redis.disconnect();
 }
 
-async function startCallio(logFile) {
+async function startCallio(logFile, workerPort = port, workerId = 'e2e') {
     const { openSync } = await import('fs');
     const out = openSync(logFile, 'w');
-    const child = spawn(process.execPath, ['index.js'], { cwd: root, env, stdio: ['ignore', out, out] });
+    const child = spawn(process.execPath, ['index.js'], { cwd: root, env: { ...env, NODE_PORT: String(workerPort), WORKER_ID: workerId }, stdio: ['ignore', out, out] });
+    child.port = workerPort;
     for (let i = 0; i < 120; i++) {   // up to 60 s: a cold first start (native modules, AV scanning) can be slow
         try {
-            const res = await fetch(`http://127.0.0.1:${port}/health`);
+            const res = await fetch(`http://127.0.0.1:${workerPort}/health`);
             if (res.ok && (await res.json()).media?.connected) return child;
         } catch { /* not up yet */ }
         await new Promise((r) => setTimeout(r, 500));
@@ -165,6 +166,18 @@ async function startCallio(logFile) {
     child.kill();
     throw new Error(`Callio did not start — see ${logFile}`);
 }
+
+// A suite asks for several workers (as PM2 runs them) with a first line
+// `// e2e-workers: N`; it gets them in E2E_WORKERS ([{ port, pid }]) and may kill one.
+function workersFor(suite) {
+    const first = readFileSync(join(here, suite), 'utf8').split('\n', 1)[0];
+    return Number(/^\/\/ e2e-workers: (\d+)/.exec(first)?.[1] ?? 1);
+}
+const stopCallio = (child) => new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) return resolve();
+    child.once('exit', resolve);
+    child.kill();
+});
 
 function suiteFiles() {
     const only = process.argv.slice(2);
@@ -215,7 +228,7 @@ checkLogging();
 }
 
 let failed = 0;
-let callio = null;
+const callios = [];
 const s3 = fakeS3({ bucket: 'callio-test', port: S3_PORT, host: '0.0.0.0' });
 await s3.listen();
 try {
@@ -235,25 +248,29 @@ try {
 
     for (const suite of suiteFiles()) {
         await resetState();
-        const logFile = join(work, `${suite}.callio.log`);
-        callio = await startCallio(logFile);
-        console.log(`\n[e2e] ── ${suite}`);
+        const count = workersFor(suite);
+        const logFiles = [];
+        for (let i = 0; i < count; i++) {
+            const logFile = join(work, i === 0 ? `${suite}.callio.log` : `${suite}.w${i + 1}.callio.log`);
+            logFiles.push(logFile);
+            callios.push(await startCallio(logFile, port + i, count > 1 ? `e2e-${i + 1}` : 'e2e'));
+        }
+        console.log(`\n[e2e] ── ${suite}${count > 1 ? ` (${count} workers)` : ''}`);
+        const suiteEnv = { ...env, E2E_WORKERS: JSON.stringify(callios.map((c) => ({ port: c.port, pid: c.pid }))) };
         // Not spawnSync: the fake S3 in this process has to keep answering while the suite runs.
-        const r = await new Promise((done) => spawn(process.execPath, [join(here, suite), seedFile, String(port)], { cwd: root, env, stdio: 'inherit' })
+        const r = await new Promise((done) => spawn(process.execPath, [join(here, suite), seedFile, String(port)], { cwd: root, env: suiteEnv, stdio: 'inherit' })
             .on('exit', (status) => done({ status })));
-        callio.kill();
-        await new Promise((r) => callio.once('exit', r));
-        callio = null;
-        const errors = readFileSync(logFile, 'utf8').split('\n')
+        for (const c of callios.splice(0)) await stopCallio(c);
+        const errors = logFiles.flatMap((f) => readFileSync(f, 'utf8').split('\n'))
             .filter((l) => /unhandled|exception|is not a function|unknown column|doesn't exist|AGENT STUCK/i.test(l));
-        if (errors.length) console.log(`[e2e] Callio log problems (${logFile}):\n  ${errors.slice(0, 20).join('\n  ')}`);
+        if (errors.length) console.log(`[e2e] Callio log problems (${logFiles.join(', ')}):\n  ${errors.slice(0, 20).join('\n  ')}`);
         if (r.status !== 0 || errors.length) failed++;
     }
 } catch (err) {
     console.error('[e2e] setup failed:', err.message);
     failed++;
 } finally {
-    if (callio) callio.kill();
+    for (const c of callios) c.kill();
     s3.close();
 }
 

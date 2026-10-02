@@ -8,7 +8,7 @@ import CallRepository from '../../../persistence/CallRepository.js';
 import CallConnectionRepository from '../../../persistence/CallConnectionRepository.js';
 import AgentRepository from '../../../persistence/AgentRepository.js';
 import { customerChannels } from '../../channels/CustomerChannels.js';
-import { redisPubSubService } from '../../../infra/redis/RedisPubSubService.js';
+import { callInbox } from '../../../infra/cluster/CallInbox.js';
 import CallParticipantRepository from '../../../persistence/CallParticipantRepository.js';
 import { callMedia } from '../../media/CallMedia.js';
 import { mediaLegs } from '../../media/MediaLegs.js';
@@ -102,7 +102,7 @@ export class InitiationEventHandler {
         await CallRepository.updateTimestamp(callId, 'ringing_at', new Date());
 
         // Subscribe before creating the peer so events arrive immediately.
-        await redisPubSubService.subscribeToCallEvents(callId, subscriptionCallback);
+        await callInbox.own(callId, subscriptionCallback);
 
         agentLegSockets.set(callId, socketId);
         // The leg records its device too: a reload resync must see which

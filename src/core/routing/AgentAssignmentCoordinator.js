@@ -9,7 +9,8 @@ import AgentRepository from '../../persistence/AgentRepository.js';
 import QueueRepository from '../../persistence/QueueRepository.js';
 import CallConnectionRepository from '../../persistence/CallConnectionRepository.js';
 import { mediaLegs } from '../media/MediaLegs.js';
-import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
+import { callInbox } from '../../infra/cluster/CallInbox.js';
+import { EventTypes } from '../events/EventTypes.js';
 import { callAgentAssignmentService } from './CallAgentAssignmentService.js';
 import { queueRouter } from './QueueRouter.js';
 import { callLifecycleLogger } from '../calls/CallLifecycleLogger.js';
@@ -374,12 +375,15 @@ class AgentAssignmentCoordinator {
     // The agent leg's offer for a call: reuse the one already made on the
     // worker holding the customer's leg (arrival or IvrTransferHandler made it
     // there), so the agent's answer reaches the worker that can bridge it.
+    // Without one, the worker that owns the call makes it — this worker if it
+    // can take the lease, else through the call's inbox.
     async #agentOffer(callId) {
         const stored = await mediaLegs.storedAgentOffer(callId);
         if (stored) return stored;
-        const call = await CallRepository.findById(callId);
-        if (this._callEventCallback) await redisPubSubService.subscribeToCallEvents(callId, this._callEventCallback);
-        return mediaLegs.offerAgent(call);
+        if (this._callEventCallback && await callInbox.own(callId, this._callEventCallback)) {
+            return mediaLegs.offerAgent(await CallRepository.findById(callId));
+        }
+        return callInbox.request(callId, EventTypes.OFFER_AGENT, { callId });
     }
 
     async #deliverAssignedCall(call, agent, assignmentType) {

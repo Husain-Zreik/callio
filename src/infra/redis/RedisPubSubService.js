@@ -1,23 +1,18 @@
 // src/infra/redis/RedisPubSubService.js
 import { redisClient } from './RedisClient.js';
 import { config } from '../../../config/envConfig.js';
-import { logger, runWithLogContext } from '../logging/logger.js';
+import { logger } from '../logging/logger.js';
 
 const log = logger('infra.redis.RedisPubSubService');
 
 /**
- * Manages Redis pub/sub for cross-worker communication.
- * Also provides clients for Socket.IO Redis adapter.
+ * The Socket.IO Redis adapter's connections (room emits across workers).
+ * Call inputs between workers go through infra/cluster/CallInbox.js.
  */
 class RedisPubSubService {
     constructor() {
-        this.subscriberClient = null;
-        this.publisherClient = null;   // dedicated: call event PUBLISH
         this.adapterPubClient = null;  // dedicated: Socket.IO adapter pub
         this.adapterSubClient = null;  // dedicated: Socket.IO adapter sub
-        this.subscriptions = new Map();
-        this.channelPrefix = 'callmanager';
-        this.workerId = config.runtime.workerId;
         this.isInitialized = false;
     }
 
@@ -32,26 +27,12 @@ class RedisPubSubService {
         });
 
         try {
-            // Each pub path gets its own dedicated connection so call event
-            // publishes, Socket.IO adapter broadcasts, and base ops never
-            // compete on the same TCP pipe.
-            this.publisherClient = redisClient.createClient('PubSub-Publisher');
             this.adapterPubClient = redisClient.createClient('Adapter-Publisher');
             this.adapterSubClient = redisClient.createClient('Adapter-Subscriber');
-            this.subscriberClient = redisClient.createClient('PubSub-Subscriber');
-
             await Promise.all([
-                waitReady(this.publisherClient, 'PubSub-Publisher'),
                 waitReady(this.adapterPubClient, 'Adapter-Publisher'),
                 waitReady(this.adapterSubClient, 'Adapter-Subscriber'),
-                waitReady(this.subscriberClient, 'PubSub-Subscriber'),
             ]);
-
-            // Handle incoming call event messages
-            this.subscriberClient.on('message', (channel, message) => {
-                this.handleMessage(channel, message);
-            });
-
             this.isInitialized = true;
             log.debug('Initialized');
         } catch (error) {
@@ -69,148 +50,6 @@ class RedisPubSubService {
         return {
             pubClient: this.adapterPubClient,
             subClient: this.adapterSubClient,
-        };
-    }
-
-    // Build channel name for a call — all event types share one channel per call.
-    buildChannel(callId) {
-        return `${this.channelPrefix}:${callId}`;
-    }
-
-    // Handle incoming pub/sub messages
-    handleMessage(channel, message) {
-        const parts = channel.split(':');
-
-        if (parts.length < 2 || parts[0] !== this.channelPrefix) {
-            return;
-        }
-
-        let callId, eventType, data;
-        try {
-            callId = parseInt(parts[1], 10);
-            data = JSON.parse(message);
-            eventType = data.eventType;
-            data.callId = callId;
-        } catch (parseError) {
-            log.error({ err: parseError }, `Failed to parse message on channel ${channel}`);
-            return;
-        }
-
-        const handler = this.subscriptions.get(callId);
-        if (!handler) return; // No handler registered on this worker
-
-        log.debug({ callId, eventType }, 'Processing call event');
-
-        // handler is async — await the promise and catch rejections so they are
-        // always logged and never become silent unhandled promise rejections.
-        // Everything logged while handling it carries the call id.
-        runWithLogContext({ callId }, () => Promise.resolve(handler(eventType, data))).catch(err => {
-            log.error({ callId, err }, `Unhandled error in handler for event '${eventType}'`);
-        });
-    }
-
-    // Publish an event for a call
-    async publishCallEvent(callId, eventType, data) {
-        if (!this.isInitialized) {
-            log.warn('Cannot publish - not initialized');
-            return 0;
-        }
-
-        const channel = this.buildChannel(callId);
-
-        try {
-            const message = JSON.stringify({
-                ...data,
-                callId,
-                eventType,
-                workerId: this.workerId,
-                timestamp: Date.now()
-            });
-
-            const subscriberCount = await this.publisherClient.publish(channel, message);
-            log.debug({ callId, eventType, subscribers: subscriberCount }, 'Published call event');
-
-            return subscriberCount;
-        } catch (error) {
-            log.error({ callId, err: error }, `Error publishing ${eventType}`);
-            return 0;
-        }
-    }
-
-    // Subscribe to all events for a call
-    async subscribeToCallEvents(callId, handler) {
-        if (!this.isInitialized) {
-            log.warn('Cannot subscribe - not initialized');
-            return false;
-        }
-
-        if (this.subscriptions.has(callId)) {
-            log.debug({ callId }, 'Already subscribed');
-            return true;
-        }
-
-        try {
-            const channel = this.buildChannel(callId);
-            await this.subscriberClient.subscribe(channel);
-            this.subscriptions.set(callId, handler);
-
-            log.debug({ callId }, 'Subscribed to call events');
-            return true;
-
-        } catch (error) {
-            log.error({ callId, err: error }, 'Error subscribing');
-            return false;
-        }
-    }
-
-    // Unsubscribe from a call's events
-    async unsubscribeFromCall(callId) {
-        if (!this.isInitialized || !this.subscriptions.has(callId)) {
-            return true;
-        }
-
-        try {
-            const channel = this.buildChannel(callId);
-            await this.subscriberClient.unsubscribe(channel);
-            this.subscriptions.delete(callId);
-
-            log.debug({ callId }, 'Unsubscribed from call events');
-            return true;
-
-        } catch (error) {
-            log.error({ callId, err: error }, 'Error unsubscribing from call');
-            return false;
-        }
-    }
-
-    // Unsubscribe from all calls
-    async unsubscribeAll() {
-        if (!this.isInitialized) return;
-
-        const callIds = Array.from(this.subscriptions.keys());
-
-        for (const callId of callIds) {
-            await this.unsubscribeFromCall(callId);
-        }
-
-        log.info('Unsubscribed from all calls');
-    }
-
-    // Get active subscriptions
-    getActiveSubscriptions() {
-        return Array.from(this.subscriptions.keys());
-    }
-
-    // Get service status
-    getStatus() {
-        return {
-            workerId: this.workerId,
-            isInitialized: this.isInitialized,
-            activeSubscriptions: this.subscriptions.size,
-            channelPrefix: this.channelPrefix,
-            hasPublisherClient: !!this.publisherClient,
-            hasAdapterPubClient: !!this.adapterPubClient,
-            hasAdapterSubClient: !!this.adapterSubClient,
         };
     }
 
@@ -236,20 +75,11 @@ class RedisPubSubService {
         };
 
         try {
-            await this.unsubscribeAll();
-
-            await closeClient(this.subscriberClient, 'PubSub-Subscriber');
             await closeClient(this.adapterSubClient, 'Adapter-Subscriber');
             await closeClient(this.adapterPubClient, 'Adapter-Publisher');
-            await closeClient(this.publisherClient, 'PubSub-Publisher');
-
-            this.subscriberClient = null;
             this.adapterSubClient = null;
             this.adapterPubClient = null;
-            this.publisherClient = null;
-            this.subscriptions.clear();
             this.isInitialized = false;
-
             log.info('Closed');
         } catch (error) {
             log.error({ err: error }, 'Error during close');

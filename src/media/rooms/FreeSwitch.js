@@ -11,7 +11,7 @@
 // live worker's legs from a dead one's: FreeSWITCH keeps a channel up after
 // the worker that controlled it is gone, and its RTP keeps flowing into
 // rtpengine ports that get handed to new calls.
-import { randomBytes } from 'crypto';
+import { bootId } from '../../infra/cluster/WorkerBoot.js';
 import Mrf from 'drachtio-fsmrf';
 import { drachtio } from '../../infra/sip/Drachtio.js';
 import { redisBaseService } from '../../infra/redis/RedisBaseService.js';
@@ -26,7 +26,7 @@ const HEARTBEAT_MS = 10_000;
 
 class FreeSwitch {
     constructor() {
-        this.bootId = randomBytes(4).toString('hex');
+        this.bootId = bootId;
         this.ms = null;        // endpoints from the default profile (Opus first)
         this.msG711 = null;    // endpoints that offer G.711 only (to SIP carriers)
         this._mrf = null;

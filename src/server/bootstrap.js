@@ -4,6 +4,7 @@
 //                          failure and continues. Add new optional services here.
 import { redisBaseService } from '../infra/redis/RedisBaseService.js';
 import { redisPubSubService } from '../infra/redis/RedisPubSubService.js';
+import { callInbox } from '../infra/cluster/CallInbox.js';
 import { presenceService } from '../core/agents/PresenceService.js';
 import { redisCleanupService } from '../infra/cluster/RedisCleanupService.js';
 import { storageClient } from '../infra/storage/StorageClient.js';
@@ -39,6 +40,7 @@ export async function initRedis() {
     await redisBaseService.init();
     await Promise.all([
         redisPubSubService.init(),
+        callInbox.init(),
         presenceService.init(),
         redisCleanupService.init(),
     ]);

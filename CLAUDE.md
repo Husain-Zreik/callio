@@ -74,7 +74,7 @@ No unit tests, no lint/format config. **Verify behaviour changes with `npm run t
 
 ## Process model
 
-PM2 fork-mode workers (`WORKER_COUNT`, each on `BASE_PORT + i`) share no memory; everything cross-worker goes through Redis. A call's media legs are controlled from one worker (`CallOwnershipService` lock; FreeSWITCH reports each endpoint's events back to the worker that made it) and its events reach that worker over Redis pub/sub (`RedisPubSubService.publishCallEvent`), so any worker can take any request. Socket.IO's Redis adapter propagates room emits. Background loops run on every worker; the ones that must run once hold a Redis lock/lease.
+PM2 fork-mode workers (`WORKER_COUNT`, each on `BASE_PORT + i`) share no memory; everything cross-worker goes through Redis. A call's media legs are controlled from one worker (`CallOwnershipService` lock; FreeSWITCH reports each endpoint's events back to the worker that made it) and its inputs reach that worker through a per-call Redis Stream behind a lease (`infra/cluster/CallInbox.js`: `post()` from anywhere, the lease holder reads), so any worker can take any request. Socket.IO's Redis adapter propagates room emits. Background loops run on every worker; the ones that must run once hold a Redis lock/lease.
 
 ## Patterns
 

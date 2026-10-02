@@ -12,7 +12,7 @@ import IvrRepository from '../../persistence/IvrRepository.js';
 import RecordingRepository from '../../persistence/RecordingRepository.js';
 import { callEventHandler } from '../../core/events/CallEventHandler.js';
 import { OutboundCallError } from '../../core/events/handlers/InitiationEventHandler.js';
-import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
+import { callInbox } from '../../infra/cluster/CallInbox.js';
 import { storageClient } from '../../infra/storage/StorageClient.js';
 import { EventTypes } from '../../core/events/EventTypes.js';
 import { toConsumerCallView } from '../../core/calls/CallView.js';
@@ -179,7 +179,7 @@ export default async function callRoutes(fastify) {
     fastify.post('/calls/:callId/terminate', async (request, reply) => {
         const { call } = await ownedCall(request);
         if (!ACTIVE.has(call.status)) throw new HttpError(409, 'call_ended', `Call is already ${call.status}`);
-        const subscribers = await redisPubSubService.publishCallEvent(call.id, EventTypes.CALL_TERMINATED, {
+        const subscribers = await callInbox.post(call.id, EventTypes.CALL_TERMINATED, {
             callId: call.id,
             userId: null,
             tenantId: call.tenant_id,

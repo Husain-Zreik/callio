@@ -9,7 +9,7 @@
 import EventBus from '../EventBus.js';
 import CallRepository from '../../persistence/CallRepository.js';
 import { callLifecycleLogger } from './CallLifecycleLogger.js';
-import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
+import { callInbox } from '../../infra/cluster/CallInbox.js';
 import { EventTypes } from '../events/EventTypes.js';
 import { logger } from '../../infra/logging/logger.js';
 
@@ -55,7 +55,7 @@ class CustomerNetworkLossPolicy {
             const terminateTimer = setTimeout(async () => {
                 this._timers.delete(key);
                 try {
-                    await redisPubSubService.publishCallEvent(callId, EventTypes.CALL_TERMINATED, { callId, reason: 'customer_network_loss' });
+                    await callInbox.post(callId, EventTypes.CALL_TERMINATED, { callId, reason: 'customer_network_loss' });
                 } catch (err) {
                     log.error({ callId, err }, 'Failed to publish CALL_TERMINATED');
                 }

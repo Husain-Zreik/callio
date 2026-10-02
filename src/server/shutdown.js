@@ -5,6 +5,7 @@
 // contract in the numbered comments below before choosing where to insert it.
 import { redisClient } from '../infra/redis/RedisClient.js';
 import { redisPubSubService } from '../infra/redis/RedisPubSubService.js';
+import { callInbox } from '../infra/cluster/CallInbox.js';
 import { redisCleanupService } from '../infra/cluster/RedisCleanupService.js';
 import { storageClient } from '../infra/storage/StorageClient.js';
 import { drachtio } from '../infra/sip/Drachtio.js';
@@ -181,6 +182,7 @@ export async function shutdown(server, io) {
         // 7. Close Redis service connections (in reverse order)
         log.info('Closing Redis services...');
         await redisCleanupService.releaseLock();
+        await callInbox.close();
         await redisPubSubService.close();
 
         // 8. Close all Redis clients

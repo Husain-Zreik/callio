@@ -162,15 +162,22 @@ implementation, `src/media/rooms/`, is registered at startup by `server/bootstra
   - Outbound: media lives on the worker whose socket sent `call:start`.
   - SIP: a leg's dialog lives on the same worker. `SipDialogs` routes reject/terminate from other
     workers to it.
-- **Call events.** `RedisPubSubService.publishCallEvent` publishes to `callmanager:{callId}`.
-  Only the media owner subscribes (when it offers the agent leg, or in `handleCallStart`).
-  `CallEventHandler` routes each event to its handler, and handlers check `callMedia.owns` /
-  `hasAgentOffer` before touching media. Socket actions, API terminates and `CallTerminator` all
-  reach the owner this way.
+- **Call inputs** (`src/infra/cluster/CallInbox.js`). The worker that sets a call's media up
+  takes its lease (`callio:call:<id>:lease` = its boot id, 15 s, renewed every 5 s) and reads
+  its inbox, a Redis Stream (`callio:call:<id>:inbox`). Any worker `post()`s socket actions, API
+  terminates and `CallTerminator`'s close to it. An input posted while no worker holds the lease
+  waits in the stream instead of being lost; a cursor records what the owner took.
+  `CallEventHandler` routes each input to its handler, and handlers check `callMedia.owns` /
+  `hasAgentOffer` before touching media. The lease and inbox go when the call ends.
+  `callInbox.request()` is a post that waits for the owner's answer (on the requester's
+  `callio:worker:<boot>:replies` channel): a queue drained on another worker with no stored
+  agent offer asks the owner for one (`OFFER_AGENT`), so the agent leg is made in the call's own
+  room.
 - **Rooms.** The Socket.IO Redis adapter carries room emits to every worker. `EventBus` is
   strictly in-process.
-- **Redis connections per worker.** The base client, plus four pub/sub clients
-  (`PubSub-Publisher`, `PubSub-Subscriber`, `Adapter-Publisher`, `Adapter-Subscriber`). There is
+- **Redis connections per worker.** The base client, the call inbox's two (`CallInbox`,
+  `CallInbox-Reader`, a blocking stream read) and Socket.IO's two (`Adapter-Publisher`,
+  `Adapter-Subscriber`). There is
   also `LogLevels-Subscriber`, and `SIP-Commands` when SIP is registered. Media adds a FreeSWITCH
   event-socket connection and a listener FreeSWITCH connects back to (HTTP port + 1000).
 - **Admission control.** A worker holding `MAX_CALLS_PER_WORKER` calls' legs refuses new sockets
@@ -455,7 +462,7 @@ exits after 60 s even if a step hangs. PM2's `WORKER_KILL_TIMEOUT` (default 65 s
 5. Wait up to 45 s for recording uploads, then disconnect from the media server.
 6. Stop `redisCleanupService`, `queueTimeoutService`, `outboxDispatcher`, each channel's
    `stop()` and drachtio.
-7. Release the cleanup lock and close pub/sub.
+7. Release the cleanup lock, give up the calls' leases (`callInbox.close`) and close the adapter clients.
 8. Close the Redis clients.
 9. Close storage.
 10. Close the MySQL pool.

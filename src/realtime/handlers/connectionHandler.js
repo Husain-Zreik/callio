@@ -1,6 +1,6 @@
 // src/realtime/handlers/connectionHandler.js
 import { presenceService } from "../../core/agents/PresenceService.js";
-import { redisPubSubService } from "../../infra/redis/RedisPubSubService.js";
+import { callInbox } from "../../infra/cluster/CallInbox.js";
 import CallRepository from "../../persistence/CallRepository.js";
 import { callLifecycleLogger } from "../../core/calls/CallLifecycleLogger.js";
 import { EventTypes } from "../../core/events/EventTypes.js";
@@ -154,7 +154,7 @@ async function _handlePendingCallRedelivery(socket, userId, tenantId) {
             // impossible. The subscribed worker handles RINGING_AGENT_RECONNECT by
             // closing the old AGENT, creating a fresh one (same process as CUSTOMER),
             // and emitting call:incoming back to this exact socket via emitToSocket.
-            await redisPubSubService.publishCallEvent(
+            await callInbox.post(
                 pendingCall.id,
                 EventTypes.RINGING_AGENT_RECONNECT,
                 { callId: pendingCall.id, socketId: socket.id, userId, tenantId },

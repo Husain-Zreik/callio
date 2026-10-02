@@ -59,7 +59,7 @@ who hears it). All call logic stays in Callio.
   processes the call's inputs one at a time and commands media through the port. It holds no
   media state.
 - **Inputs go through a Redis Stream per call**, keyed by call id: socket actions, API calls,
-  channel events, media events. Pub/sub (`publishCallEvent` today) is at-most-once, so a
+  channel events, media events. Pub/sub (`publishCallEvent` before step 5.1) is at-most-once, so a
   restarting owner would miss events. A stream lets the next owner read what it hasn't
   processed.
 - **Failover.** When an owner's worker dies, another worker takes the lease, rebuilds the call

@@ -13,6 +13,10 @@ import { TransferEventHandler } from './handlers/TransferEventHandler.js';
 import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinator.js';
 import { logger } from '../../infra/logging/logger.js';
 import { endedDuringWork } from '../calls/endedDuringWork.js';
+import CallRepository from '../../persistence/CallRepository.js';
+import { CallStatus } from '../constants/CallConstants.js';
+import { callInbox } from '../../infra/cluster/CallInbox.js';
+import { mediaLegs } from '../media/MediaLegs.js';
 
 const log = logger('core.events.CallEventHandler');
 
@@ -42,6 +46,15 @@ export class CallEventHandler {
         return this.initiationHandler.handleCallStart(data, this.handleCallEvent);
     }
 
+    // A CALL_TERMINATED can be a request to end the call or the notice that it
+    // ended; the call's lease and inbox go only once the row says it's over.
+    async #releaseIfEnded(callId) {
+        const call = await CallRepository.findById(callId);
+        if (!call || call.status === CallStatus.TERMINATED || call.status === CallStatus.FAILED) {
+            await callInbox.release(callId, { purge: true });
+        }
+    }
+
     async handleCallEvent(eventType, data) {
         const { callId } = data;
 
@@ -54,6 +67,11 @@ export class CallEventHandler {
 
         try {
             switch (eventType) {
+                case EventTypes.OFFER_AGENT:
+                    // Asked by another worker (AgentAssignmentCoordinator): the
+                    // agent leg has to be made here, where the customer's leg is.
+                    return await mediaLegs.offerAgent(await CallRepository.findById(callId));
+
                 case EventTypes.CALL_INITIATE:
                     await this.initiationHandler.handleCallInitiated(data);
                     break;
@@ -102,6 +120,7 @@ export class CallEventHandler {
                 case EventTypes.CALL_TERMINATED:
                     this.connectionHandler.clearReconnectTimer(callId);
                     await this.terminationHandler.handleCallTerminated(data);
+                    await this.#releaseIfEnded(callId);
                     break;
 
                 case EventTypes.CALL_REJECTED:

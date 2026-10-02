@@ -14,6 +14,7 @@ export const EventTypes = {
     MONITOR_STOPPED: 'monitor_stopped',
     MONITOR_MODE_CHANGED: 'monitor_mode_changed',
     AGENT_PRIVATE_CHANGED: 'agent_private_changed',
+    OFFER_AGENT: 'offer_agent',              // a request (callInbox.request): the owner makes an agent offer
     CALL_INITIATE: 'call_initiate',
     CUSTOMER_ANSWER_RECEIVED: 'customer_answer_received',
     CALL_TERMINATED: 'call_terminated',

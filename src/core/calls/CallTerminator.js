@@ -22,7 +22,7 @@ import { customerChannels } from '../channels/CustomerChannels.js';
 import { callLifecycleLogger } from './CallLifecycleLogger.js';
 import { callParticipants } from './CallParticipants.js';
 import { mediaLegs } from '../media/MediaLegs.js';
-import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
+import { callInbox } from '../../infra/cluster/CallInbox.js';
 import { EventTypes } from '../events/EventTypes.js';
 import { CallDirection } from '../constants/CallConstants.js';
 import { logger } from '../../infra/logging/logger.js';
@@ -138,8 +138,11 @@ class CallTerminator {
         await mediaLegs.close(callId).catch((err) =>
             log.error({ callId, err }, 'Closing local media failed')
         );
-        if (media !== 'broadcast') return;
-        await redisPubSubService.publishCallEvent(callId, EventTypes.CALL_TERMINATED, { callId, reason: 'ended' })
+        if (media !== 'broadcast') {
+            await callInbox.release(callId, { purge: true });
+            return;
+        }
+        await callInbox.post(callId, EventTypes.CALL_TERMINATED, { callId, reason: 'ended' })
             .catch((err) => log.error({ callId, err }, 'Media close broadcast failed'));
     }
 

@@ -10,7 +10,7 @@
 // Pure read-only: only reads sizes of existing maps. Safe in production.
 import { callMedia }            from '../../core/media/CallMedia.js';
 import { ivrCoordinator }       from '../../core/ivr/IvrCoordinator.js';
-import { redisPubSubService }   from '../redis/RedisPubSubService.js';
+import { callInbox }            from '../cluster/CallInbox.js';
 
 const sz = (m) => { try { return m?.size ?? 0; } catch { return 0; } };
 
@@ -24,7 +24,7 @@ export function callStateCensus() {
         mediaRooms:        media.rooms ?? 0,
         mediaLegs:         media.legs ?? 0,
         ivrSessions:       sz(ivrCoordinator._sessions),
-        redisCallSubs:     sz(redisPubSubService.subscriptions),
+        ownedCalls:        callInbox.stats().owned,
     };
 
     let total = 0;

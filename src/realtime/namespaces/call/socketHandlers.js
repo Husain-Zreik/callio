@@ -3,7 +3,7 @@
 // Handlers check payload shape, authorize the socket for the call (identity
 // always from the verified token, never the payload), then hand off to the
 // core via Redis to the worker that owns the call's media.
-import { redisPubSubService } from "../../../infra/redis/RedisPubSubService.js";
+import { callInbox } from "../../../infra/cluster/CallInbox.js";
 import { callQueryService } from "../../../core/calls/CallQueryService.js";
 import { callEventHandler } from "../../../core/events/CallEventHandler.js";
 import { callAccess } from "../../../core/calls/CallAccess.js";
@@ -119,7 +119,7 @@ export default function registerCallSocketListeners(socket) {
             roomManager.joinCallRoom(socket, callData.callId);
 
             // Dial the customer via the standard Redis → CallEventHandler pipeline.
-            await redisPubSubService.publishCallEvent(callData.callId, EventTypes.CALL_INITIATE, { callId: callData.callId });
+            await callInbox.post(callData.callId, EventTypes.CALL_INITIATE, { callId: callData.callId });
 
             // The SDP answer goes to this socket only.
             socket.emit('call:started', callData);
@@ -151,7 +151,7 @@ export default function registerCallSocketListeners(socket) {
             socket.callId = callId;
             roomManager.joinCallRoom(socket, callId);
 
-            await redisPubSubService.publishCallEvent(callId, EventTypes.AGENT_JOINED, {
+            await callInbox.post(callId, EventTypes.AGENT_JOINED, {
                 callId,
                 userId: socket.user?.id,
                 tenantId: socket.tenant?.id,
@@ -178,7 +178,7 @@ export default function registerCallSocketListeners(socket) {
                 return;
             }
 
-            await redisPubSubService.publishCallEvent(callId, EventTypes.CALL_REJECTED, {
+            await callInbox.post(callId, EventTypes.CALL_REJECTED, {
                 callId,
                 userId: socket.user?.id,
                 tenantId: socket.tenant?.id,
@@ -208,7 +208,7 @@ export default function registerCallSocketListeners(socket) {
                 return;
             }
 
-            await redisPubSubService.publishCallEvent(callId, EventTypes.CALL_TERMINATED, {
+            await callInbox.post(callId, EventTypes.CALL_TERMINATED, {
                 callId,
                 userId: socket.user?.id,
                 tenantId: socket.tenant?.id,
@@ -245,7 +245,7 @@ export default function registerCallSocketListeners(socket) {
             socket.callId = callId;
             roomManager.joinCallRoom(socket, callId);
 
-            await redisPubSubService.publishCallEvent(callId, EventTypes.AGENT_RECONNECTED, {
+            await callInbox.post(callId, EventTypes.AGENT_RECONNECTED, {
                 callId,
                 userId: socket.user?.id,
                 tenantId: socket.tenant?.id,
@@ -277,7 +277,7 @@ export default function registerCallSocketListeners(socket) {
                 return;
             }
 
-            await redisPubSubService.publishCallEvent(callId, EventTypes.CALL_TRANSFERRED, {
+            await callInbox.post(callId, EventTypes.CALL_TRANSFERRED, {
                 callId,
                 newAgentId: agentId ?? null,
                 targetType: queueId ? 'queue' : 'agent',
@@ -298,7 +298,7 @@ export default function registerCallSocketListeners(socket) {
         const { callId, candidate, connectionType } = data || {};
         if (!callId || !candidate || !boundTo(callId)) return;
         try {
-            await redisPubSubService.publishCallEvent(callId, EventTypes.ICE_CANDIDATE, {
+            await callInbox.post(callId, EventTypes.ICE_CANDIDATE, {
                 callId,
                 candidate,
                 connectionType,
@@ -329,7 +329,7 @@ export default function registerCallSocketListeners(socket) {
             socket.isMonitoring = true;
             roomManager.joinCallRoom(socket, callId);
 
-            await redisPubSubService.publishCallEvent(callId, EventTypes.MONITOR_STARTED, {
+            await callInbox.post(callId, EventTypes.MONITOR_STARTED, {
                 callId,
                 userId: socket.user?.id,
                 tenantId: socket.tenant?.id,
@@ -355,7 +355,7 @@ export default function registerCallSocketListeners(socket) {
                 emitCallError({ callId, code: CallErrorCodes.MONITOR_FAILED, message: 'You are not monitoring this call', socket });
                 return;
             }
-            await redisPubSubService.publishCallEvent(callId, EventTypes.MONITOR_MODE_CHANGED, {
+            await callInbox.post(callId, EventTypes.MONITOR_MODE_CHANGED, {
                 callId,
                 mode,
                 socketId: socket.id,
@@ -374,7 +374,7 @@ export default function registerCallSocketListeners(socket) {
                 emitCallError({ callId: callId ?? null, code: CallErrorCodes.AGENT_PRIVATE_FAILED, message: 'You are not on this call', socket });
                 return;
             }
-            await redisPubSubService.publishCallEvent(callId, EventTypes.AGENT_PRIVATE_CHANGED, {
+            await callInbox.post(callId, EventTypes.AGENT_PRIVATE_CHANGED, {
                 callId,
                 active: !!active,
                 socketId: socket.id,
@@ -402,7 +402,7 @@ export default function registerCallSocketListeners(socket) {
             }
             if (!socket.isMonitoring || !boundTo(callId)) return;
 
-            await redisPubSubService.publishCallEvent(callId, EventTypes.MONITOR_STOPPED, {
+            await callInbox.post(callId, EventTypes.MONITOR_STOPPED, {
                 callId,
                 userId: socket.user?.id,
                 socketId: socket.id,
@@ -423,7 +423,7 @@ export default function registerCallSocketListeners(socket) {
 
         if (socket.isMonitoring) {
             log.info({ agentId: userId, callId: socket.callId }, 'Monitor disconnected from call');
-            await redisPubSubService.publishCallEvent(socket.callId, EventTypes.MONITOR_STOPPED, {
+            await callInbox.post(socket.callId, EventTypes.MONITOR_STOPPED, {
                 callId: socket.callId,
                 userId,
                 reason: 'disconnect',
@@ -431,7 +431,7 @@ export default function registerCallSocketListeners(socket) {
             });
         } else {
             log.info({ agentId: userId, callId: socket.callId }, 'Agent disconnected from call');
-            await redisPubSubService.publishCallEvent(socket.callId, EventTypes.AGENT_DISCONNECTED, {
+            await callInbox.post(socket.callId, EventTypes.AGENT_DISCONNECTED, {
                 callId: socket.callId,
                 userId,
                 tenantId: socket.tenant?.id,

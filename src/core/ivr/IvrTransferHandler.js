@@ -17,7 +17,7 @@ import { queueRouter } from '../routing/QueueRouter.js';
 import { callLifecycleLogger } from '../calls/CallLifecycleLogger.js';
 import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinator.js';
 import { callEventHandler } from '../events/CallEventHandler.js';
-import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
+import { callInbox } from '../../infra/cluster/CallInbox.js';
 import { callMedia } from '../media/CallMedia.js';
 import { mediaLegs } from '../media/MediaLegs.js';
 import { AgentAvailability } from '../constants/CallConstants.js';
@@ -104,7 +104,7 @@ class IvrTransferHandler {
         await CallRepository.enterQueue(callId, enteringQueueId).catch((err) =>
             log.warn({ callId, err }, 'Failed to put call in its queue')
         );
-        await redisPubSubService.subscribeToCallEvents(callId, callEventHandler.handleCallEvent);
+        await callInbox.own(callId, callEventHandler.handleCallEvent);
         const queuedCall = await CallRepository.findById(callId);
         if (queuedCall) {
             await mediaLegs.offerAgent(queuedCall).catch((err) =>

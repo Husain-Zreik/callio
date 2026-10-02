@@ -16,7 +16,7 @@ npm run test:e2e -- routing     # suites whose file name contains "routing"
 | Piece | Where | What it does |
 |---|---|---|
 | Fake Meta Graph API | `lib.mjs` `fakeMeta()`, port 3990 | Receives Callio's accept / terminate / connect calls and answers like Meta, including follow-up webhooks. Dials to `UNREACHABLE_NUMBER` fail. |
-| Simulated WhatsApp customers | `lib.mjs` | `wrtc` peers that post Meta-shaped webhooks and send a 440 Hz tone. |
+| Simulated WhatsApp customers | `lib.mjs` | `wrtc` peers that post Meta-shaped webhooks and send a 440 Hz tone. Every simulated peer's SDP has its ICE candidates removed, so rtpengine uses the address their checks arrive from (Docker's port forwarding); otherwise it could pick one of this machine's other interfaces (VPN, Hyper-V, WSL) that it reaches one way only, and a random leg went silent. |
 | Simulated agents | `lib.mjs` `connectAgent()` | Socket.IO clients with consumer-signed JWTs and `wrtc` peers sending their own tones (880 / 660 Hz), so every audio check (Goertzel, `listen()`) proves who is bridged to whom. |
 | Consumer event receiver | `lib.mjs` `eventReceiver()`, port 3999 | Verifies the signature of every event Callio delivers. |
 | Fake S3 | `lib.mjs` `fakeS3()`, port 3995, inside `run.mjs` | Path-style S3 (head bucket, put/get/delete, multipart), in memory, signatures unchecked. Recordings upload to it and the suites read them back through the API's signed URL. |
@@ -51,6 +51,11 @@ For each `*.test.mjs` (sorted): truncates the call tables, sets every agent
 `<seed.json> <callio-port>`, and stops Callio. Stopping Callio doesn't hang up
 its media-server endpoints; flushing Redis drops its boot id, so the next
 Callio's orphan sweep hangs them up at start.
+
+A suite whose first line is `// e2e-workers: N` gets N Callio workers instead,
+as PM2 runs them: ports `TEST_CALLIO_PORT` + 0…N−1, `WORKER_ID` `e2e-1`…, one
+Redis and database, logs `<suite>.callio.log`, `<suite>.w2.callio.log`, …. The
+suite receives them in `E2E_WORKERS` (`[{ port, pid }]`) and may kill one.
 
 After each suite it scans that suite's Callio log for
 `unhandled|exception|is not a function|unknown column|doesn't exist|AGENT STUCK`
@@ -89,6 +94,7 @@ so the fake S3 in `run.mjs` keeps answering while they do.
 | `queues.test.mjs` | Ring timeout passing the offer on (missed offer logged); decline passed on and never offered back; waiting call ended by customer hang-up; lone member re-offered; max wait overflowing to another queue (logged, consumer told); max wait with no overflow ending as TIMEOUT. |
 | `sdk.test.mjs` | The JS agent SDK (`sdk/agent-js`) in Node: token from `npm run agent:token`, connect, `setAvailability`; supervisor connect, `refreshSession()`; incoming Call, `accept()`, two-way audio; board and `monitor()` (listen / whisper); `hangup()`; customer hang-up; `decline()` passing the call on; reload recovering the media; another device and `switchHere()`; `startOutbound()`. |
 | `react.test.mjs` | The React bindings (`sdk/agent-react`) rendered in Node: provider connects, hooks go available, show and answer the ringing call (two-way audio), mute; a supervisor's hooks show the board and monitor; hang-up clears both; unmounting disconnects. |
+| `cluster.test.mjs` | Two workers (`// e2e-workers: 2`): a call arriving on worker 1 offered to and accepted by an agent on worker 2, bridged both ways, its room on worker 1 only, hung up from worker 2; a call waiting on worker 1 drained by worker 2 with no stored agent offer — the offer is made by worker 1 through the call's inbox, and bridges. |
 | `sip.test.mjs` | SIP channel provisioned via API (foreign trunk refused); inbound call as E.164, ringing, offered, 200 OK/ACK, G.711 audio both ways; agent hang-up sends BYE; caller hang-up; CANCEL while waiting; unknown number 404; max wait TIMEOUT with a final error to the carrier; IVR answering, in-band DTMF over SIP, caller giving up after the IVR (NO_ANSWER); outbound dialed through the trunk, answered, two-way audio, BYE; 486 → REJECTED/CUSTOMER; same consumer events as WhatsApp. Needs the local SIP gateway; see `docs/sip.md`. |
 
 When you add a feature, add its scenario to a suite.
