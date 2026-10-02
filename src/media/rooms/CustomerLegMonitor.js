@@ -5,9 +5,15 @@
 //     Packets, not sound: a muted customer still sends packets. rtpengine
 //     counts RTP and (multiplexed) RTCP together, so it's a rate: audio is
 //     ~50 packets/s, Opus DTX in silence ~2.5/s, RTCP alone ≤ 1 per few s —
-//     under 4 packets in 3 s is a drop, 3 in a second is audio again.
+//     under 4 packets in 3 s is a drop, 3 a second is audio again.
 //   - Every 4 s, the latest RTCP-derived report → 'call:network:quality:customer'
 //     (4 bars = best), the same shape the agent UI always had.
+//
+// One poller per worker drives every monitor: each call's poll is spread
+// over the second (no burst when many calls started together), a call never
+// has two queries in flight (a slow rtpengine isn't sent more work), and at
+// most MAX_IN_FLIGHT queries run at once. rtpengine's ng protocol has no
+// multi-call query, so this is as batched as it gets.
 import EventBus from '../../core/EventBus.js';
 import { rtpLegs } from './RtpLegs.js';
 import { logger } from '../../infra/logging/logger.js';
@@ -15,10 +21,12 @@ import { logger } from '../../infra/logging/logger.js';
 const log = logger('media.rooms.CustomerLegMonitor');
 
 const POLL_MS = 1000;
-const DROP_WINDOW_POLLS = 3;     // 3 s
+const TICK_MS = 100;
+const MAX_IN_FLIGHT = 32;
+const DROP_WINDOW_MS = 3000;
 const DROP_BELOW_PACKETS = 4;    // in the window
-const ACTIVE_FROM_PACKETS = 3;   // in one poll
-const QUALITY_EVERY = 4;         // polls
+const ACTIVE_FROM_PACKETS = 3;   // a second
+const QUALITY_MS = 4000;
 
 function qualityFrom({ packetLoss, jitter }) {
     const lossPct = Number(packetLoss ?? 0);
@@ -32,43 +40,95 @@ function qualityFrom({ packetLoss, jitter }) {
     return { bars, label, score, packetLoss: +lossPct.toFixed(1), jitter: Math.round(j) };
 }
 
+class LegPoller {
+    constructor() {
+        this.monitors = new Set();
+        this.inFlight = 0;
+        this._timer = null;
+    }
+
+    add(monitor) {
+        monitor._nextAt = Date.now() + Math.floor(Math.random() * POLL_MS);
+        this.monitors.add(monitor);
+        if (!this._timer) {
+            this._timer = setInterval(() => this._tick(), TICK_MS);
+            this._timer.unref();
+        }
+    }
+
+    remove(monitor) {
+        this.monitors.delete(monitor);
+        if (!this.monitors.size && this._timer) {
+            clearInterval(this._timer);
+            this._timer = null;
+        }
+    }
+
+    _tick() {
+        const now = Date.now();
+        for (const m of this.monitors) {
+            if (this.inFlight >= MAX_IN_FLIGHT) return;
+            if (m._busy || now < m._nextAt) continue;
+            // Late (rtpengine slow, cap reached): next poll a period from now,
+            // not a catch-up burst.
+            m._nextAt = Math.max(m._nextAt + POLL_MS, now + POLL_MS / 2);
+            m._busy = true;
+            this.inFlight++;
+            m._poll()
+                .catch((err) => log.debug({ callId: m.callId, err }, 'Customer leg poll failed'))
+                .finally(() => { m._busy = false; this.inFlight--; });
+        }
+    }
+}
+
+const poller = new LegPoller();
+
 export class CustomerLegMonitor {
     constructor(callId, rtpKey) {
         this.callId = callId;
         this.rtpKey = rtpKey;
-        this._timer = null;
-        this._samples = [];        // packet counts, one per poll, newest last
+        this._samples = [];        // { at, packets }, oldest first
         this._state = 'waiting';   // waiting (no audio yet) | active | drop
-        this._polls = 0;
+        this._qualityAt = 0;
+        this._busy = false;
+        this._nextAt = 0;
+        this._stopped = false;
     }
 
     start() {
-        if (this._timer) return;
-        this._timer = setInterval(() => this._poll().catch((err) =>
-            log.debug({ callId: this.callId, err }, 'Customer leg poll failed')), POLL_MS);
-        this._timer.unref();
+        this._stopped = false;
+        poller.add(this);
     }
 
     stop() {
-        clearInterval(this._timer);
-        this._timer = null;
+        this._stopped = true;
+        poller.remove(this);
     }
 
     async _poll() {
         const { packets, quality } = await rtpLegs.received(this.rtpKey);
-        this._samples.push(packets);
-        if (this._samples.length > DROP_WINDOW_POLLS + 1) this._samples.shift();
-        const n = this._samples.length;
-        const lastPoll = n >= 2 ? this._samples[n - 1] - this._samples[n - 2] : 0;
-        const window = n > DROP_WINDOW_POLLS ? this._samples[n - 1] - this._samples[0] : null;
+        if (this._stopped) return;
+        const now = Date.now();
+        const samples = this._samples;
+        samples.push({ at: now, packets });
+        // Keep exactly one sample at or beyond the window's start.
+        while (samples.length > 2 && now - samples[1].at >= DROP_WINDOW_MS) samples.shift();
 
-        if (this._state !== 'active' && lastPoll >= ACTIVE_FROM_PACKETS) {
+        const n = samples.length;
+        const prev = n >= 2 ? samples[n - 2] : null;
+        const sinceLast = prev ? packets - prev.packets : 0;
+        const perSecond = prev ? (sinceLast * 1000) / Math.max(1, now - prev.at) : 0;
+        const first = samples[0];
+        const windowFull = now - first.at >= DROP_WINDOW_MS;
+
+        if (this._state !== 'active' && perSecond >= ACTIVE_FROM_PACKETS) {
             if (this._state === 'drop') this._set('active');
             else this._state = 'active';
-        } else if (this._state === 'active' && window !== null && window < DROP_BELOW_PACKETS) {
+        } else if (this._state === 'active' && windowFull && packets - first.packets < DROP_BELOW_PACKETS) {
             this._set('drop');
         }
-        if (++this._polls % QUALITY_EVERY === 0 && this._state === 'active' && quality) {
+        if (this._state === 'active' && quality && now - this._qualityAt >= QUALITY_MS) {
+            this._qualityAt = now;
             EventBus.emit('call:network:quality:customer', { callId: this.callId, ...qualityFrom(quality) });
         }
     }
