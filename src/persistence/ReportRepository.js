@@ -2,6 +2,7 @@
 // Read-only queries behind the Management API reports (core/reports).
 // Every query is scoped to one tenant.
 import connection from '../../config/dbConnection.js';
+import { reportedAvailability } from './AgentRepository.js';
 
 const LIVE = "('INITIATED', 'RINGING', 'IN_PROGRESS')";
 
@@ -53,7 +54,7 @@ class ReportRepository {
 
     async agents(tenantId) {
         const [rows] = await connection.execute(
-            'SELECT id, external_ref, name, role, availability, deleted_at FROM agents WHERE tenant_id = ?',
+            `SELECT id, external_ref, name, role, ${reportedAvailability()} AS availability, deleted_at FROM agents WHERE tenant_id = ?`,
             [tenantId]
         );
         return rows;
@@ -74,11 +75,11 @@ class ReportRepository {
             [tenantId]
         );
         const [members] = await connection.execute(
-            `SELECT m.queue_id, a.availability, COUNT(*) AS n
+            `SELECT m.queue_id, ${reportedAvailability('a')} AS availability, COUNT(*) AS n
              FROM queue_members m JOIN agents a ON a.id = m.agent_id
              JOIN queues q ON q.id = m.queue_id
              WHERE q.tenant_id = ? AND a.deleted_at IS NULL
-             GROUP BY m.queue_id, a.availability`,
+             GROUP BY m.queue_id, 2`,
             [tenantId]
         );
         const [[totals]] = await connection.execute(

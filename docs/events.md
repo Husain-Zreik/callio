@@ -111,7 +111,7 @@ Management API returns), plus the extra fields below.
 | `call.ivr.completed` | An IVR session ended | `outcome` (`transferred`/`hung_up`/`timeout`/`error`), `duration_seconds` |
 | `call.ended` | Terminated or failed — see `terminationReason`, `terminatedBy`, `durations` | — |
 | `recording.completed` | The call's recording is stored; fetch it with `GET /v1/calls/{id}/recording` | `recording_id`, `duration_seconds` |
-| `agent.availability.changed` | An agent's availability was set (`AVAILABLE`, `ON_CALL`, `OFFLINE`) | `data` is `{ agent_ref, agent_id, availability, reason? }`; `reason: auto_offline_missed_calls` when the auto-offline policy took the agent offline |
+| `agent.availability.changed` | An agent's reported availability changed: `ON_CALL` while a call holds them, else their shift (`AVAILABLE`, `OFFLINE`) | `data` is `{ agent_ref, agent_id, availability, reason? }`; `reason: auto_offline_missed_calls` when the auto-offline policy took the agent offline |
 
 - `call.created`, `call.answered` and `call.ended` are sent at most once per
   call.

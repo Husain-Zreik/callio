@@ -44,11 +44,10 @@ export class TransferEventHandler {
             ]);
 
             const resolved = await this._resolveTransferTarget({
-                tenantId, targetType, targetQueueId, newAgentId, excludeAgentId: oldAgentId,
+                callId, tenantId, targetType, targetQueueId, newAgentId, excludeAgentId: oldAgentId,
             });
 
             if (oldAgentId && String(oldAgentId) === String(resolved.newAgentId)) {
-                await agentAssignmentCoordinator.releaseAgentIfIdle(resolved.newAgentId);
                 throw new Error('Call is already assigned to this agent');
             }
 
@@ -56,7 +55,7 @@ export class TransferEventHandler {
                 ? await CallRepository.assignCallToAgentIfUnassigned(callId, resolved.newAgentId)
                 : await CallRepository.updateCallAgentIfCurrent(callId, oldAgentId, resolved.newAgentId);
             if (!moved) {
-                await agentAssignmentCoordinator.releaseAgentIfIdle(resolved.newAgentId);
+                await agentAssignmentCoordinator.releaseAgent(resolved.newAgentId, callId);
                 throw new Error('Call transfer conflict: call state changed during transfer');
             }
             if (resolved.queueId && String(resolved.queueId) !== String(call.queue_id)) {
@@ -67,7 +66,7 @@ export class TransferEventHandler {
 
             if (oldAgentId) {
                 await callParticipants.leave(callId, { kind: ParticipantKind.AGENT, agentId: oldAgentId, reason: LeaveReason.TRANSFERRED });
-                await agentAssignmentCoordinator.releaseAgentIfIdle(oldAgentId);
+                await agentAssignmentCoordinator.releaseAgent(oldAgentId, callId);
             }
 
             // The old agent leaves the room (the customer hears the reconnect tone
@@ -134,15 +133,15 @@ export class TransferEventHandler {
         }
     }
 
-    // Claims the target agent (AVAILABLE → ON_CALL). Returns
+    // Claims the target agent for the call (on shift and not busy). Returns
     // { targetType, queueId, newAgentId, newAgent }.
-    async _resolveTransferTarget({ tenantId, targetType, targetQueueId, newAgentId, excludeAgentId }) {
+    async _resolveTransferTarget({ callId, tenantId, targetType, targetQueueId, newAgentId, excludeAgentId }) {
         if (targetType === 'queue' || (!newAgentId && targetQueueId)) {
             if (!targetQueueId) throw new Error('Missing target queue');
             const queue = await QueueRepository.findForTenant(targetQueueId, tenantId);
             if (!queue || queue.status !== 'ACTIVE') throw new Error('Target queue not found for this tenant');
 
-            const agent = await queueRouter.claimMemberForTransfer(queue, excludeAgentId);
+            const agent = await queueRouter.claimMemberForTransfer(queue, callId, excludeAgentId);
             if (!agent) throw new Error('No available agents in the selected queue');
             return { targetType: 'queue', queueId: queue.id, newAgentId: agent.id, newAgent: agent };
         }
@@ -153,7 +152,7 @@ export class TransferEventHandler {
         if (!target || String(target.tenant_id) !== String(tenantId)) {
             throw new Error('Target agent does not belong to this tenant');
         }
-        if (!await AgentRepository.claimAgentIfAvailable(newAgentId)) {
+        if (!await AgentRepository.claimAgentForCall(newAgentId, callId)) {
             throw new Error('Target agent is not available');
         }
         return { targetType: 'agent', queueId: null, newAgentId: target.id, newAgent: target };

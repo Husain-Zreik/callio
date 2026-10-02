@@ -22,7 +22,7 @@ const receiver = eventReceiver({ secret: seed.webhook_secret });
 const db = await testDb();
 const q = async (sql, params = []) => (await db.execute(sql, params))[0];
 const callRow = async (id) => (await q('SELECT * FROM calls WHERE id = ?', [id]))[0];
-const availability = async (ref) => (await q('SELECT availability FROM agents WHERE external_ref = ?', [ref]))[0]?.availability;
+const availability = async (ref) => (await q("SELECT IF(busy_call_id IS NULL, availability, 'ON_CALL') AS availability FROM agents WHERE external_ref = ?", [ref]))[0]?.availability;
 
 await meta.listen();
 await receiver.listen();
@@ -76,6 +76,15 @@ try {
     check('the answering agent is ON_CALL, the other still AVAILABLE',
         (await availability('agent-1')) === 'ON_CALL' && (await availability('agent-2')) === 'AVAILABLE');
 
+    // The shift and the call are separate: going OFFLINE mid-call changes the
+    // shift, the call still holds the agent.
+    const midCall = await api('PUT', '/v1/tenants/demo/agents/agent-1/availability', { availability: 'OFFLINE' });
+    const shiftMid = (await q('SELECT availability, busy_call_id FROM agents WHERE external_ref = ?', ['agent-1']))[0];
+    check('going OFFLINE during a call keeps the agent ON_CALL (shift OFFLINE, still held by the call)',
+        midCall.body.agent?.availability === 'ON_CALL' && shiftMid.availability === 'OFFLINE' && String(shiftMid.busy_call_id) === String(inCall.id),
+        `api=${midCall.body.agent?.availability} shift=${shiftMid.availability} busy=${shiftMid.busy_call_id}`);
+    await api('PUT', '/v1/tenants/demo/agents/agent-1/availability', { availability: 'AVAILABLE' });
+
     // ── The agent moves the call to their other device ──
     const a1b = await connectAgent(CALLIO, seed, 'agent-1', 'AGENT', 'agent-1-phone');
     a1b.peer = newPeer(660);
@@ -104,6 +113,7 @@ try {
     a1.peer.close(); a1.peer = null;
 
     // ── Outbound ──
+    const shiftBefore = await availability('agent-2');
     const intent = await api('POST', '/v1/tenants/demo/calls', {
         channel_ref: 'whatsapp-main', agent_ref: 'agent-2',
         customer: { address: '+96181030841', name: 'Outbound Customer' }, external_ref: 'crm-call-42',
@@ -132,8 +142,9 @@ try {
     check('Management API accepts a terminate request', term.status === 202, `HTTP ${term.status}`);
     const outEnded = await waitFor(async () => { const r = await callRow(outId); return r.status === 'TERMINATED' ? r : null; }, 10000, 'outbound ended');
     check('an API hang-up is recorded as the consumer hang-up (terminated_by CONSUMER)', outEnded.terminated_by === 'CONSUMER', outEnded.terminated_by);
-    await waitFor(async () => (await availability('agent-2')) === 'OFFLINE', 5000, 'agent-2 offline');
-    check('outbound call ended; agent goes OFFLINE after an outbound call', true);
+    const shiftAfter = await waitFor(async () => { const v = await availability('agent-2'); return v !== 'ON_CALL' ? v : null; }, 5000, 'agent-2 released').catch(() => 'ON_CALL');
+    check('outbound call ended; the agent is back to their shift, not taken OFFLINE', shiftBefore === 'AVAILABLE' && shiftAfter === 'AVAILABLE',
+        `before=${shiftBefore} after=${shiftAfter}`);
     a2.peer.close(); a2.peer = null;
 
     const detail = await api('GET', `/v1/calls/${inCall.id}`);
@@ -179,7 +190,7 @@ try {
         `${refusedRow.termination_reason}/${refusedRow.terminated_by}`);
     check('the agent is told why (call:error PROVIDER_TRIGGER_FAILED)', a2.errors.some((e) => e.callId === refusedId && e.code === 'PROVIDER_TRIGGER_FAILED'),
         JSON.stringify(a2.errors));
-    await waitFor(async () => (await availability('agent-2')) === 'OFFLINE', 5000, 'agent-2 offline after the failed dial');
+    await waitFor(async () => (await availability('agent-2')) === 'AVAILABLE', 5000, 'agent-2 back on shift after the failed dial');
     a2.peer.close(); a2.peer = null;
 
     // ── Idempotency-Key ──

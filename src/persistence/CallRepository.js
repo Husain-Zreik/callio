@@ -184,17 +184,19 @@ class CallRepository {
     // Regular (non-IVR) calls waiting in a queue. IVR-transferred calls are
     // excluded: they have their own assignment path (assignTransferredCall) and
     // must not block a new call from claiming an agent synchronously.
-    async hasUnassignedCalls(queueId) {
+    // An older call than beforeCallId waiting unassigned in the queue.
+    async hasUnassignedCalls(queueId, beforeCallId) {
         const [rows] = await connection.execute(
             `SELECT 1 FROM calls
              WHERE queue_id = ?
+               AND id < ?
                AND status = 'RINGING'
                AND agent_id IS NULL
                AND direction = 'INBOUND'
                AND ivr_flow_id IS NULL
                AND (state IS NULL OR state != 'IVR')
              LIMIT 1`,
-            [queueId]
+            [queueId, beforeCallId]
         );
         return rows.length > 0;
     }

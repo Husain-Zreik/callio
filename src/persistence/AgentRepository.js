@@ -1,14 +1,37 @@
 // src/persistence/AgentRepository.js
-// Agents and their live availability (AVAILABLE / ON_CALL / OFFLINE).
+// Agents, their shift (availability) and the call holding them (busy_call_id).
+//
+// Two separate facts (docs/direct-lines.md, A1):
+//   availability   the shift, AVAILABLE / OFFLINE: set by the agent, the API,
+//                  auto-offline. Only queues read it.
+//   busy_call_id   the call holding the agent: claimed with a guarded update
+//                  (busy_call_id IS NULL), released only by that call. The row
+//                  is the lock that stops two routes claiming one agent.
+// Reads report one status, as the contract always did: ON_CALL while busy,
+// else the shift (reportedAvailability).
 import connection from '../../config/dbConnection.js';
 
-const AGENT_COLUMNS = 'id, tenant_id, external_ref, name, role, availability';
+// The status an agent reports. 'ON_CALL' in the availability column is the
+// value the code before busy_call_id wrote; a worker still running it during a
+// deploy can write it, so it reads as the AVAILABLE shift until a later
+// migration drops the value.
+export const reportedAvailability = (alias = 'agents') =>
+    `CASE WHEN ${alias}.busy_call_id IS NOT NULL THEN 'ON_CALL'
+          WHEN ${alias}.availability = 'OFFLINE' THEN 'OFFLINE'
+          ELSE 'AVAILABLE' END`;
 
-// No other call the agent is on (any active status).
-const NO_ACTIVE_CALL = `NOT EXISTS (
+const ON_SHIFT = `availability IN ('AVAILABLE', 'ON_CALL')`;
+
+const AGENT_COLUMNS = `id, tenant_id, external_ref, name, role, ${reportedAvailability()} AS availability, busy_call_id`;
+
+// No other call the agent is on (any active status). Kept next to the
+// busy_call_id guard: an outbound intent not started yet (INITIATED) has the
+// agent on it without holding them.
+const noOtherActiveCall = (excludeCallParam = false) => `NOT EXISTS (
     SELECT 1 FROM calls c
     WHERE c.agent_id = agents.id
     AND c.status IN ('INITIATED', 'RINGING', 'IN_PROGRESS')
+    ${excludeCallParam ? 'AND c.id != ?' : ''}
 )`;
 
 function emptyStats() {
@@ -118,15 +141,16 @@ class AgentRepository {
 
     async softDelete(tenantId, externalRef) {
         const [result] = await connection.execute(
-            `UPDATE agents SET deleted_at = NOW(), availability = 'OFFLINE', updated_at = NOW()
+            `UPDATE agents SET deleted_at = NOW(), availability = 'OFFLINE', busy_call_id = NULL, updated_at = NOW()
              WHERE tenant_id = ? AND external_ref = ? AND deleted_at IS NULL`,
             [tenantId, externalRef]
         );
         return result.affectedRows > 0;
     }
 
-    // ── Availability ────────────────────────────────────────────────────────────
+    // ── Shift ───────────────────────────────────────────────────────────────────
 
+    // Sets the shift (AVAILABLE / OFFLINE). Doesn't touch busy_call_id.
     async updateAgentAvailability(agentId, availability) {
         const [result] = await connection.execute(
             `UPDATE agents SET availability = ?, availability_changed_at = NOW(), updated_at = NOW()
@@ -136,51 +160,15 @@ class AgentRepository {
         return result.affectedRows > 0;
     }
 
-    async setAgentAvailableIfNoActiveCalls(agentId) {
-        const [result] = await connection.execute(
-            `UPDATE agents
-             SET availability = 'AVAILABLE', availability_changed_at = NOW(), updated_at = NOW()
-             WHERE id = ? AND availability = 'ON_CALL' AND ${NO_ACTIVE_CALL}`,
-            [agentId]
-        );
-        return result.affectedRows > 0;
-    }
-
-    async setAgentOfflineIfNoActiveCalls(agentId) {
-        const [result] = await connection.execute(
-            `UPDATE agents
-             SET availability = 'OFFLINE', availability_changed_at = NOW(), updated_at = NOW()
-             WHERE id = ? AND availability = 'ON_CALL' AND ${NO_ACTIVE_CALL}`,
-            [agentId]
-        );
-        return result.affectedRows > 0;
-    }
-
-    // When releasing to AVAILABLE, skips agents still on another active call —
-    // cleanup may batch-release agents of a stuck RINGING call who are already
-    // on a separate IN_PROGRESS call.
-    async batchUpdateAgentAvailability(agentIds, availability) {
-        if (!agentIds || agentIds.length === 0) return;
-        const unique = [...new Set(agentIds)];
-        const placeholders = unique.map(() => '?').join(', ');
-        const guard = availability === 'AVAILABLE' ? `AND ${NO_ACTIVE_CALL}` : '';
-        await connection.execute(
-            `UPDATE agents
-             SET availability = ?, availability_changed_at = NOW(), updated_at = NOW()
-             WHERE id IN (${placeholders}) ${guard}`,
-            [availability, ...unique]
-        );
-    }
-
-    // Counts by availability over the given agents. Returns { total, available, on_call, offline }.
+    // Counts by reported status over the given agents. Returns { total, available, on_call, offline }.
     async getAvailabilityStatsForAgentIds(agentIds = []) {
         const ids = [...new Set((agentIds || []).map(Number).filter(Number.isFinite))];
         if (!ids.length) return emptyStats();
         const placeholders = ids.map(() => '?').join(',');
         const [rows] = await connection.execute(
-            `SELECT availability, COUNT(*) AS cnt FROM agents
+            `SELECT ${reportedAvailability()} AS availability, COUNT(*) AS cnt FROM agents
              WHERE id IN (${placeholders}) AND deleted_at IS NULL
-             GROUP BY availability`,
+             GROUP BY 1`,
             ids
         );
         return tallyStats(rows);
@@ -188,18 +176,19 @@ class AgentRepository {
 
     async getTenantAvailabilityStats(tenantId) {
         const [rows] = await connection.execute(
-            `SELECT availability, COUNT(*) AS cnt FROM agents
+            `SELECT ${reportedAvailability()} AS availability, COUNT(*) AS cnt FROM agents
              WHERE tenant_id = ? AND deleted_at IS NULL
-             GROUP BY availability`,
+             GROUP BY 1`,
             [tenantId]
         );
         return tallyStats(rows);
     }
 
-    // ── Atomic claims ───────────────────────────────────────────────────────────
+    // ── Busy: claims and releases ───────────────────────────────────────────────
 
-    // Claim an agent and assign a queued call in one transaction.
-    //   { claimed: false }                  agent not AVAILABLE — give up
+    // Claim an on-shift agent for a waiting inbound call and assign it, in one
+    // transaction.
+    //   { claimed: false }                  agent not free — give up
     //   { claimed: true, assigned: false }  call taken by another worker — try the next call
     //   { claimed: true, assigned: true }   success
     async claimAgentAndAssignCall(agentId, callId) {
@@ -208,10 +197,9 @@ class AgentRepository {
             await conn.beginTransaction();
 
             const [agentResult] = await conn.execute(
-                `UPDATE agents
-                 SET availability = 'ON_CALL', availability_changed_at = NOW(), updated_at = NOW()
-                 WHERE id = ? AND availability = 'AVAILABLE' AND deleted_at IS NULL AND ${NO_ACTIVE_CALL}`,
-                [agentId]
+                `UPDATE agents SET busy_call_id = ?, updated_at = NOW()
+                 WHERE id = ? AND busy_call_id IS NULL AND ${ON_SHIFT} AND deleted_at IS NULL AND ${noOtherActiveCall()}`,
+                [callId, agentId]
             );
             if (agentResult.affectedRows === 0) {
                 await conn.rollback();
@@ -243,32 +231,64 @@ class AgentRepository {
         }
     }
 
-    async claimAgentIfAvailable(agentId) {
+    // Claim an on-shift agent for a call that is already theirs to take (a
+    // transfer target). The caller moves the call to them next.
+    async claimAgentForCall(agentId, callId) {
         const [result] = await connection.execute(
-            `UPDATE agents
-             SET availability = 'ON_CALL', availability_changed_at = NOW(), updated_at = NOW()
-             WHERE id = ? AND availability = 'AVAILABLE' AND deleted_at IS NULL AND ${NO_ACTIVE_CALL}`,
-            [agentId]
+            `UPDATE agents SET busy_call_id = ?, updated_at = NOW()
+             WHERE id = ? AND busy_call_id IS NULL AND ${ON_SHIFT} AND deleted_at IS NULL AND ${noOtherActiveCall()}`,
+            [callId, agentId]
         );
         return result.affectedRows > 0;
     }
 
-    // RING_ALL accept: the call was offered without claiming anyone, so the
-    // accepting agent is flipped ON_CALL here — but only while that call is
-    // still active and theirs. A hang-up racing the end of the accept flow
-    // releases the agent first; flipping them back would strand them ON_CALL.
-    async markOnCall(agentId, callId) {
+    // The agent starts a call that is already theirs — a RING_ALL accept or an
+    // outbound call:start — whatever their shift: only while that call is still
+    // active and theirs, and they're on no other. A hang-up racing the end of
+    // the accept flow releases the agent first; holding them again would strand
+    // them busy. Returns true when this call now holds them (also when it
+    // already did).
+    async holdForOwnCall(agentId, callId) {
         const [result] = await connection.execute(
-            `UPDATE agents SET availability = 'ON_CALL', availability_changed_at = NOW(), updated_at = NOW()
-             WHERE id = ? AND availability != 'ON_CALL' AND deleted_at IS NULL
+            `UPDATE agents SET busy_call_id = ?, updated_at = NOW()
+             WHERE id = ? AND (busy_call_id IS NULL OR busy_call_id = ?) AND deleted_at IS NULL
+               AND ${noOtherActiveCall(true)}
                AND EXISTS (
                    SELECT 1 FROM calls c
                    WHERE c.id = ? AND c.agent_id = agents.id
                      AND c.status IN ('INITIATED', 'RINGING', 'IN_PROGRESS')
                )`,
+            [callId, agentId, callId, callId, callId]
+        );
+        if (result.affectedRows > 0) return true;
+        const [rows] = await connection.execute('SELECT busy_call_id FROM agents WHERE id = ?', [agentId]);
+        return String(rows[0]?.busy_call_id) === String(callId);
+    }
+
+    // Releases the agent from this call only: a release for a call that no
+    // longer holds them (already released, or they moved on) does nothing.
+    async releaseFromCall(agentId, callId) {
+        const [result] = await connection.execute(
+            `UPDATE agents SET busy_call_id = NULL, updated_at = NOW()
+             WHERE id = ? AND busy_call_id = ?`,
             [agentId, callId]
         );
         return result.affectedRows > 0;
+    }
+
+    // Agents held by a call that has ended or no longer exists — what a missed
+    // release leaves behind. Uses the busy_call_id index, so it reads only busy
+    // agents.
+    async findHeldByEndedCalls(limit = 200) {
+        const safeLimit = Math.max(1, Math.min(Number(limit) || 200, 1000));
+        const [rows] = await connection.execute(
+            `SELECT a.id, a.tenant_id, a.busy_call_id FROM agents a
+             LEFT JOIN calls c ON c.id = a.busy_call_id
+             WHERE a.busy_call_id IS NOT NULL
+               AND (c.id IS NULL OR c.status NOT IN ('INITIATED', 'RINGING', 'IN_PROGRESS'))
+             LIMIT ${safeLimit}`
+        );
+        return rows;
     }
 }
 

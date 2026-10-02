@@ -14,7 +14,7 @@ import { EventTypes } from '../events/EventTypes.js';
 import { callAgentAssignmentService } from './CallAgentAssignmentService.js';
 import { queueRouter } from './QueueRouter.js';
 import { callLifecycleLogger } from '../calls/CallLifecycleLogger.js';
-import { ConnectionType, AssignmentType, AgentAvailability, AgentRole } from '../constants/CallConstants.js';
+import { ConnectionType, AssignmentType, AgentAvailability, AgentRole, CallStatus } from '../constants/CallConstants.js';
 import { IncomingCallPayload } from '../calls/IncomingCallPayload.js';
 import { presenceService } from '../agents/PresenceService.js';
 import { offerHistory } from './OfferHistory.js';
@@ -22,6 +22,8 @@ import { autoOfflinePolicy } from './AutoOfflinePolicy.js';
 import { logger } from '../../infra/logging/logger.js';
 
 const log = logger('core.routing.AgentAssignmentCoordinator');
+
+const ACTIVE_STATUSES = new Set([CallStatus.INITIATED, CallStatus.RINGING, CallStatus.IN_PROGRESS]);
 
 class AgentAssignmentCoordinator {
     constructor() {
@@ -55,45 +57,54 @@ class AgentAssignmentCoordinator {
     }
 
     // ── Availability ─────────────────────────────────────────────────────────
+    //
+    // Two facts (AgentRepository): the shift (availability) and the call
+    // holding the agent (busy_call_id). Agents report ON_CALL while busy, else
+    // their shift; every broadcast below sends that reported status.
 
-    // Centralized so the "tell the agent's own socket" broadcast can't be
-    // forgotten at any of the call-ending paths that release an agent.
-    async releaseAgentIfIdle(agentId) {
-        if (!agentId) return false;
-        const released = await AgentRepository.setAgentAvailableIfNoActiveCalls(agentId);
-        if (released) await this._broadcastAvailability(agentId, AgentAvailability.AVAILABLE);
+    /**
+     * The call no longer holds the agent: after it ended, the agent passed the
+     * offer on, it overflowed, or it was transferred away. Exact — a release
+     * for a call that doesn't hold them does nothing. offline: the agent is
+     * gone (never reconnected), so their shift ends too.
+     */
+    async releaseAgent(agentId, callId, { offline = false } = {}) {
+        if (!agentId || !callId) return false;
+        const released = await AgentRepository.releaseFromCall(agentId, callId);
+        if (offline) await AgentRepository.updateAgentAvailability(agentId, AgentAvailability.OFFLINE);
+        if (released || offline) await this._broadcastCurrent(agentId);
         return released;
     }
 
-    // Outbound calls end with the agent OFFLINE rather than AVAILABLE: safer
-    // than auto-queueing them into inbound routing right after placing a call.
-    async releaseAgentOfflineIfIdle(agentId) {
-        if (!agentId) return false;
-        const released = await AgentRepository.setAgentOfflineIfNoActiveCalls(agentId);
-        if (released) await this._broadcastAvailability(agentId, AgentAvailability.OFFLINE);
-        return released;
-    }
-
-    async _broadcastAvailability(agentId, availability, extra = {}) {
+    // An agent's reported status, read back and broadcast. Centralized so the
+    // "tell the agent's own socket" broadcast can't be forgotten.
+    async _broadcastCurrent(agentId, extra = {}) {
         try {
-            const tenantId = await AgentRepository.getTenantId(agentId);
-            if (!tenantId) return;
-            EventBus.emit('call:agent_availability', {
-                tenantId,
-                userId: agentId,
-                availability,
-                updatedAt: new Date().toISOString(),
-                ...extra,
-            });
+            const agent = await AgentRepository.findById(agentId);
+            if (!agent) return null;
+            this._broadcast(agent.tenant_id, agentId, agent.availability, extra);
+            return agent.availability;
         } catch (err) {
             log.error({ agentId, err }, 'Failed to broadcast availability');
+            return null;
         }
+    }
+
+    _broadcast(tenantId, agentId, availability, extra = {}) {
+        EventBus.emit('call:agent_availability', {
+            tenantId,
+            userId: agentId,
+            availability,
+            updatedAt: new Date().toISOString(),
+            ...extra,
+        });
     }
 
     /**
      * An agent (or a supervisor, for another agent of the same tenant) sets
-     * availability. ON_CALL can't be set by hand — it follows real calls.
-     * Returns the resulting availability, or null if refused.
+     * their shift. ON_CALL can't be set by hand — it follows real calls. A busy
+     * agent still reports ON_CALL; the shift applies to queues from their next
+     * call. Returns the resulting reported status, or null if refused.
      */
     async setAvailability(tenantId, actorAgentId, targetAgentId, availability) {
         if (![AgentAvailability.AVAILABLE, AgentAvailability.OFFLINE].includes(availability)) return null;
@@ -108,31 +119,25 @@ class AgentAssignmentCoordinator {
             }
         }
 
-        // An agent on a live call stays ON_CALL until it ends.
-        if (target.availability === AgentAvailability.ON_CALL
-            && await CallRepository.hasAgentActiveCall(targetAgentId, 0)) {
-            return AgentAvailability.ON_CALL;
-        }
-
         await AgentRepository.updateAgentAvailability(targetAgentId, availability);
+        const reported = target.busy_call_id ? AgentAvailability.ON_CALL : availability;
         // Setting the same value again still confirms it to the agent's sockets,
         // but isn't a change for the consumer (changed: false).
-        await this._broadcastAvailability(targetAgentId, availability, { changed: target.availability !== availability });
+        this._broadcast(tenantId, targetAgentId, reported, { changed: target.availability !== reported });
 
-        if (availability === AgentAvailability.AVAILABLE) {
+        if (reported === AgentAvailability.AVAILABLE) {
             await this.drainForTenant(tenantId).catch((err) =>
                 log.error({ tenantId, err }, 'Drain after availability change failed')
             );
         }
         await this.emitQueueUpdate(tenantId).catch(() => { });
-        return availability;
+        return reported;
     }
 
     /**
-     * Re-reads an agent's availability and broadcasts it (a client resync).
-     * Safety net: an agent stuck ON_CALL with no active call (a connect +
-     * terminate webhook race) is released to OFFLINE — safer than AVAILABLE,
-     * which would push them into routing on a page refresh.
+     * Re-reads an agent's status and broadcasts it (a client resync). Safety
+     * net for the agent's own resync: a call that ended without releasing them
+     * releases them now.
      */
     async syncAgentAvailability(tenantId, actorAgentId, targetAgentId) {
         try {
@@ -145,18 +150,17 @@ class AgentAssignmentCoordinator {
             }
 
             let availability = target.availability;
-            if (availability === AgentAvailability.ON_CALL && String(actorAgentId) === String(targetAgentId)) {
-                if (await AgentRepository.setAgentOfflineIfNoActiveCalls(targetAgentId)) {
-                    log.info({ agentId: targetAgentId }, 'Safety net: released a stuck ON_CALL agent to OFFLINE');
-                    availability = AgentAvailability.OFFLINE;
+            if (target.busy_call_id && String(actorAgentId) === String(targetAgentId)) {
+                const call = await CallRepository.findById(target.busy_call_id);
+                if (!call || !ACTIVE_STATUSES.has(call.status)) {
+                    if (await AgentRepository.releaseFromCall(targetAgentId, target.busy_call_id)) {
+                        log.info({ agentId: targetAgentId, callId: target.busy_call_id }, 'Safety net: released an agent held by an ended call');
+                    }
+                    availability = (await AgentRepository.findById(targetAgentId))?.availability ?? availability;
                 }
             }
 
-            EventBus.emit('call:agent_availability', {
-                tenantId,
-                userId: targetAgentId,
-                availability,
-                updatedAt: new Date().toISOString(),
+            this._broadcast(tenantId, targetAgentId, availability, {
                 changed: availability !== target.availability,   // a resync is only a change after the safety net
             });
 
@@ -167,6 +171,27 @@ class AgentAssignmentCoordinator {
         } catch (error) {
             log.error({ tenantId, agentId: targetAgentId, err: error }, 'Availability sync failed');
         }
+    }
+
+    /**
+     * Safety net, from the cleanup loop: agents still held by a call that has
+     * ended or was deleted (a release lost to a crash) are released, and their
+     * tenants' queues drained. Every worker runs it; the guarded release lets
+     * one of them do each.
+     */
+    async releaseAgentsOfEndedCalls() {
+        const held = await AgentRepository.findHeldByEndedCalls();
+        const tenants = new Set();
+        for (const { id, tenant_id: tenantId, busy_call_id: callId } of held) {
+            if (!await AgentRepository.releaseFromCall(id, callId)) continue;
+            log.warn({ agentId: id, callId }, 'Released an agent still held by an ended call');
+            await this._broadcastCurrent(id);
+            tenants.add(tenantId);
+        }
+        for (const tenantId of tenants) {
+            await this.drainForTenant(tenantId).catch((err) => log.error({ tenantId, err }, 'Drain after release failed'));
+        }
+        return held.length;
     }
 
     // ── Queue draining ───────────────────────────────────────────────────────
@@ -282,7 +307,7 @@ class AgentAssignmentCoordinator {
             agentIds: [agentId],
             reason: kind === 'missed' ? 'timeout' : 'declined',
         });
-        await this.releaseAgentIfIdle(agentId);
+        await this.releaseAgent(agentId, call.id);
 
         if (kind === 'missed') {
             callLifecycleLogger.logOfferMissed(call.id, call.tenant_id, agentId, { queue_id: call.queue_id })
@@ -313,7 +338,7 @@ class AgentAssignmentCoordinator {
                 callId: call.id, tenantId: call.tenant_id, agentIds: withdrawFrom, reason: 'overflow',
             });
         }
-        if (call.agent_id) await this.releaseAgentIfIdle(call.agent_id);
+        if (call.agent_id) await this.releaseAgent(call.agent_id, call.id);
         await offerHistory.clearMissed(call.id);
 
         callLifecycleLogger.logOverflowed(call.id, call.tenant_id, {
@@ -401,7 +426,7 @@ class AgentAssignmentCoordinator {
             { agentId: agent.id, agentName: agent.name ?? null, sdpOffer, assignmentType }
         ));
 
-        // The claim already flipped the agent ON_CALL — tell their own socket.
+        // The claim already made the agent busy (ON_CALL) — tell their own socket.
         EventBus.emit('call:agent_availability', {
             tenantId: call.tenant_id,
             userId: agent.id,

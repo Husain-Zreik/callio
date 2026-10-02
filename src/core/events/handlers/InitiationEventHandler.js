@@ -92,7 +92,9 @@ export class InitiationEventHandler {
         if ((await CallParticipantRepository.findByCall(callId)).some((p) => p.kind === ParticipantKind.AGENT)) {
             throw new Error('Call was already started');
         }
-        if (await CallRepository.hasAgentActiveCall(userId, callId)) {
+        // The call holds the agent from here, whatever their shift. Guarded: an
+        // agent already held by another call can't start this one.
+        if (!await AgentRepository.holdForOwnCall(userId, callId)) {
             throw new Error('Agent already has an active call');
         }
 
@@ -111,7 +113,6 @@ export class InitiationEventHandler {
 
         await callParticipants.join(call, { kind: ParticipantKind.AGENT, agentId: userId, deviceId: deviceId ?? null });
 
-        await AgentRepository.updateAgentAvailability(userId, AgentAvailability.ON_CALL);
         EventBus.emit('call:agent_availability', {
             tenantId, userId, availability: AgentAvailability.ON_CALL, updatedAt: new Date().toISOString(),
         });

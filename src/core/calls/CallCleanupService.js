@@ -158,6 +158,10 @@ class CallCleanupService {
             log.error({ err }, 'Outbound intent expiry failed')
         );
 
+        await agentAssignmentCoordinator.releaseAgentsOfEndedCalls().catch((err) =>
+            log.error({ err }, 'Releasing agents of ended calls failed')
+        );
+
         try {
             const stuckCalls = await CallRepository.findAllStuckCalls(1);
             if (stuckCalls.length === 0) return;

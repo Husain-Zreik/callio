@@ -146,8 +146,9 @@ Unique (`consumer_id`, `external_ref`); `status` `ACTIVE` / `SUSPENDED`.
 |---|---|
 | `external_ref` | The consumer's id for this person — the JWT `sub`. Unique per tenant. |
 | `role` | `AGENT` / `SUPERVISOR` (supervisors also monitor, whisper, barge, transfer). |
-| `availability` | `AVAILABLE` / `ON_CALL` / `OFFLINE`, plus `availability_changed_at`. |
-| `deleted_at` | Soft delete: deleting sets it and `availability = 'OFFLINE'`; every lookup filters `deleted_at IS NULL`; re-provisioning the same `external_ref` clears it (`src/persistence/AgentRepository.js`). |
+| `availability` | The shift: `AVAILABLE` / `OFFLINE`, plus `availability_changed_at`. Only queues read it. `ON_CALL` is a legacy value no code writes any more (read as `AVAILABLE`; a later migration drops it). |
+| `busy_call_id` | The call holding the agent, or NULL. Claimed with a guarded update (`busy_call_id IS NULL`) when routing offers them a call, a `RING_ALL` accept or `call:start`, and released only by that call (`AgentRepository`). The API and events report `ON_CALL` while it is set. Agents left held by an ended or deleted call are released by the cleanup loop. |
+| `deleted_at` | Soft delete: deleting sets it, `availability = 'OFFLINE'` and `busy_call_id = NULL`; every lookup filters `deleted_at IS NULL`; re-provisioning the same `external_ref` clears it (`src/persistence/AgentRepository.js`). |
 
 ### agent_push_tokens
 

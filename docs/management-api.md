@@ -130,9 +130,11 @@ call resets the count.
 - `DELETE` is a soft delete: the agent goes `OFFLINE` and disappears from
   lists. A later `PUT`, or the agent's next socket connection, restores them
   (with their queue memberships).
-- `availability`: `AVAILABLE` also releases any stale call blocking the
-  agent. An agent on a live call stays `ON_CALL`; the response then says
-  `ON_CALL`. `ON_CALL` is set by Callio only.
+- `availability`: what an agent reports: `ON_CALL` while a call holds them,
+  else their shift, `AVAILABLE` (queues offer them calls) or `OFFLINE`. The
+  `PUT` sets the shift; on a live call the response still says `ON_CALL` and
+  the shift applies once the call ends. `AVAILABLE` also releases any stale
+  call blocking the agent. `ON_CALL` is set by Callio only.
 - Push tokens: `token` up to 512 characters; one token per device and
   provider (a new one replaces it). A token registered to another agent
   moves to this one. `DELETE` removes all of that device's tokens.

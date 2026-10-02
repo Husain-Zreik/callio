@@ -30,7 +30,7 @@ const Redis = createRequire(import.meta.url)('ioredis');
 const redis = new Redis({ host: process.env.REDIS_HOST, port: Number(process.env.REDIS_PORT), db: Number(process.env.REDIS_DB ?? 0) });
 const sipCall = (providerCallId) => waitFor(async () => (await q("SELECT * FROM calls WHERE channel = 'SIP' AND provider_call_id = ?", [providerCallId]))[0], 8000, `SIP call ${providerCallId}`);
 const callRow = async (id) => (await q('SELECT * FROM calls WHERE id = ?', [id]))[0];
-const availability = async (ref) => (await q('SELECT availability FROM agents WHERE external_ref = ?', [ref]))[0]?.availability;
+const availability = async (ref) => (await q("SELECT IF(busy_call_id IS NULL, availability, 'ON_CALL') AS availability FROM agents WHERE external_ref = ?", [ref]))[0]?.availability;
 const setAvailability = async (agent, value) => {
     agent.socket.emit('agent:availability:set', { availability: value });
     const ok = value === 'AVAILABLE' ? ['AVAILABLE', 'ON_CALL'] : [value];

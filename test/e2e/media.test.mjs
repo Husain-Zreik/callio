@@ -24,7 +24,7 @@ const db = await testDb();
 const q = async (sql, params = []) => (await db.execute(sql, params))[0];
 const callRow = async (id) => (await q('SELECT * FROM calls WHERE id = ?', [id]))[0];
 const callByProvider = (pid) => waitFor(async () => (await q('SELECT * FROM calls WHERE provider_call_id = ?', [pid]))[0], 5000, `call ${pid}`);
-const availability = async (ref) => (await q('SELECT availability FROM agents WHERE external_ref = ?', [ref]))[0]?.availability;
+const availability = async (ref) => (await q("SELECT IF(busy_call_id IS NULL, availability, 'ON_CALL') AS availability FROM agents WHERE external_ref = ?", [ref]))[0]?.availability;
 const setAvailable = async (agent) => {
     agent.socket.emit('agent:availability:set', { availability: 'AVAILABLE' });
     await waitFor(async () => (await availability(agent.ref)) === 'AVAILABLE', 8000, `${agent.ref} available`);

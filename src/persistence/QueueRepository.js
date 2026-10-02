@@ -1,6 +1,7 @@
 // src/persistence/QueueRepository.js
 // Queues and their members — where inbound calls wait for an agent.
 import connection from '../../config/dbConnection.js';
+import { reportedAvailability } from './AgentRepository.js';
 
 const QUEUE_COLUMNS = `id, tenant_id, external_ref, name, strategy, ring_timeout_seconds,
     max_active_calls, max_wait_seconds, overflow_queue_id, hold_audio_asset_id, status`;
@@ -40,10 +41,10 @@ class QueueRepository {
         return rows;
     }
 
-    // Members with their live availability, in offer order: priority, then agent id.
+    // Members with their reported status (AgentRepository.reportedAvailability), in offer order: priority, then agent id.
     async getMembers(queueId) {
         const [rows] = await connection.execute(
-            `SELECT a.id, a.tenant_id, a.external_ref, a.name, a.role, a.availability, m.priority
+            `SELECT a.id, a.tenant_id, a.external_ref, a.name, a.role, ${reportedAvailability('a')} AS availability, m.priority
              FROM queue_members m
              JOIN agents a ON a.id = m.agent_id
              WHERE m.queue_id = ? AND a.deleted_at IS NULL

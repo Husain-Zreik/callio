@@ -198,25 +198,25 @@ class ChannelIngress {
             // call first; it reaches the queue when the flow transfers it.
             const ivrFlowId = lookup.reject ? null : await queueRouter.selectIvrFlow(channel, queue);
 
-            const assignedAgent = (!lookup.reject && !ivrFlowId) ? await queueRouter.claimForNewCall(queue) : null;
-            const userId = assignedAgent?.id ?? null;
-
             const callId = await CallRepository.create({
                 ...baseRow,
                 customer_name: lookup.customerName ?? baseRow.customer_name,
                 external_ref: lookup.externalRef ?? null,
                 consumer_metadata: lookup.consumerMetadata ?? null,
-                agent_id: userId,
                 ivr_flow_id: ivrFlowId,
                 // state='IVR' set at insert closes the window where the queue drain
                 // could see this call as assignable before IVR claims it.
                 state: ivrFlowId ? 'IVR' : null,
                 // An IVR call enters the queue when the flow transfers it.
                 queued_at: ivrFlowId ? null : ringingAt,
-                offered_at: userId ? new Date() : null,
                 metadata,
             });
             consumerEventPublisher.publishForCall(callId, 'call.created');
+
+            // A free member takes the call at once (guarded: claims the agent
+            // for this call and assigns it in one transaction).
+            const assignedAgent = (!lookup.reject && !ivrFlowId) ? await queueRouter.claimForNewCall(queue, callId) : null;
+            const userId = assignedAgent?.id ?? null;
 
             await CallConnectionRepository.create({
                 call_id: callId,
@@ -329,7 +329,7 @@ class ChannelIngress {
                     sdpOffer: agentSdpOffer,
                     assignmentType: AssignmentType.DIRECT,
                 }));
-                // The claim flipped the agent ON_CALL — tell their own socket.
+                // The claim made the agent busy (ON_CALL) — tell their own socket.
                 EventBus.emit('call:agent_availability', {
                     tenantId,
                     userId,

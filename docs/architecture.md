@@ -202,10 +202,10 @@ Every worker runs these background loops:
    (`SipIngress`) reaches `ChannelIngress.inboundCall`, which claims ownership.
 2. **Pre-checks.** A tombstone means the end came first: record a missed call. An active call
    from the same customer is a duplicate: record CANCELLED. Otherwise run `CustomerLookup`.
-3. **Route.** `QueueRouter.selectIvrFlow` runs first. With no IVR, `claimForNewCall` claims an
-   agent: ROUND_ROBIN or PRIORITY only, and never ahead of older waiting calls. Callio writes the
-   `calls` row and the CUSTOMER `call_connections` row (the customer's offer) and publishes
-   `call.created`.
+3. **Route.** `QueueRouter.selectIvrFlow` runs first. Callio writes the `calls` row and the
+   CUSTOMER `call_connections` row (the customer's offer) and publishes `call.created`. With no
+   IVR, `claimForNewCall` claims an agent for the new row and assigns it in one transaction:
+   ROUND_ROBIN or PRIORITY only, and never ahead of older waiting calls.
 4. **IVR branch.** `mediaLegs.answerCustomer(sdpProfile)` → `channel.accept` →
    `markIvrAutoAccepted`. Supervisors get `call:incoming:supervisor`. The IVR session starts and
    plays once the caller's audio arrives ([IVR](#ivr)).
@@ -217,7 +217,7 @@ Every worker runs these background loops:
 6. **Accept.** `call:accept` (with the agent's SDP answer) passes `CallAccess`, and the socket
    worker publishes `AGENT_JOINED`. On the owner, `AgentEventHandler.handleAgentJoined`:
    1. Checks queue capacity and that the agent has no other call.
-   2. Claims the call (`assignCallToAgentIfEligible` + `markOnCall`; `claimHandover` for a
+   2. Claims the call (`assignCallToAgentIfEligible` + `holdForOwnCall`; `claimHandover` for a
       transfer).
    3. Applies the agent's answer (`mediaLegs.agentAccepted`), which waits up to 5 s for the
       agent's audio to reach rtpengine; the accept is aborted if none arrives.
@@ -235,8 +235,8 @@ Every worker runs these background loops:
    within 2 minutes.
 2. **Start.** The agent sends `call:start` (call id + SDP offer). On the socket's worker,
    `InitiationEventHandler.handleCallStart` checks ownership and state, subscribes, and answers
-   the agent's offer (`mediaLegs.answerAgent`). It sets the agent ON_CALL and returns the
-   answer.
+   the agent's offer (`mediaLegs.answerAgent`). The call holds the agent (`holdForOwnCall`,
+   whatever their shift), and it returns the answer.
 3. **Dial.** The socket handler publishes `CALL_INITIATE`. `triggerCustomerConnection` runs
    `mediaLegs.offerCustomer(sdpProfile)` → `channel.initiate` and stores the provider call id. A
    failed dial ends the call FAILED through `CallTerminator`.
@@ -244,7 +244,8 @@ Every worker runs these background loops:
    `ChannelIngress.outboundAnswered`, which publishes `CUSTOMER_ANSWER_RECEIVED`.
    `CustomerEventHandler` applies it (`mediaLegs.customerAnswered`) and bridges the room. RINGING,
    ACCEPTED, REJECTED and FAILED arrive through `statusChanged`.
-5. When the call ends, the agent goes OFFLINE, not back into the queue.
+5. When the call ends, the agent is released and back to their shift, which the call never
+   changed.
 
 ## Transfer
 
@@ -252,7 +253,7 @@ Every worker runs these background loops:
 supervisor assigning an unassigned call takes the same path. On the owner,
 `TransferEventHandler.handleCallTransferred`:
 
-1. **Target.** Resolves the target and claims it (AVAILABLE → ON_CALL). A queue target picks one
+1. **Target.** Resolves the target and claims it for the call (on shift, not busy). A queue target picks one
    member by strategy. RING_ALL picks round-robin here, because a transfer goes to one agent.
 2. **Move.** Moves the call guarded (`updateCallAgentIfCurrent` /
    `assignCallToAgentIfUnassigned`) and updates the queue. On a live call it sets `offered_at`
@@ -276,8 +277,9 @@ Every end goes through `CallTerminator` (`src/core/calls/CallTerminator.js`), in
    `onlyIfStatus`. A path that loses the race only closes its local media.
 2. **Announce.** `call:terminated` on `EventBus`, which reaches clients, consumer events and
    push.
-3. **Release the agent.** Inbound: AVAILABLE, then drain the queues. Outbound (or
-   `agentAfter: 'offline'`): OFFLINE.
+3. **Release the agent.** The call releases the agent (`releaseAgent`, only if this call holds
+   them) and the queues drain. `agentAfter: 'offline'` (they never reconnected) also ends their
+   shift.
 4. **Provider.** `terminate`, or `reject` for an unanswered inbound call.
 5. **Media.** Closes this worker's legs of the call and publishes `CALL_TERMINATED`, so the
    owning worker closes its legs too.
@@ -305,8 +307,13 @@ All in `src/core/routing/`.
   - `PRIORITY` picks the lowest `priority`, then the lowest id.
 - **`CallAgentAssignmentService`** holds a per-queue Redis lock (5 s), so two workers never claim
   for one queue at once. It also keeps the round-robin order (an agent keeps their place through a
-  short disconnect). The claims themselves are guarded SQL (`claimAgentIfAvailable`,
-  `claimAgentAndAssignCall`).
+  short disconnect). The claims themselves are guarded SQL (`claimAgentAndAssignCall`,
+  `claimAgentForCall`).
+- **Availability and busy** are two facts on the agent row: the shift (`availability`,
+  `AVAILABLE` / `OFFLINE`, set by the agent, the API or auto-offline; only queues read it) and
+  the call holding them (`busy_call_id`). A claim sets `busy_call_id` only while it is NULL, so
+  two routes can't claim one agent; only that call releases it. Agents report `ON_CALL` while
+  held, else their shift. The cleanup loop releases agents still held by an ended call.
 - **`AgentAssignmentCoordinator`** is the single entry point for:
   - availability changes
   - releasing agents

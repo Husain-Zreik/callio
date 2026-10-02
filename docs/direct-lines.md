@@ -1,6 +1,6 @@
 # Personal lines and the direct media path (plan)
 
-**Status: plan, not started.** Step 5 of [media-architecture.md](media-architecture.md)
+**Status: A1 done (2026-10-02); A2 next.** Step 5 of [media-architecture.md](media-architecture.md)
 (failover-able call ownership) is done (2026-10-02), so this can start. Update this doc as steps
 land; the contract changes go into the API, event and protocol docs in the same change.
 

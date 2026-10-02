@@ -94,7 +94,7 @@ try {
     await api('PUT', `${T}/queues/main`, { name: 'Main queue', strategy: 'ROUND_ROBIN' });
     await api('PUT', `${T}/queues/main/members`, { members: [{ agent_ref: 'agent-1' }] });
     const agent = await connectAgent(CALLIO, seed, 'agent-1');
-    const availability = async () => (await q("SELECT availability FROM agents WHERE external_ref = 'agent-1'"))[0]?.availability;
+    const availability = async () => (await q("SELECT IF(busy_call_id IS NULL, availability, 'ON_CALL') AS availability FROM agents WHERE external_ref = 'agent-1'"))[0]?.availability;
     agent.socket.emit('agent:availability:set', { availability: 'AVAILABLE' });
     await waitFor(async () => (await availability()) === 'AVAILABLE', 5000, 'agent-1 available');
 

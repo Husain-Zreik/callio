@@ -46,8 +46,9 @@ class CallTerminator {
      *   media         'broadcast' (default) | 'local' — see #closeMedia
      *   source        short label for logs and call:terminated (e.g. 'queue_max_wait')
      *   log           extra lifecycle-log fields
-     *   agentAfter    where the agent goes: 'auto' (default: INBOUND → AVAILABLE and
-     *                 drain the queues, OUTBOUND → OFFLINE) or 'offline' (they're gone)
+     *   agentAfter    'auto' (default): the call releases the agent, whose shift
+     *                 stays as it was, and the queues drain; 'offline': they're
+     *                 gone, so their shift ends too
      * @returns {Promise<boolean>} true if this call ended it
      */
     async end(callOrId, opts) {
@@ -93,12 +94,9 @@ class CallTerminator {
 
         if (call.agent_id) {
             try {
-                if (agentAfter === 'offline' || call.direction === CallDirection.OUTBOUND) {
-                    await agentAssignmentCoordinator.releaseAgentOfflineIfIdle(call.agent_id);
-                } else {
-                    await agentAssignmentCoordinator.releaseAgentIfIdle(call.agent_id);
-                    await agentAssignmentCoordinator.assignOldestUnassignedCall(call.tenant_id);
-                }
+                const offline = agentAfter === 'offline';
+                await agentAssignmentCoordinator.releaseAgent(call.agent_id, callId, { offline });
+                if (!offline) await agentAssignmentCoordinator.assignOldestUnassignedCall(call.tenant_id);
             } catch (err) {
                 log.error({ agentId: call.agent_id, callId, err }, 'AGENT STUCK: failed to release agent after call');
             }

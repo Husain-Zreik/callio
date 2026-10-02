@@ -34,22 +34,21 @@ class QueueRouter {
     }
 
     /**
-     * Synchronous assignment for a brand-new inbound call, before its row
-     * exists. Claims the agent (AVAILABLE → ON_CALL) but can't assign the call
-     * yet — the caller writes agent_id at insert. Returns the agent or null.
-     * Null when the queue rings everyone, or when older calls are already
-     * waiting (FIFO: a new call must never jump ahead of them).
+     * Synchronous assignment for a brand-new inbound call, right after its row
+     * was created: claims a member and assigns the call atomically. Returns
+     * the agent or null. Null when the queue rings everyone, or when older
+     * calls are already waiting (FIFO: a new call must never jump ahead of
+     * them) — the call then waits and the drain offers it.
      */
-    async claimForNewCall(queue) {
+    async claimForNewCall(queue, callId) {
         if (this.isRingAll(queue)) return null;
         try {
-            if (await CallRepository.hasUnassignedCalls(queue.id)) return null;
+            if (await CallRepository.hasUnassignedCalls(queue.id, callId)) return null;
         } catch (err) {
             log.warn({ queueId: queue.id, err }, 'FIFO guard failed — skipping the sync claim');
             return null;
         }
-        const members = await this.getMembers(queue);
-        return this.#pick(queue, members, (agentId) => AgentRepository.claimAgentIfAvailable(agentId));
+        return (await this.claimForWaitingCall(queue, callId)).agent;
     }
 
     /**
@@ -72,13 +71,13 @@ class QueueRouter {
      * transferring the call). A RING_ALL queue picks round-robin here: a
      * transfer hands the live call to exactly one agent.
      */
-    async claimMemberForTransfer(queue, excludeAgentId = null) {
+    async claimMemberForTransfer(queue, callId, excludeAgentId = null) {
         const members = (await this.getMembers(queue))
             .filter((a) => excludeAgentId == null || String(a.id) !== String(excludeAgentId));
         const strategyQueue = queue.strategy === QueueStrategy.RING_ALL
             ? { ...queue, strategy: QueueStrategy.ROUND_ROBIN }
             : queue;
-        return this.#pick(strategyQueue, members, (agentId) => AgentRepository.claimAgentIfAvailable(agentId));
+        return this.#pick(strategyQueue, members, (agentId) => AgentRepository.claimAgentForCall(agentId, callId));
     }
 
     // RING_ALL: every available member is offered the call at once.

@@ -148,7 +148,7 @@ async function resetState() {
     for (const t of ['webhook_deliveries', 'call_recordings', 'ivr_session_inputs', 'ivr_sessions', 'call_transfer_logs',
         'call_lifecycle_events', 'call_participants', 'call_connections', 'calls']) await db.query(`TRUNCATE ${t}`);
     await db.query('SET FOREIGN_KEY_CHECKS=1');
-    await db.query("UPDATE agents SET availability = 'OFFLINE'");
+    await db.query("UPDATE agents SET availability = 'OFFLINE', busy_call_id = NULL");
     await db.query("UPDATE ivr_flows SET status = 'INACTIVE'");   // a suite's flow must not catch the next suite's calls
     await db.end();
     const redis = new Redis({ host: env.REDIS_HOST, port: Number(env.REDIS_PORT), db: Number(env.REDIS_DB) });

@@ -57,8 +57,7 @@ export class AgentEventHandler {
             if (await queueRouter.isAtCapacity(callQueue, callId)) {
                 throw new Error('The queue is at its active-call limit.');
             }
-            // An agent must not accept a second call while already on one — the final
-            // safety net after the batchUpdateAgentAvailability guard in cleanup.
+            // An agent must not accept a second call while already on one.
             const agentHasActiveCall = await CallRepository.hasAgentActiveCall(userId, callId);
             if (agentHasActiveCall) throw new Error('Agent already has an active call.');
 
@@ -87,12 +86,13 @@ export class AgentEventHandler {
                 const claimed = await CallRepository.assignCallToAgentIfEligible(callId, userId);
                 if (!claimed) throw new Error('Call assignment conflict. Call ownership changed.');
 
-                // A RING_ALL call was offered without claiming anyone: the agent who
-                // just won it goes ON_CALL now, not at the end of the accept flow —
-                // otherwise the queue drain could offer them a second call during
-                // the media/provider round trips. (A no-op when routing already
+                // A RING_ALL call was offered without claiming anyone: the call
+                // holds the agent who just won it now, not at the end of the accept
+                // flow — otherwise the queue drain could offer them a second call
+                // during the media/provider round trips. (Already held when routing
                 // claimed them; failure paths below release them again.)
-                if (await AgentRepository.markOnCall(userId, callId)) {
+                const wasHeld = String((await AgentRepository.findById(userId))?.busy_call_id) === String(callId);
+                if (await AgentRepository.holdForOwnCall(userId, callId) && !wasHeld) {
                     EventBus.emit('call:agent_availability', {
                         tenantId, userId, availability: AgentAvailability.ON_CALL, updatedAt: new Date().toISOString(),
                     });
@@ -249,16 +249,12 @@ export class AgentEventHandler {
             }
 
             // If the accept failed (e.g. call was terminated mid-accept), ensure
-            // the agent is released from ON_CALL so they don't get stuck.
+            // the call releases the agent so they don't stay busy.
             try {
                 const call = await CallRepository.findById(callId);
                 if (call && [CallStatus.TERMINATED, CallStatus.FAILED, CallStatus.CANCELLED].includes(call.status)) {
-                    if (call.direction === CallDirection.OUTBOUND) {
-                        await agentAssignmentCoordinator.releaseAgentOfflineIfIdle(userId);
-                    } else {
-                        await agentAssignmentCoordinator.releaseAgentIfIdle(userId);
-                        await agentAssignmentCoordinator.assignOldestUnassignedCall(call.tenant_id);
-                    }
+                    await agentAssignmentCoordinator.releaseAgent(userId, callId);
+                    await agentAssignmentCoordinator.assignOldestUnassignedCall(call.tenant_id);
                     log.info({ agentId: userId, callId }, 'Released agent after failed accept for terminated call');
 
                     // Notify the agent's UI so it doesn't stay stuck on the ringing screen.
@@ -431,7 +427,7 @@ export class AgentEventHandler {
      * customer because the agent's uplink never materialized. We must:
      *   1) tell the provider to drop the call (so the customer isn't left ringing)
      *   2) mark the call FAILED with a clear reason (not silently stuck)
-     *   3) release the agent's ON_CALL flag so they can take the next call
+     *   3) release the agent so they can take the next call
      *   4) tell the frontend exactly what happened so the agent gets a toast,
      *      not a dead UI
      */
