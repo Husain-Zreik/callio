@@ -38,10 +38,16 @@ today takes a tenant, a one-member queue and a channel per user, and:
 - **User-to-user calls** (two users of the same product) wait for Part C.
 - **One tenant per product, one agent per end user**, one `AGENT` line per DID. At signup a
   product's backend makes two calls (agent, channel).
-- **An internal dashboard per product** sees and monitors all of the product's calls; end users
-  never see it. Its users are **supervisors** of the product's tenant (they get the board and
-  monitoring); end users are **agents** (they only ever get their own calls). Monitoring a direct
-  call needs a room, so a dashboard that listens in pulls Part C's direct → room upgrade forward.
+- **An internal dashboard per product** sees all of the product's calls and **listens** to them
+  live — listen only, no whisper or barge. End users never see it. Its users are **supervisors**
+  of the product's tenant (they get the board and listening); end users are **agents** (they only
+  ever get their own calls). Allowed monitor modes are data: a tenant setting
+  (`settings.monitoring.modes`, default all three; the personal-line products set `["listen"]`),
+  so whisper and barge are refused for those tenants with a clear error.
+- **Listening to a direct call** doesn't need its audio mixed with the supervisor's, only a copy of
+  it: rtpengine can fork a session's media to a third party (its subscribe requests) without
+  FreeSWITCH, so the call stays direct. The spike checks it (item 7); the fallback is Part C's
+  direct → room upgrade when a supervisor starts listening.
 
 ## Requirements
 
@@ -87,13 +93,17 @@ targets work as today.
 6. Per-trunk number normalisation: `sip_trunks.number_rules` (country code to prefix, digits to
    strip) applied in `sipAddress.dialledNumber` / `callerOf`, so carriers that send national
    format resolve to the stored E.164 DID. `npm run sip:trunk -- … --country 961 --strip 0`.
-7. e2e suite `lines`:
+7. Monitoring modes per tenant: `settings.monitoring.modes` (default `["listen","whisper","barge"]`)
+   enforced where a supervisor changes mode (`MonitorEventHandler`); a refused mode is a
+   `call:error` with a new code, documented in agent-protocol.md.
+8. e2e suite `lines`:
    - an inbound call on an agent line rings that agent's devices and connects;
    - busy + `REJECT` → the carrier gets `486`; busy + `WAIT` → it connects once the agent is free;
    - no answer → `NO_ANSWER`, and the `call.ended` event names the line and the agent;
    - an `ALWAYS` agent places an outbound call, then receives an inbound one;
    - missed calls don't take an `ALWAYS` agent offline;
-   - a carrier sending the DID in national format reaches the line.
+   - a carrier sending the DID in national format reaches the line;
+   - a listen-only tenant's supervisor listens, and whisper/barge are refused.
 
 Part A needs no media changes and unblocks personal lines on the room path.
 
@@ -137,7 +147,8 @@ state (`CallState`) where the dispatcher reads it by id, not only on the row:
 | `dropAgent` | grace period without a tone (nothing plays on a direct call), then the existing 120 s limit |
 | `customerAudio`, quality, drop detection | `CustomerLegMonitor` reads rtpengine's counters, but on a room leg the customer is the `ext` side and FreeSWITCH the `fs` side; a direct session's sides are the customer and the agent, so the monitor is told which tag is the customer's |
 | `adopt` / `handOver` | the rtpengine call id and tags, plus the dialogs, in the call's Redis snapshot (as `RoomSnapshot`). Simpler than a room: no FreeSWITCH endpoints to rebind. |
-| `player`, `listenForDigits`, `startHold`, supervisors | refused (`MEDIA_FEATURE_UNAVAILABLE`) |
+| `addSupervisor` in `listen` | an rtpengine subscription to the call's session: a copy of both directions to the supervisor's WebRTC leg; nothing flows back into the call |
+| `setSupervisorMode` whisper/barge, `setAgentPrivate`, `player`, `listenForDigits`, `startHold` | refused (`MEDIA_FEATURE_UNAVAILABLE`) |
 
 ### Spike first (the open questions)
 
@@ -155,6 +166,11 @@ state (`CallState`) where the dispatcher reads it by id, not only on the row:
 6. Measure, on the dev server: CPU and latency per call for room vs direct, at 50 and 200
    concurrent calls, to know what the direct path actually buys. Needs a load generator (simulated
    carrier calls and WebRTC agents at volume), which doesn't exist yet: part of the spike.
+7. Listening to a direct call: an rtpengine subscription (`subscribe request` / `subscribe
+   answer`) delivers the customer and the agent to a supervisor's browser. Likely as two audio
+   streams, where today's supervisor contract gives one mixed line; if rtpengine can't mix them,
+   decide between two lines on direct calls (a contract addition, the SDKs follow) and the
+   direct → room upgrade.
 
 ### Work after the spike
 
@@ -200,4 +216,5 @@ state (`CallState`) where the dispatcher reads it by id, not only on the row:
 3. **Media placement** across nodes, alongside Part B: the direct path makes each node carry
    more calls but doesn't replace spreading them.
 4. **The dashboard board at scale** (filtered, paged, aggregated), with the dashboard.
-5. **Part C** as products need it; the direct → room upgrade first if the dashboard listens in.
+5. **Part C** as products need it; the direct → room upgrade first if the spike shows rtpengine
+   subscriptions can't serve the dashboard's listening.
