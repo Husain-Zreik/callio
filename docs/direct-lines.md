@@ -284,6 +284,22 @@ picks it by the call's topology. Several port methods receive only a `callId` (`
    decide between two lines on direct calls (a contract addition, the SDKs follow) and the
    direct → room upgrade.
 
+### Spike results (2026-10-02, local media plane)
+
+Run with a script against rtpengine directly (fake G.711 carrier, wrtc peers):
+
+| # | Question | Result |
+|---|---|---|
+| 1 | Carrier G.711 → browser through rtpengine alone | **Works** both ways; PCMU end to end, rtpengine only re-encrypts (no transcoding). |
+| 2 | WhatsApp-style Opus WebRTC → browser | **Works** both ways (plain Opus relay). |
+| 3 | One offer to two devices | **Safe**: a device that applied the offer but was never accepted gets no audio and sends none into the call (and the SDK only applies the offer on accept). |
+| 4 | Transcoding available | **Yes** in 9.4 and in Debian's 12.x (Opus, G.711, G.722, AMR…). |
+| 5 | Outbound: the agent offers and needs an answer before the customer answers | **Works**: answer the agent at once against a placeholder customer SDP (a real-looking address, e.g. `192.0.2.1:9` — `c=0.0.0.0` means *hold* and stops the agent sending), then send rtpengine the provider's real answer when it arrives; both then hear each other. |
+| 6 | Agent reconnect | Audio comes back both ways, but a re-offer from the **agent's** side moves rtpengine's carrier-facing port (and kept audio only 2 runs in 3). Re-offering from the **customer's** side with its stored SDP (the agent's new peer answers) restores audio reliably; on 9.4 behind Docker's NAT the advertised port still changes, so port stability is re-checked on 12.x. A direct call's reconnect therefore has Callio offer to the agent (like the ringing redelivery), which is an agent-protocol addition. |
+| 7 | Listening through an rtpengine subscription | **Not on 9.4**: `subscribe request` is unknown. The `drachtio/rtpengine` image stopped at **9.4 (2021)**, also on the dev server. Replaced by our own image, `deploy/sip-gateway/rtpengine/Dockerfile` (Debian trixie's rtpengine **12.5**), decided 2026-10-02. |
+
+Open: building that image here stalled on this machine's network (~6 KB/s to the Debian mirror; apt also had to be forced to IPv4). Items 6 and 7 are re-run on 12.x once it's built, then the full e2e suite on the new image, before anything switches to it. The load measurement (item 6 of the list above) is still to do.
+
 ### Work after the spike
 
 1. The needs computation in the core, passed to `callMedia` when the call's media starts;
