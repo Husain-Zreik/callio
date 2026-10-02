@@ -34,27 +34,28 @@ a drachtio connection, and drachtio spreads new INVITEs across them.
 1. It resolves the dialled number to an active SIP channel. The number is the
    Request-URI user, or the To user if that doesn't parse.
 2. It checks that the source IP is in the channel's trunk's `inbound_source_cidrs`.
-3. rtpengine turns the carrier's offer into a WebRTC offer.
-4. It sends `180` and hands the call to `ChannelIngress.inboundCall`.
+3. It sends `180` and hands the call, with the carrier's SDP as it is, to
+   `ChannelIngress.inboundCall`.
 
-The worker that received the INVITE claims the call, so the call's media and
-its SIP leg live on the same worker. rtpengine terminates the carrier's RTP and
-presents the customer leg to Callio's media engine as an ordinary WebRTC peer
-(ICE + DTLS-SRTP), a `CUSTOMER` leg like a WhatsApp one. The audio bridge, IVR,
-recording, monitoring and DTMF detection are therefore the same code for both
-channels.
+The worker that received the INVITE claims the call, so the call's media legs
+and its SIP leg live on the same worker. The customer leg is like a WhatsApp
+one on the media plane ([architecture.md → Media](architecture.md#media)):
+rtpengine anchors the carrier's plain RTP (the channel's `sdpProfile.transport`
+is `rtp`) and relays it to the customer's FreeSWITCH endpoint, so the room,
+IVR, recording, monitoring and DTMF are the same for both channels.
 
-When an agent accepts or the IVR answers, rtpengine converts the WebRTC answer
-back and Callio sends `200 OK`. A BYE from the carrier ends the call. In-dialog
-requests go back to the worker that owns the dialog.
+When an agent accepts or the IVR answers, the media plane's answer goes back in
+`200 OK`. A BYE from the carrier ends the call. In-dialog requests go back to
+the worker that owns the dialog.
 
 **Actions from other workers.** A queue timeout, cleanup or an API call can
 start on any worker. `SipDialogs` records the owning worker of each leg in
 Redis and sends the action to that worker over a per-worker pub/sub channel.
 
 **Outbound.** `POST /v1/tenants/{t}/calls` on a SIP channel creates an intent.
-The agent's `call:start` supplies the WebRTC offer, rtpengine converts it, and
-Callio sends an INVITE through the channel's trunk.
+The agent's `call:start` supplies their leg; the media plane offers the
+customer leg, and Callio sends that offer in an INVITE through the channel's
+trunk.
 
 ## What Callio expects from a carrier
 
@@ -64,9 +65,9 @@ Callio sends an INVITE through the channel's trunk.
 | Signalling | UDP or TCP on 5060 (`drachtio.conf.xml`: `sip:*:5060;transport=udp,tcp`). TLS is not configured. |
 | Dialled number | The Request-URI user, or the To user if that doesn't parse, is the channel's DID. It may be written `+961…`, `961…` or `00961…`, and all three normalise to E.164. |
 | Caller | The From user. If it is a phone number (5–15 digits), the caller is stored as E.164. Otherwise the From URI is stored as a `SIP_URI` address. The display name is kept. |
-| Codecs | G.711 PCMU/PCMA passthrough. rtpengine does not transcode. |
+| Codecs | G.711 PCMU/PCMA (FreeSWITCH also offers G.722 and Opus); the room transcodes. |
 | RTP | UDP ports `port-min`–`port-max` from `rtpengine/rtpengine.conf` (30000–30500). |
-| DTMF | In-band only. `sipSdp.js` strips `telephone-event` from the SDP, so the carrier falls back to in-band tones, which Callio detects in the audio at 8 kHz. |
+| DTMF | In-band. `sipSdp.js` strips `telephone-event` from the SDP, so the carrier falls back to in-band tones, which the media server detects (it detects RFC 4733 too). |
 
 **Callio's responses to an inbound INVITE:**
 
@@ -74,7 +75,7 @@ Callio sends an INVITE through the channel's trunk.
 |---|---|
 | `404` | No active SIP channel has the dialled number (also what SIP scanners get) |
 | `403` | The source IP is not in the trunk's CIDRs, or the trunk is not `ACTIVE` |
-| `488` | rtpengine refused the SDP offer |
+| `488` | The INVITE has no SDP offer (late offer isn't supported) |
 | `180` | Accepted. The call is waiting for the IVR or an agent. |
 | `200` | Answered by an agent or the IVR |
 | `480` | Callio ended the call before answering it: ring timeout / max wait, rejection, or an ingress failure |
@@ -92,7 +93,7 @@ Callio sends an INVITE through the channel's trunk.
 | Carrier response | Call |
 |---|---|
 | `180` / `183` | RINGING |
-| `200` | Answered: rtpengine converts the answer and the call is `IN_PROGRESS` |
+| `200` | Answered: the answer goes to the customer's leg and the call is `IN_PROGRESS` |
 | `486` / `600` / `603` | REJECTED (by the customer) |
 | `408` / `480` | NO_ANSWER |
 | anything else | FAILED, with the SIP status in `failure_details` |
@@ -106,14 +107,16 @@ an answered one.
 
 | File | Role |
 |---|---|
-| `SipChannel.js` | The `CustomerChannel` port. `accept` (rtpengine answer + 200 OK), `reject` / `terminate` (a final error, BYE or CANCEL, run on the owning worker), `initiate` (outbound INVITE through the trunk), address normalisation, channel validation, `start` / `stop`. |
-| `SipIngress.js` | INVITE → `ChannelIngress.inboundCall` (channel lookup, source check, rtpengine offer, 180). CANCEL → the end of the call. |
-| `SipGateway.js` | This worker's drachtio-srf connection and rtpengine client. Connection state and errors. |
+| `SipChannel.js` | The `CustomerChannel` port. `accept` (200 OK with the media plane's answer), `reject` / `terminate` (a final error, BYE or CANCEL, run on the owning worker), `initiate` (outbound INVITE through the trunk), address normalisation, channel validation, `start` / `stop`. |
+| `SipIngress.js` | INVITE → `ChannelIngress.inboundCall` (channel lookup, source check, 180). CANCEL → the end of the call. |
 | `SipDialogs.js` | The SIP legs this worker holds, by Call-ID. Owner records in Redis. Routes reject/terminate from other workers to the owner. |
-| `sipLegs.js` | Ending a leg: deletes the rtpengine session and forgets the leg, then reports the provider-side end and timing to `ChannelIngress.callEnded`. |
-| `RtpEngineClient.js` | rtpengine's ng protocol (bencode over UDP) and the four conversions: carrier offer/answer ⇄ WebRTC. |
-| `sipSdp.js` | The channel's `sdpProfile`. It adds `a=group:BUNDLE` (Callio's peers are max-bundle; rtpengine writes `a=mid` without a group) and strips telephone-event. |
+| `sipLegs.js` | Ending a leg: forgets it, then reports the provider-side end and timing to `ChannelIngress.callEnded`. |
+| `sipSdp.js` | The channel's `sdpProfile`: transport `rtp`; strips telephone-event. |
 | `sipAddress.js` | DID and caller parsing (`toE164`, `dialledNumber`, `callerOf`), the user part to dial (`userPart`), the trunk's CIDR check (`sourceAllowed`). |
+
+The drachtio connection (`src/infra/sip/Drachtio.js`) is shared with the media
+plane, whose FreeSWITCH endpoints are created by INVITEs through it; the
+rtpengine client is `src/infra/media/RtpEngineClient.js`.
 
 Data: trunks are rows in `sip_trunks`. A row has host, port, transport, encrypted
 credentials, `inbound_source_cidrs`, status, and `consumer_id` (NULL means a
@@ -125,14 +128,15 @@ platform trunk). A SIP channel is a `channels` row with `type = SIP`, `address`
 **Callio** (`.env`, read in `config/envConfig.js` → `sip`), per worker:
 
 ```
-DRACHTIO_HOST=127.0.0.1        # unset = SIP channel disabled on this worker
+DRACHTIO_HOST=127.0.0.1        # required: the media plane uses it too
 DRACHTIO_PORT=9022             # drachtio's admin port
 DRACHTIO_SECRET=…              # must equal DRACHTIO_SECRET in deploy/sip-gateway/.env
 RTPENGINE_HOST=127.0.0.1
 RTPENGINE_NG_PORT=22222        # rtpengine's listen-ng
-# Only when rtpengine has several named interfaces (interface = name/…):
-# RTPENGINE_CARRIER_INTERFACE=   the one facing the carrier
-# RTPENGINE_WEBRTC_INTERFACE=    the one facing Callio's peers
+# rtpengine's named interfaces (interface = name/…):
+# RTPENGINE_EXTERNAL_INTERFACE=external   facing carriers, WhatsApp and agents
+# RTPENGINE_INTERNAL_INTERFACE=internal   facing FreeSWITCH
+FREESWITCH_HOST=127.0.0.1      # and the rest of the media settings: .env.example
 ```
 
 **The gateway** (`deploy/sip-gateway/`):
@@ -143,7 +147,7 @@ RTPENGINE_NG_PORT=22222        # rtpengine's listen-ng
   must equal it. After changing it, run
   `docker compose up -d --force-recreate drachtio` and restart Callio. If the
   two don't match, Callio logs `drachtio connection … failed: failed to
-  authenticate to server` (component `channels.sip.SipGateway`).
+  authenticate to server` (component `infra.sip.Drachtio`).
 - `drachtio/drachtio.conf.xml`: the admin port 9022 is bound to 127.0.0.1 (Callio
   runs on the same host), SIP listens on `*:5060` over UDP and TCP, and logs go
   to `/var/log/drachtio/` (the `drachtio-log` volume).

@@ -8,7 +8,8 @@ import CallRepository from '../../persistence/CallRepository.js';
 import AgentRepository from '../../persistence/AgentRepository.js';
 import QueueRepository from '../../persistence/QueueRepository.js';
 import CallConnectionRepository from '../../persistence/CallConnectionRepository.js';
-import { sdpCoordinator } from '../../media/webrtc/SDPCoordinator.js';
+import { mediaLegs } from '../media/MediaLegs.js';
+import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
 import { callAgentAssignmentService } from './CallAgentAssignmentService.js';
 import { queueRouter } from './QueueRouter.js';
 import { callLifecycleLogger } from '../calls/CallLifecycleLogger.js';
@@ -370,13 +371,15 @@ class AgentAssignmentCoordinator {
         }));
     }
 
-    // The AGENT-leg SDP offer for a call: reuse one already created on this
-    // worker (IvrTransferHandler pre-creates it next to the CUSTOMER peer) —
-    // creating a second would add another placeholder sender.
+    // The agent leg's offer for a call: reuse the one already made on the
+    // worker holding the customer's leg (arrival or IvrTransferHandler made it
+    // there), so the agent's answer reaches the worker that can bridge it.
     async #agentOffer(callId) {
-        const existing = await CallConnectionRepository.findByCallAndType(callId, ConnectionType.AGENT);
-        return existing?.local_sdp
-            ?? await sdpCoordinator.createSDPOffer(callId, ConnectionType.AGENT, this._callEventCallback);
+        const stored = await mediaLegs.storedAgentOffer(callId);
+        if (stored) return stored;
+        const call = await CallRepository.findById(callId);
+        if (this._callEventCallback) await redisPubSubService.subscribeToCallEvents(callId, this._callEventCallback);
+        return mediaLegs.offerAgent(call);
     }
 
     async #deliverAssignedCall(call, agent, assignmentType) {

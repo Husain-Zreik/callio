@@ -99,13 +99,11 @@ try {
     check('the board shows the new call, then who answered it', String(boardView.callId) === String(row1.id)
         && view1?.status === 'IN_PROGRESS', `first=${boardView.callId} status=${view1?.status} agent=${view1?.agentId}`);
     const monitor = await sup.monitor(row1.id, { stream: mic(660) });
-    await waitFor(() => monitor.agentStream && monitor.customerStream && monitor.state === 'active', 10000, 'monitor streams');
-    const supHearsAgent = listen(monitor.agentStream.getAudioTracks()[0]);
-    const supHearsCustomer = listen(monitor.customerStream.getAudioTracks()[0]);
-    await hear(supHearsAgent);
-    await hear(supHearsCustomer, 1000, 0);
-    check('monitor() hears the agent and the customer on separate streams',
-        supHearsAgent.dominant() === 880 && supHearsCustomer.dominant() === 440, `agent=${supHearsAgent.dominant()} customer=${supHearsCustomer.dominant()}`);
+    await waitFor(() => monitor.stream && monitor.state === 'active', 10000, 'monitor stream');
+    const supHears = listen(monitor.stream.getAudioTracks()[0]);
+    await hear(supHears);
+    check('monitor() hears the call: the agent and the customer, mixed',
+        supHears.has(880) && supHears.has(440), `bins=${JSON.stringify(Object.fromEntries(Object.entries(supHears.stats.bins).map(([f, e]) => [f, Math.round(Math.log10(e + 1))])))}`);
     const agentEar = await ear1;
     await hear(agentEar);
     const inListen = agentEar.has(660);

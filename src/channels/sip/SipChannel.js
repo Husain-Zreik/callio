@@ -1,9 +1,8 @@
 // src/channels/sip/SipChannel.js
 // SIP trunks as a customer channel (the port is documented in
-// core/channels/CustomerChannels.js). drachtio-server carries the signaling
-// and rtpengine converts the media between the carrier's plain RTP and the
-// WebRTC session Callio's media engine terminates — so inside Callio a SIP
-// customer leg is an ordinary WebRTC peer, like a WhatsApp one.
+// core/channels/CustomerChannels.js). drachtio-server carries the signaling;
+// the carrier's SDP goes to the media plane as it is (sdpProfile transport
+// 'rtp'), which anchors it on rtpengine and answers or offers for it.
 //
 // Inbound calls arrive through SipIngress. A leg (SIP transaction/dialog)
 // lives on the worker that received or placed it; accept runs there (it's
@@ -14,7 +13,7 @@ import SipTrunkRepository from '../../persistence/SipTrunkRepository.js';
 import CallRepository from '../../persistence/CallRepository.js';
 import { channelIngress } from '../../core/channels/ChannelIngress.js';
 import { Channel, CustomerAddressType } from '../../core/constants/CallConstants.js';
-import { sipGateway } from './SipGateway.js';
+import { drachtio } from '../../infra/sip/Drachtio.js';
 import { sipDialogs } from './SipDialogs.js';
 import { finishLeg } from './sipLegs.js';
 import { handleInvite } from './SipIngress.js';
@@ -29,11 +28,10 @@ const REJECTED_STATUSES = new Set([486, 600, 603]);
 
 // Answering the carrier: the leg's pending INVITE becomes a dialog.
 async function acceptLeg(leg, sdpAnswer) {
-    const { srf, rtpengine } = sipGateway.require();
-    const carrierSdp = await rtpengine.webrtcAnswerToCarrier({ callId: leg.rtpKey, sdp: sdpAnswer });
+    const srf = drachtio.require();
     const { req, res } = leg;
     leg.res = null;
-    leg.dialog = await srf.createUAS(req, res, { localSdp: carrierSdp });
+    leg.dialog = await srf.createUAS(req, res, { localSdp: sdpAnswer });
     leg.answeredAt = new Date();
     leg.dialog.on('destroy', () => finishLeg(leg, { providerStatus: 'COMPLETED' })
         .catch((err) => log.error({ providerCallId: leg.providerCallId, err }, 'Ending the call after BYE failed')));
@@ -75,28 +73,26 @@ async function onCommand({ action, providerCallId }) {
 }
 
 async function initiate(call, sdpOffer) {
-    const { srf, rtpengine } = sipGateway.require();
+    const srf = drachtio.require();
     const channel = await ChannelRepository.findById(call.channel_id);
     const trunk = channel ? await SipTrunkRepository.findById(channel.sip_trunk_id) : null;
     if (!trunk || trunk.status !== 'ACTIVE') throw new Error(`Channel ${call.channel_id} has no active SIP trunk`);
     const credentials = await SipTrunkRepository.getCredentials(trunk.id);
 
-    const rtpKey = `callio-out-${call.id}`;
-    const carrierOffer = await rtpengine.webrtcOfferToCarrier({ callId: rtpKey, sdp: sdpOffer });
     const target = `sip:${userPart(call.customer_address)}@${trunk.host}:${trunk.port};transport=${trunk.transport.toLowerCase()}`;
     const from = `<sip:${userPart(channel.address)}@${trunk.host}>`;
 
     return new Promise((resolve, reject) => {
         let leg = null;
         srf.createUAC(target, {
-            localSdp: carrierOffer,
+            localSdp: sdpOffer,
             headers: { From: from },
             ...(credentials?.username ? { auth: { username: credentials.username, password: credentials.password } } : {}),
         }, {
             cbRequest: async (err, request) => {
                 if (err) { reject(err); return; }
                 const providerCallId = request.get('Call-ID');
-                leg = { providerCallId, channel, direction: 'OUTBOUND', rtpKey, uacRequest: request, dialog: null, answeredAt: null };
+                leg = { providerCallId, channel, direction: 'OUTBOUND', uacRequest: request, dialog: null, answeredAt: null };
                 await sipDialogs.add(providerCallId, leg);
                 // Stored before the carrier can ring or answer, so its events find the call.
                 await CallRepository.updateProviderCallId(call.id, providerCallId);
@@ -113,8 +109,7 @@ async function initiate(call, sdpOffer) {
             leg.answeredAt = new Date();
             dialog.on('destroy', () => finishLeg(leg, { providerStatus: 'COMPLETED' })
                 .catch((err) => log.error({ providerCallId: leg.providerCallId, err }, 'Ending the call after BYE failed')));
-            const sdpAnswer = await rtpengine.carrierAnswerToWebrtc({ callId: rtpKey, sdp: dialog.remote.sdp });
-            await channelIngress.outboundAnswered(channel, { providerCallId: leg.providerCallId, sdpAnswer });
+            await channelIngress.outboundAnswered(channel, { providerCallId: leg.providerCallId, sdpAnswer: dialog.remote.sdp });
             await channelIngress.statusChanged(channel, { providerCallId: leg.providerCallId, status: 'ACCEPTED', at: leg.answeredAt });
         }).catch(async (err) => {
             if (!leg) { reject(err); return; }
@@ -124,7 +119,6 @@ async function initiate(call, sdpOffer) {
             // A SIP final response is an outcome, not a fault: log the status; keep the stack for real errors.
             log.info({ providerCallId: leg.providerCallId, ...(status ? { sipStatus: status } : { err }) }, 'Outbound SIP call not answered');
             if (status && REJECTED_STATUSES.has(status)) {
-                await sipGateway.rtpengine?.delete(rtpKey);
                 await sipDialogs.remove(leg.providerCallId);
                 leg.finished = true;
                 await channelIngress.statusChanged(channel, { providerCallId: leg.providerCallId, status: 'REJECTED', at: new Date() });
@@ -176,12 +170,12 @@ export const sipChannel = Object.freeze({
     },
 
     async start() {
-        if (!sipGateway.enabled) {
+        if (!drachtio.enabled) {
             log.info('DRACHTIO_HOST not set — SIP channel disabled on this worker');
             return;
         }
         await sipDialogs.start(onCommand);
-        sipGateway.start((req, res) => handleInvite(req, res).catch((err) => {
+        drachtio.onInvite((req, res) => handleInvite(req, res).catch((err) => {
             log.error({ providerCallId: req.get('Call-ID'), err }, 'Handling INVITE failed');
             try { res.send(500); } catch { /* already answered */ }
         }));
@@ -192,6 +186,6 @@ export const sipChannel = Object.freeze({
             await endLeg(leg).catch(() => { });
         }
         await sipDialogs.stop();
-        sipGateway.stop();
+        drachtio.onInvite(null);
     },
 });

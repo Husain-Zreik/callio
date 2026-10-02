@@ -168,8 +168,9 @@ export const config = {
             ttlSeconds: parseInt(process.env.TURN_CREDENTIAL_TTL_SECONDS || "86400", 10) || 86400,
         },
     },
-    // SIP channel: the drachtio-server + rtpengine gateway (deploy/sip-gateway).
-    // Unset DRACHTIO_HOST = SIP disabled on this worker.
+    // The SIP gateway (deploy/sip-gateway): drachtio-server carries SIP — the
+    // SIP channel's calls, and the INVITEs that create media endpoints on
+    // FreeSWITCH; rtpengine terminates every external media leg.
     sip: {
         drachtio: {
             host: process.env.DRACHTIO_HOST || null,
@@ -179,11 +180,35 @@ export const config = {
         rtpengine: {
             host: process.env.RTPENGINE_HOST || "127.0.0.1",
             port: parseInt(process.env.RTPENGINE_NG_PORT || "22222", 10),
-            // Named rtpengine interfaces for the carrier and WebRTC sides, when
-            // rtpengine has more than one (rtpengine.conf interface = name/…).
-            carrierInterface: process.env.RTPENGINE_CARRIER_INTERFACE || null,
-            webrtcInterface: process.env.RTPENGINE_WEBRTC_INTERFACE || null,
+            // rtpengine's named interfaces (rtpengine.conf interface = name/…):
+            // external faces customers and agents, internal faces FreeSWITCH.
+            externalInterface: process.env.RTPENGINE_EXTERNAL_INTERFACE || "external",
+            internalInterface: process.env.RTPENGINE_INTERNAL_INTERFACE || "internal",
         },
+    },
+    // The media plane (docs/media-architecture.md): calls are rooms on
+    // FreeSWITCH, driven over its event socket through drachtio-fsmrf.
+    media: {
+        freeswitch: {
+            host: process.env.FREESWITCH_HOST || null,
+            port: parseInt(process.env.FREESWITCH_ESL_PORT || "8021", 10),
+            secret: process.env.FREESWITCH_ESL_PASSWORD || "ClueCon",
+            // FreeSWITCH connects back to this worker per endpoint; the default
+            // is this worker's HTTP port + 1000.
+            listenPort: parseInt(process.env.MEDIA_ESL_LISTEN_PORT || "0", 10) || null,
+            advertisedAddress: process.env.MEDIA_ESL_ADVERTISED_ADDRESS || null,
+            sipProfile: process.env.FREESWITCH_SIP_PROFILE || "drachtio_mrf",
+            // The profile Callio offers from to SIP carriers (G.711 only), on a
+            // second connection; its callbacks default to the HTTP port + 2000.
+            g711SipProfile: process.env.FREESWITCH_G711_SIP_PROFILE || "drachtio_mrf_g711",
+            g711ListenPort: parseInt(process.env.MEDIA_ESL_G711_LISTEN_PORT || "0", 10) || null,
+            conferenceProfile: process.env.FREESWITCH_CONFERENCE_PROFILE || "callio",
+        },
+        // Where FreeSWITCH fetches Callio-served audio (local audio assets,
+        // the IVR error prompt): this Callio as the media servers reach it.
+        callbackUrl: (process.env.MEDIA_CALLBACK_URL || "").replace(/\/+$/, "") || null,
+        // Recordings are written here on the media server before upload.
+        recordingDir: process.env.MEDIA_RECORDING_DIR || "/tmp",
     },
     // URLs a consumer sets for itself (PUT /v1/webhook) must be https:// —
     // Callio POSTs to them. true only for local development and tests.

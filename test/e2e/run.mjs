@@ -4,6 +4,8 @@
 //
 // Needs MySQL 8 and Redis reachable — `docker compose -f test/e2e/docker-compose.yml up -d`
 // gives both on the default ports below. Override with TEST_DB_* / TEST_REDIS_*.
+// And the media plane — `docker compose -f deploy/sip-gateway/docker-compose.local.yml
+// up -d --build` (drachtio, rtpengine, FreeSWITCH): every call's media runs there.
 import { spawn, spawnSync } from 'child_process';
 import net from 'net';
 import { createRequire } from 'module';
@@ -41,16 +43,27 @@ const work = mkdtempSync(join(tmpdir(), 'callio-e2e-'));
 const port = Number(process.env.TEST_CALLIO_PORT || 3901);
 const S3_PORT = Number(process.env.TEST_S3_PORT || 3995);
 
-// The SIP suite needs the local SIP gateway (deploy/sip-gateway/docker-compose.local.yml).
-const drachtioUp = await new Promise((resolve) => {
-    const s = net.connect(9022, '127.0.0.1', () => { s.destroy(); resolve(true); });
+// Every suite needs the media plane (deploy/sip-gateway/docker-compose.local.yml).
+const listening = (port) => new Promise((resolve) => {
+    const s = net.connect(port, '127.0.0.1', () => { s.destroy(); resolve(true); });
     s.on('error', () => resolve(false));
     s.setTimeout(1500, () => { s.destroy(); resolve(false); });
 });
-const sipEnv = drachtioUp ? {
+if (!await listening(9022) || !await listening(8021)) {
+    console.log('[e2e] the media plane is not running (drachtio :9022, FreeSWITCH :8021) — '
+        + 'docker compose -f deploy/sip-gateway/docker-compose.local.yml up -d --build');
+    process.exit(1);
+}
+// The media server runs in Docker: it reaches this machine (Callio's audio
+// route and event-socket callbacks, the fake S3) as host.docker.internal.
+const DOCKER_HOST = process.env.TEST_DOCKER_HOST || 'host.docker.internal';
+const mediaEnv = {
     DRACHTIO_HOST: '127.0.0.1', DRACHTIO_PORT: '9022', DRACHTIO_SECRET: process.env.TEST_DRACHTIO_SECRET || 'CHANGE_ME',
     RTPENGINE_HOST: '127.0.0.1', RTPENGINE_NG_PORT: '22222',
-} : {};
+    FREESWITCH_HOST: '127.0.0.1', FREESWITCH_ESL_PORT: '8021', FREESWITCH_ESL_PASSWORD: process.env.TEST_FREESWITCH_PASSWORD || 'CHANGE_ME',
+    MEDIA_ESL_ADVERTISED_ADDRESS: DOCKER_HOST,
+    MEDIA_CALLBACK_URL: `http://${DOCKER_HOST}:${port}`,
+};
 
 const env = {
     ...process.env,
@@ -62,7 +75,7 @@ const env = {
     REDIS_HOST: process.env.TEST_REDIS_HOST || '127.0.0.1',
     REDIS_PORT: process.env.TEST_REDIS_PORT || '36379',
     REDIS_DB: process.env.TEST_REDIS_DB || '15',
-    NODE_HOST: '127.0.0.1',
+    NODE_HOST: '0.0.0.0',   // the media server fetches audio from Callio
     NODE_PORT: String(port),
     WORKER_ID: 'e2e',
     WHATSAPP_API_URL: 'http://127.0.0.1:3990/',
@@ -71,7 +84,8 @@ const env = {
     // Keep real provider credentials out of the test process. Object storage is
     // the fake S3 below, so recordings upload and can be read back.
     AWS_ACCESS_KEY_ID: 'test', AWS_SECRET_ACCESS_KEY: 'test', AWS_BUCKET: 'callio-test', AWS_DEFAULT_REGION: 'us-east-1',
-    AWS_ENDPOINT: `http://127.0.0.1:${S3_PORT}`, AWS_USE_PATH_STYLE_ENDPOINT: 'true', AWS_BUCKET_PREFIX: '', AWS_URL: '',
+    // The media server uploads recordings there too.
+    AWS_ENDPOINT: `http://${DOCKER_HOST}:${S3_PORT}`, AWS_USE_PATH_STYLE_ENDPOINT: 'true', AWS_BUCKET_PREFIX: '', AWS_URL: '',
     ONESIGNAL_APP_ID: '', APNS_KEY_ID: '',
     ONESIGNAL_API_URL: 'http://127.0.0.1:3998/notifications',   // push.test.mjs's fake OneSignal
     FIREBASE_SERVICE_ACCOUNT_PATH: join(work, 'no-firebase.json'),
@@ -80,7 +94,7 @@ const env = {
     CALL_TRANSFER_TIMEOUT_SECONDS: '6',
     WEBHOOK_ALLOW_HTTP: 'true',      // the suites' receivers are http://127.0.0.1
     RETENTION_SWEEP_SECONDS: '10',   // retention.test.mjs: a sweep every ~10 s
-    ...sipEnv,
+    ...mediaEnv,
 };
 
 const run = (args, opts = {}) => {
@@ -107,7 +121,10 @@ async function startCallio(logFile) {
     const out = openSync(logFile, 'w');
     const child = spawn(process.execPath, ['index.js'], { cwd: root, env, stdio: ['ignore', out, out] });
     for (let i = 0; i < 120; i++) {   // up to 60 s: a cold first start (native modules, AV scanning) can be slow
-        try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) return child; } catch { /* not up yet */ }
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/health`);
+            if (res.ok && (await res.json()).media?.connected) return child;
+        } catch { /* not up yet */ }
         await new Promise((r) => setTimeout(r, 500));
     }
     child.kill();
@@ -116,11 +133,7 @@ async function startCallio(logFile) {
 
 function suiteFiles() {
     const only = process.argv.slice(2);
-    let all = readdirSync(here).filter((f) => f.endsWith('.test.mjs')).sort();
-    if (!drachtioUp) {
-        console.log('[e2e] SIP gateway not running — skipping sip.test.mjs (docker compose -f deploy/sip-gateway/docker-compose.local.yml up -d)');
-        all = all.filter((f) => f !== 'sip.test.mjs');
-    }
+    const all = readdirSync(here).filter((f) => f.endsWith('.test.mjs')).sort();
     return only.length ? all.filter((f) => only.some((o) => f.includes(o))) : all;
 }
 
@@ -168,7 +181,7 @@ checkLogging();
 
 let failed = 0;
 let callio = null;
-const s3 = fakeS3({ bucket: 'callio-test', port: S3_PORT });
+const s3 = fakeS3({ bucket: 'callio-test', port: S3_PORT, host: '0.0.0.0' });
 await s3.listen();
 try {
     console.log(`[e2e] preparing database ${env.DB_DATABASE}`);

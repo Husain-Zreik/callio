@@ -1,15 +1,14 @@
 // src/channels/sip/SipIngress.js
 // Inbound SIP → core/channels/ChannelIngress.js. The only code that knows
 // how a carrier call arrives: the dialled number resolves the channel, the
-// channel's trunk vouches for the source, rtpengine turns the carrier's offer
-// into a WebRTC offer for Callio's customer peer, and CANCEL / BYE become the
+// channel's trunk vouches for the source, the carrier's offer goes to the core
+// as it is (the media plane answers it), and CANCEL / BYE become the
 // provider's end of the call. Every call decision is the ingress's.
 import ChannelRepository from '../../persistence/ChannelRepository.js';
 import SipTrunkRepository from '../../persistence/SipTrunkRepository.js';
 import CallRepository from '../../persistence/CallRepository.js';
 import { channelIngress } from '../../core/channels/ChannelIngress.js';
 import { Channel, CallStatus } from '../../core/constants/CallConstants.js';
-import { sipGateway } from './SipGateway.js';
 import { sipDialogs } from './SipDialogs.js';
 import { finishLeg } from './sipLegs.js';
 import { dialledNumber, callerOf, sourceAllowed } from './sipAddress.js';
@@ -41,15 +40,14 @@ export async function handleInvite(req, res) {
     }
     log.info({ providerCallId, did, source, channelId: channel.id }, 'INVITE accepted');
 
-    let sdpOffer;
-    try {
-        sdpOffer = await sipGateway.rtpengine.carrierOfferToWebrtc({ callId: providerCallId, sdp: req.body });
-    } catch (err) {
-        log.error({ providerCallId, err }, 'rtpengine refused the offer');
+    // An INVITE without an offer (late SDP) isn't supported.
+    const sdpOffer = req.body;
+    if (!sdpOffer || !/^v=0/m.test(String(sdpOffer))) {
+        log.warn({ providerCallId }, 'INVITE without an SDP offer — 488');
         return res.send(488);
     }
 
-    const leg = { providerCallId, channel, direction: 'INBOUND', rtpKey: providerCallId, req, res, dialog: null, answeredAt: null };
+    const leg = { providerCallId, channel, direction: 'INBOUND', req, res, dialog: null, answeredAt: null };
     await sipDialogs.add(providerCallId, leg);
 
     // The caller hangs up before anyone answers.

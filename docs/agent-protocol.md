@@ -3,8 +3,9 @@
 How an agent client (browser, mobile app, desktop softphone) talks to Callio.
 For JavaScript clients, `sdk/agent-js` implements all of this.
 One Socket.IO connection per agent session carries all signaling; audio flows
-over WebRTC between the client and Callio's media engine — never peer to
-peer, never through the consumer's backend.
+over WebRTC between the client and Callio's media plane (rtpengine, with the
+call mixed in a room behind it) — never peer to peer, never through the
+consumer's backend.
 
 ## Connecting
 
@@ -122,8 +123,8 @@ acting. A socket receives:
 | `call:cancel` | `{ callId }` | Cancel an outbound call before it's answered: ends `CANCELLED` (`terminatedBy: AGENT`). Same permissions as `call:terminate`. |
 | `call:reconnect` | `{ callId, sdpOffer, reconnectTrigger? }` | Re-establish the media leg (network change, page reload, moving to another device). Another still-live socket holding the call gets `call:connection_superseded`. |
 | `call:transfer` | `{ callId, agentId }` or `{ callId, queueId }` | Transfer to an agent, or into a queue (picked by the queue's strategy). Allowed for the agent on the call and for supervisors. The target agent must be `AVAILABLE`; a queue must be `ACTIVE` and have an available member other than the current agent. |
-| `connection:ice-candidate` | `{ callId, candidate, connectionType: 'AGENT'\|'MONITOR' }` | Trickle ICE for this socket's leg. Ignored unless the socket is bound to the call. |
-| `call:monitor` | `{ callId, sdpOffer }` | Supervisors only, on an `IN_PROGRESS` call; one supervisor per call at a time. Offer **two** audio transceivers — see *Monitoring*. Replies `call:monitor:started`. |
+| `connection:ice-candidate` | `{ callId, candidate, connectionType: 'AGENT'\|'MONITOR' }` | Trickle ICE for this socket's leg. Accepted, but not needed: Callio's side learns your address from your connectivity checks. Ignored unless the socket is bound to the call. |
+| `call:monitor` | `{ callId, sdpOffer }` | Supervisors only, on an `IN_PROGRESS` call; one supervisor per call at a time. Offer **one** audio transceiver — see *Monitoring*. Replies `call:monitor:started`. |
 | `call:monitor:mode` | `{ callId, mode: 'listen'\|'whisper'\|'barge' }` | While monitoring. Any other mode → `MONITOR_FAILED`. |
 | `call:monitor:stop` | `{ callId }` | Ignored unless this socket is monitoring the call. |
 | `call:agent:private` | `{ callId, active }` | The agent talks privately to the monitoring supervisor (muted to the customer). Takes effect only while the supervisor is in `whisper` mode: otherwise the answer is `call:agent:private:changed { active: false }` plus `MONITOR_FAILED`. It ends when the supervisor leaves `whisper` or stops monitoring. |
@@ -146,7 +147,7 @@ acting. A socket receives:
 | `call:transferred` | To the previous agent and supervisors: the new agent's `call:incoming` payload without `sdpOffer` and `tenantId`, plus `userId` (the new agent), `targetQueueId` and `transferTarget: { type: 'agent'\|'queue', queueId }`. |
 | `call:terminated` | `{ callId, tenantId, reason, terminationReason, terminatedBy, source }` — the call ended; `reason` equals `terminationReason` (values in [events.md](events.md#values)); `source` is a short internal label. Two other forms: `{ callId, reason: 'transferred' }` to the call room when a transfer moves the call away from the previous agent — that agent's leg is over, the call is not; and `{ callId, tenantId, reason: 'orphan_cleanup', terminationReason }` when Callio closes leftover media of a call that already ended (`terminationReason` is then the call's status, or `NOT_FOUND`; no `terminatedBy`). |
 | `calls:list` | `{ ongoing: [ … ] }` — reply to `calls:sync`; see *Call payloads*. |
-| `connection:ice-candidate:server` | `{ callId, candidate, connectionType }` — Callio's trickled candidates for your leg. |
+| `connection:ice-candidate:server` | `{ callId, candidate, connectionType }` — Callio's trickled candidates for your leg. Callio's SDP already carries its candidates, so it sends none today; handle it if it comes. |
 | `call:error` | `{ callId, code, message }` — see *Errors*. |
 
 ### Media state
@@ -243,16 +244,16 @@ require one (CallKit, Android Telecom). The same value is in the call's pushes.
 
 ## Media
 
-- **Inbound:** `call:incoming.sdpOffer` is Callio's offer for your leg. Answer it,
-  send the answer in `call:accept`, and exchange ICE candidates both ways
-  (`connection:ice-candidate` / `connection:ice-candidate:server`).
+- **Inbound:** `call:incoming.sdpOffer` is Callio's offer for your leg (its
+  candidates are in it). Answer it and send the answer in `call:accept`;
+  trickling your own candidates with `connection:ice-candidate` is optional.
 - **Outbound:** you create the offer and send it in `call:start`; Callio
   answers in `call:started`.
 - Send your microphone as one audio track. Callio waits up to 5 seconds for
-  it before telling the provider the call is answered; if it never arrives the
-  call fails with `AGENT_MEDIA_NOT_READY`.
-- While a call is being set up or re-established you may hear a short
-  placeholder tone from Callio.
+  its audio before telling the provider the call is answered; if it never
+  arrives the call fails with `AGENT_MEDIA_NOT_READY`.
+- While no agent is on the call (the agent's leg dropped, a transfer is
+  being answered) the customer hears a reconnecting tone.
 - **Reconnecting** (network change, ICE failure, page reload, another device):
   build a new peer connection, send its offer in `call:reconnect`, apply the
   answer from `call:reconnected`. There is no ICE restart — Callio rebuilds its
@@ -261,18 +262,12 @@ require one (CallKit, Android Telecom). The same value is in the call's pushes.
 
 ### Monitoring
 
-A supervisor's offer has two audio transceivers, in this order:
-
-| # | Direction | Carries |
-|---|---|---|
-| 1 | `sendrecv` | sends the supervisor's microphone; receives the **agent** |
-| 2 | `recvonly` | receives the **customer** |
-
-Identify the tracks by transceiver (`mid`), not by arrival order. The
-microphone is only heard in `whisper` (by the agent) and `barge` (by the
-agent and the customer) — Callio does the mixing, so there is no
-renegotiation when the mode changes. Older clients that send the microphone
-on a third, `sendonly` transceiver are also accepted.
+A supervisor's offer has one audio transceiver, `sendrecv`: it sends the
+supervisor's microphone and receives the call — the customer and the agent,
+mixed by Callio. The microphone is only heard in `whisper` (by the agent) and
+`barge` (by the agent and the customer); Callio applies the mode, so there is
+no renegotiation when it changes. Extra audio lines in the offer (older
+clients offered a second, receive-only one) are answered as rejected (port 0).
 
 ## Push
 

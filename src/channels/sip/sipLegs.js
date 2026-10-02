@@ -1,12 +1,11 @@
 // src/channels/sip/sipLegs.js
-// Ending a SIP leg: free its rtpengine session, forget it, and tell the core
-// the provider-side timing. The core's own end (an agent hanging up, a queue
+// Ending a SIP leg: forget it, and tell the core the provider-side timing
+// (its media leg is the media plane's, closed with the call). The core's own end (an agent hanging up, a queue
 // timeout) has usually already committed the call — reporting the end anyway
 // fills in the durations only the channel knows, the way WhatsApp's end
 // webhook does after Callio terminates.
 import { channelIngress } from '../../core/channels/ChannelIngress.js';
 import { sipDialogs } from './SipDialogs.js';
-import { sipGateway } from './SipGateway.js';
 
 /**
  * @param {object} leg
@@ -19,7 +18,6 @@ export async function finishLeg(leg, { providerStatus = 'COMPLETED', failed = fa
     leg.finished = true;
     const endedAt = new Date();
 
-    await sipGateway.rtpengine?.delete(leg.rtpKey);
     await sipDialogs.remove(leg.providerCallId);
 
     await channelIngress.callEnded(leg.channel, {

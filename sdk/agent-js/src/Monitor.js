@@ -1,17 +1,16 @@
 // A supervisor listening to a call (docs/agent-protocol.md, Monitoring).
 // Created by CallioAgent.monitor() — don't construct directly.
 //
-// Two audio lines to Callio: the first sends the supervisor's microphone and
-// receives the agent, the second receives the customer. Callio mixes, so a
-// mode change needs no renegotiation:
-//   listen   the supervisor hears both; nobody hears the supervisor
+// One audio line to Callio: it sends the supervisor's microphone and
+// receives the call — the customer and the agent, mixed by Callio. Callio
+// decides who hears the supervisor, so a mode change needs no renegotiation:
+//   listen   the supervisor hears the call; nobody hears the supervisor
 //   whisper  the agent hears the supervisor; the customer doesn't
 //   barge    both hear the supervisor
 //
 // state: connecting → active → ended
-// Events: 'state' (state, previous), 'agentStream' (MediaStream),
-// 'customerStream' (MediaStream), 'mode' (mode), 'agentPrivate' ({ active }),
-// 'agentReconnected', 'ended' ({ reason }).
+// Events: 'state' (state, previous), 'stream' (MediaStream: the call),
+// 'mode' (mode), 'agentPrivate' ({ active }), 'agentReconnected', 'ended' ({ reason }).
 import { Emitter } from './emitter.js';
 
 const CONNECT_TIMEOUT_MS = 15000;
@@ -25,8 +24,7 @@ export class Monitor extends Emitter {
         this.state = 'connecting';
         this.mode = 'listen';
         this.muted = false;
-        this.agentStream = null;
-        this.customerStream = null;
+        this.stream = null;
         this.localStream = null;
         this._ownsLocalStream = false;
         this.pc = null;
@@ -63,8 +61,7 @@ export class Monitor extends Emitter {
         this._ownsLocalStream = !stream;
         this.localStream = stream ?? await this.agent._getMicrophone();
         const mic = this.localStream.getAudioTracks()[0];
-        const agentLine = pc.addTransceiver(mic ?? 'audio', { direction: 'sendrecv', streams: [this.localStream] });
-        const customerLine = pc.addTransceiver('audio', { direction: 'recvonly' });
+        pc.addTransceiver(mic ?? 'audio', { direction: 'sendrecv', streams: [this.localStream] });
 
         pc.onicecandidate = (e) => {
             if (!e.candidate || pc !== this.pc) return;
@@ -73,17 +70,10 @@ export class Monitor extends Emitter {
                 candidate: { candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, sdpMLineIndex: e.candidate.sdpMLineIndex },
             });
         };
-        // By transceiver, never by arrival order.
         pc.ontrack = (e) => {
             if (pc !== this.pc) return;
-            const s = new MediaStream([e.track]);
-            if (e.transceiver === agentLine || e.transceiver?.mid === agentLine.mid) {
-                this.agentStream = s;
-                this.emit('agentStream', s, e.track);
-            } else if (e.transceiver === customerLine || e.transceiver?.mid === customerLine.mid) {
-                this.customerStream = s;
-                this.emit('customerStream', s, e.track);
-            }
+            this.stream = new MediaStream([e.track]);
+            this.emit('stream', this.stream, e.track);
         };
         pc.onconnectionstatechange = () => {
             if (pc !== this.pc) return;

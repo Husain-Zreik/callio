@@ -12,8 +12,7 @@
 import fs from 'fs';
 import v8 from 'v8';
 import { monitorEventLoopDelay } from 'perf_hooks';
-import { peerRegistry } from '../../media/webrtc/PeerRegistry.js';
-import { recordingManager } from '../../media/recording/RecordingManager.js';
+import { callMedia } from '../../core/media/CallMedia.js';
 import { leakMetrics } from './leakMetrics.js';
 import { callStateCensus } from './callStateCensus.js';
 import { config } from '../../../config/envConfig.js';
@@ -69,7 +68,6 @@ class WorkerStatsService {
         const mem = process.memoryUsage();
         const cpu = this._cpuPercent();
         const calls = this._activeCalls();
-        const recordings = this._activeRecordings();
 
         const heapStats = v8.getHeapStatistics();
 
@@ -96,10 +94,6 @@ class WorkerStatsService {
             activeCalls: {
                 count: calls.length,
                 callIds: calls,
-            },
-            activeRecordings: {
-                count: recordings.length,
-                callIds: recordings,
             },
             // ── Leak diagnostics ───────────────────────────────────────────────
             // handles.timers should sit at a small constant on an IDLE worker.
@@ -173,7 +167,6 @@ class WorkerStatsService {
             threads: this._threadCount(),
             detachedContexts: heapStats.number_of_detached_contexts,
             eventBusListeners: this._eventBusListeners(),
-            activeRecordings: this._activeRecordings().length,
         };
     }
 
@@ -243,12 +236,7 @@ class WorkerStatsService {
     }
 
     _activeCalls() {
-        try { return [...peerRegistry.peerConnections.keys()]; }
-        catch { return []; }
-    }
-
-    _activeRecordings() {
-        try { return [...recordingManager.activeSessions.keys()]; }
+        try { return callMedia.activeCallIds(); }
         catch { return []; }
     }
 

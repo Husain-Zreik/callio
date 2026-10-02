@@ -1,6 +1,6 @@
-// src/media/webrtc/IceServers.js
-// The ICE servers for a peer connection: Callio's own peers and every agent
-// client (sent in session:ready, so no client ships TURN credentials).
+// src/realtime/IceServers.js
+// The ICE servers for every agent client's peer connection (sent in
+// session:ready, so no client ships TURN credentials).
 //
 // TURN credentials, in order of preference:
 //   TURN_SECRET    short-lived credentials per identity, the TURN REST API
@@ -11,7 +11,7 @@
 // TURN_SERVER_URL is a host name (turn:<host>:80 udp/tcp and turns:<host>:443
 // are derived) or a comma-separated list of full turn:/turns: URLs.
 import { createHmac } from 'crypto';
-import { config } from '../../../config/envConfig.js';
+import { config } from '../../config/envConfig.js';
 
 function turnUrls(serverUrl) {
     const parts = String(serverUrl).split(',').map((s) => s.trim()).filter(Boolean);

@@ -73,7 +73,7 @@ monitor.setMode(MonitorMode.whisper);           // listen | whisper | barge
 monitor.stop();
 ```
 
-`monitor.agentStream` / `monitor.customerStream`, `monitor.mode`,
+`monitor.stream` (the call as the supervisor hears it), `monitor.mode`,
 `monitor.state`, `monitor.ended`. A reconnect ends monitoring.
 
 ## The native call screen (`package:callio_agent/native_calls.dart`)

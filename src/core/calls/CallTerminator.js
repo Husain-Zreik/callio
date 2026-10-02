@@ -21,7 +21,7 @@ import { agentAssignmentCoordinator } from '../routing/AgentAssignmentCoordinato
 import { customerChannels } from '../channels/CustomerChannels.js';
 import { callLifecycleLogger } from './CallLifecycleLogger.js';
 import { callParticipants } from './CallParticipants.js';
-import { peerRegistry } from '../../media/webrtc/PeerRegistry.js';
+import { mediaLegs } from '../media/MediaLegs.js';
 import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
 import { EventTypes } from '../events/EventTypes.js';
 import { CallDirection } from '../constants/CallConstants.js';
@@ -130,12 +130,12 @@ class CallTerminator {
         log.info({ callId }, `Call ended — ${reason}/${terminatedBy}${source ? ` (${source})` : ''}`);
     }
 
-    // A call's media lives on one worker. 'local' closes this worker's peers —
+    // A call's legs live on one worker. 'local' closes this worker's legs —
     // for callers already running there (events routed to the owning worker).
     // 'broadcast' also tells the owning worker, whose CALL_TERMINATED handler
-    // sees the call is over and closes its peers.
+    // sees the call is over and closes its legs.
     async #closeMedia(callId, media) {
-        await peerRegistry.closePeerConnection(callId).catch((err) =>
+        await mediaLegs.close(callId).catch((err) =>
             log.error({ callId, err }, 'Closing local media failed')
         );
         if (media !== 'broadcast') return;

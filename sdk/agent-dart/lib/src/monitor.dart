@@ -1,10 +1,10 @@
 // A supervisor listening to a call (docs/agent-protocol.md, Monitoring).
 // Created by CallioAgent.monitor().
 //
-// Two audio lines: the first sends the supervisor's microphone and receives
-// the agent, the second receives the customer. Callio mixes, so a mode change
-// needs no renegotiation:
-//   listen   the supervisor hears both; nobody hears the supervisor
+// One audio line: it sends the supervisor's microphone and receives the call
+// — the customer and the agent, mixed by Callio. Callio decides who hears the
+// supervisor, so a mode change needs no renegotiation:
+//   listen   the supervisor hears the call; nobody hears the supervisor
 //   whisper  the agent hears the supervisor; the customer doesn't
 //   barge    both hear the supervisor
 import 'dart:async';
@@ -29,10 +29,7 @@ class CallioMonitor extends ChangeNotifier {
   rtc.RTCPeerConnection? _pc;
   rtc.MediaStream? _localStream;
   bool _ownsLocalStream = false;
-  rtc.MediaStream? _agentStream;
-  rtc.MediaStream? _customerStream;
-  String? _agentMid;
-  String? _customerMid;
+  rtc.MediaStream? _stream;
   bool _remoteSet = false;
   final List<Map<String, dynamic>> _pendingRemote = [];
   Timer? _timer;
@@ -42,8 +39,8 @@ class CallioMonitor extends ChangeNotifier {
   MonitorMode get mode => _mode;
   bool get muted => _muted;
   String? get endReason => _endReason;
-  rtc.MediaStream? get agentStream => _agentStream;
-  rtc.MediaStream? get customerStream => _customerStream;
+  /// The call as the supervisor hears it: the customer and the agent, mixed.
+  rtc.MediaStream? get stream => _stream;
 
   /// Completes with the reason: stopped, ended, call_ended, disconnected, failed, closed.
   Future<String> get ended => _ended.future;
@@ -83,10 +80,6 @@ class CallioMonitor extends ChangeNotifier {
     } else {
       await pc.addTransceiver(track: tracks.first, kind: rtc.RTCRtpMediaType.RTCRtpMediaTypeAudio, init: sendLine);
     }
-    await pc.addTransceiver(
-      kind: rtc.RTCRtpMediaType.RTCRtpMediaTypeAudio,
-      init: rtc.RTCRtpTransceiverInit(direction: rtc.TransceiverDirection.RecvOnly),
-    );
 
     pc.onIceCandidate = (c) {
       if (!identical(pc, _pc) || c.candidate == null) return;
@@ -96,19 +89,11 @@ class CallioMonitor extends ChangeNotifier {
         'candidate': {'candidate': c.candidate, 'sdpMid': c.sdpMid, 'sdpMLineIndex': c.sdpMLineIndex},
       });
     };
-    // By transceiver, never by arrival order.
     pc.onTrack = (event) {
       if (!identical(pc, _pc)) return;
-      final mid = event.transceiver?.mid;
       final stream = event.streams.isNotEmpty ? event.streams.first : null;
       if (stream == null) return;
-      if (mid != null && mid == _agentMid) {
-        _agentStream = stream;
-      } else if (mid != null && mid == _customerMid) {
-        _customerStream = stream;
-      } else {
-        return;
-      }
+      _stream = stream;
       notifyListeners();
     };
     pc.onConnectionState = (s) {
@@ -126,11 +111,6 @@ class CallioMonitor extends ChangeNotifier {
 
     final offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    final transceivers = await pc.getTransceivers();
-    if (transceivers.length >= 2) {
-      _agentMid = transceivers[0].mid;
-      _customerMid = transceivers[1].mid;
-    }
     _agent.send('call:monitor', {'callId': callId, 'sdpOffer': offer.sdp});
   }
 

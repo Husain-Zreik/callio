@@ -94,7 +94,13 @@ export function listen(track, freqs = [440, 660, 880]) {
             const sorted = Object.entries(stats.bins).sort((a, b) => b[1] - a[1]);
             return sorted[0][1] > 10 * (sorted[1]?.[1] ?? 0) ? Number(sorted[0][0]) : 0;
         },
-        has(freq) { const max = Math.max(...Object.values(stats.bins)); return stats.bins[freq] > max / 20 && max > 0; },
+        // Audible (the tones are ~8000 amplitude; a mixer's residual in silence is a few units)
+        // and at least 1/20 of the loudest test tone.
+        has(freq) {
+            const max = Math.max(...Object.values(stats.bins));
+            const rms = stats.samples ? Math.sqrt(stats.energy / stats.samples) : 0;
+            return rms >= 50 && stats.bins[freq] > max / 20 && max > 0;
+        },
         rms() { return stats.samples ? Math.round(Math.sqrt(stats.energy / stats.samples)) : 0; },
         stop() { sink.stop(); },
     };
@@ -110,17 +116,24 @@ export async function gathered(pc, timeoutMs = 4000) {
     });
 }
 
-// audioLines > 1 adds extra audio transceivers (a supervisor receives the
-// agent and the customer as separate tracks). tracks collects a listener per
-// received track; received resolves with the first.
+// audioLines > 1 adds extra receive-only audio transceivers (a supervisor's
+// client offers two; the second is answered as rejected and the room's mix
+// arrives on the first). tracks collects a listener per received track;
+// received resolves with the first. stopSending() stops the peer's RTP (its
+// network dropping), resumeSending() restarts it.
 export function newPeer(freq, { audioLines = 1 } = {}) {
     const pc = new RTCPeerConnection({ iceServers: [] });
     const tone = toneTrack(freq);
-    pc.addTrack(tone.track);
+    const sender = pc.addTrack(tone.track);
     for (let i = 1; i < audioLines; i++) pc.addTransceiver("audio", { direction: "recvonly" });
     const tracks = [];
     const received = new Promise((resolve) => { pc.ontrack = (e) => { const l = listen(e.track); tracks.push(l); if (tracks.length === 1) resolve(l); }; });
-    return { pc, tone, received, tracks, close() { try { tone.stop(); pc.close(); } catch { } } };
+    return {
+        pc, tone, received, tracks,
+        stopSending: () => sender.replaceTrack(null),
+        resumeSending: () => sender.replaceTrack(tone.track),
+        close() { try { tone.stop(); pc.close(); } catch { } },
+    };
 }
 
 // Measures what `listener` hears over `ms`, after a settle period.
@@ -258,7 +271,7 @@ export function eventReceiver({ secret, port = 3999 }) {
 // Enough of S3 (path-style) for Callio's recordings: head bucket, put/get/delete
 // an object, and multipart uploads. Signatures aren't checked. Objects live in
 // memory; anyone can read them back over HTTP.
-export function fakeS3({ bucket, port = 3995 }) {
+export function fakeS3({ bucket, port = 3995, host = '127.0.0.1' }) {
     const objects = new Map();   // key -> Buffer
     const uploads = new Map();   // uploadId -> Map(partNumber -> Buffer)
     let nextUpload = 0;
@@ -318,7 +331,7 @@ export function fakeS3({ bucket, port = 3995 }) {
         if (req.method === 'DELETE') { objects.delete(key); return send(204); }
         send(400, '<Error><Code>NotImplemented</Code></Error>');
     });
-    return { objects, listen: () => new Promise((r) => server.listen(port, '127.0.0.1', r)), close: () => server.close() };
+    return { objects, listen: () => new Promise((r) => server.listen(port, host, r)), close: () => server.close() };
 }
 
 // ── Recordings ────────────────────────────────────────────────────────────────

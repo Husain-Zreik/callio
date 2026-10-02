@@ -145,16 +145,16 @@ export class Monitor extends Emitter {
     readonly state: 'connecting' | 'active' | 'ended';
     readonly mode: MonitorMode;
     readonly muted: boolean;
-    readonly agentStream: MediaStream | null;
-    readonly customerStream: MediaStream | null;
+    /** The call as the supervisor hears it: the customer and the agent, mixed. */
+    readonly stream: MediaStream | null;
 
-    /** listen: hear both, heard by nobody · whisper: the agent hears you · barge: both hear you. */
+    /** listen: hear the call, heard by nobody · whisper: the agent hears you · barge: both hear you. */
     setMode(mode: MonitorMode): void;
     mute(muted?: boolean): void;
     stop(): void;
 
     on(event: 'state', listener: (state: Monitor['state'], previous: Monitor['state']) => void): () => void;
-    on(event: 'agentStream' | 'customerStream', listener: (stream: MediaStream, track: MediaStreamTrack) => void): () => void;
+    on(event: 'stream', listener: (stream: MediaStream, track: MediaStreamTrack) => void): () => void;
     on(event: 'mode', listener: (mode: MonitorMode) => void): () => void;
     on(event: 'agentPrivate', listener: (p: { callId: number | string; active: boolean }) => void): () => void;
     on(event: 'agentReconnected', listener: (p: { callId: number | string }) => void): () => void;

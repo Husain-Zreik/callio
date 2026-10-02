@@ -5,14 +5,12 @@
 //
 // Responsibilities:
 //   - Navigate between nodes in the flow graph
-//   - Play audio prompts via IvrAudioPlayer
+//   - Play audio prompts through the media port's player (core/media/CallMedia.js)
 //   - Listen for DTMF digits (from EventBus 'call:dtmf')
 //   - Fire timeout when caller does not press a digit in time
 //   - Emit 'call:ivr_node'    when a new node is entered
 //   - Emit 'call:ivr_complete' when a terminal node is reached
 import EventBus from '../EventBus.js';
-import { IvrAudioPlayer } from '../../media/playback/IvrAudioPlayer.js';
-import { ivrErrorAudioProvider } from '../../media/playback/IvrErrorAudioProvider.js';
 import { logger } from '../../infra/logging/logger.js';
 
 const log = logger('core.ivr.IvrEngine');
@@ -23,7 +21,8 @@ class IvrEngine {
         tenantId,
         structure,
         defaultTimeout,
-        audioSource,
+        createPlayer,
+        errorAudio,
         audioPathMap,
         sessionId,
         recordInput,
@@ -36,7 +35,8 @@ class IvrEngine {
         this._nodes          = this._indexNodes(structure.nodes ?? []);
         this._edges          = structure.edges ?? [];
         this._defaultTimeout = (defaultTimeout ?? 10) * 1000;
-        this._audioSource    = audioSource;
+        this._createPlayer   = createPlayer;
+        this._errorAudio     = errorAudio ?? null;
         this._audioPathMap   = audioPathMap ?? new Map();
         this._sessionId      = sessionId;
         this._recordInput    = recordInput ?? (() => Promise.resolve());
@@ -159,7 +159,7 @@ class IvrEngine {
         }
 
         this._currentMenuNode = node;
-        this._player = new IvrAudioPlayer(this._audioSource);
+        this._player = this._createPlayer();
         const capturedPlayer = this._player;
 
         this._player.play(audioPath).then(() => {
@@ -181,7 +181,7 @@ class IvrEngine {
             return;
         }
 
-        this._player = new IvrAudioPlayer(this._audioSource);
+        this._player = this._createPlayer();
 
         this._player.play(audioPath).then(() => {
             if (this._stopped) return;
@@ -326,7 +326,7 @@ class IvrEngine {
         this._clearTimer();
         this._removeDtmfListener();
 
-        const errorPath = ivrErrorAudioProvider.getPath();
+        const errorPath = this._errorAudio;
 
         if (!errorPath) {
             log.warn({ callId: this._callId }, 'No error audio configured — hanging up immediately');
@@ -334,7 +334,7 @@ class IvrEngine {
             return;
         }
 
-        const player = new IvrAudioPlayer(this._audioSource);
+        const player = this._createPlayer();
         player.play(errorPath)
             .catch(() => {})
             .finally(() => {

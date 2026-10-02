@@ -1,7 +1,8 @@
 // src/channels/whatsapp/whatsappSdp.js
 // WhatsApp's SDP rules for the customer leg, handed to the media layer as the
-// channel's sdpProfile (see core/channels/CustomerChannels.js):
-//   remoteOffer   Meta's offer, sanitized before libwebrtc sees it
+// channel's sdpProfile (see core/channels/CustomerChannels.js). Meta's relay
+// speaks WebRTC (transport 'webrtc'), which rtpengine terminates:
+//   remoteOffer   Meta's offer, normalized before rtpengine sees it
 //   localOffer    our outbound offer, tuned for Meta (FEC, DTMF payload type)
 //   remoteAnswer  Meta's answer to our outbound offer
 import { logger } from '../../infra/logging/logger.js';
@@ -21,13 +22,13 @@ function processWhatsAppSDP(sdp, { optimize = false, sanitize = false } = {}) {
 
     const fixed = lines.map((line) => {
         if (sanitize) {
-            if (/^a=ice-lite\b/i.test(line)) return null;
+            // a=ice-lite stays: rtpengine must know the relay is ICE-lite to run
+            // the connectivity checks itself.
             if (/^a=rtcp:\d+\s+IN\s+IP4\s+0\.0\.0\.0\b/i.test(line)) return null;
 
             // Normalize telephone-event to 8000 clock rate (Meta requires 8000 Hz only for DTMF).
-            // We keep telephone-event in the SDP so WhatsApp sends RFC 2833 packets.
-            // libwebrtc (underlying wrtc) decodes those RFC 2833 events back into PCM audio
-            // tones before delivering to RTCAudioSink, making them detectable by Goertzel.
+            // We keep telephone-event in the SDP so WhatsApp sends RFC 2833 packets,
+            // which the media server reports as key presses.
             const telEvt = /^a=rtpmap:(\d+)\s+telephone-event\/(\d+)/i.exec(line);
             if (telEvt && telEvt[2] !== '8000') {
                 return `a=rtpmap:${telEvt[1]} telephone-event/8000`;
@@ -70,6 +71,7 @@ function processWhatsAppSDP(sdp, { optimize = false, sanitize = false } = {}) {
 }
 
 export const whatsappSdpProfile = Object.freeze({
+    transport: 'webrtc',
     remoteOffer(sdp) {
         log.debug(`Offer audio/tel lines:\n ${audioTelLines(sdp.split(/\r?\n/)).join('\n  ')}`);
         const sanitized = processWhatsAppSDP(sdp, { sanitize: true });

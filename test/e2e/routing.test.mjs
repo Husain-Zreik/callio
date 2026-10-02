@@ -111,8 +111,10 @@ try {
     check('customer is bridged to the accepting agent', cust3.dominant() === 880, `tone=${cust3.dominant()}`);
 
     // ── 4. Supervisor monitoring ──
-    // Two audio lines: the first sends the supervisor's microphone (a 660 Hz
-    // tone) and receives the agent, the second receives the customer.
+    // The client offers two audio lines (older clients heard the customer and
+    // the agent on separate tracks): the first sends the supervisor's
+    // microphone (a 660 Hz tone) and carries the room's mix; the second is
+    // answered as rejected.
     sup.peer = newPeer([660], { audioLines: 2 });
     await sup.peer.pc.setLocalDescription(await sup.peer.pc.createOffer());
     await gathered(sup.peer.pc);
@@ -122,12 +124,11 @@ try {
     check('supervisor can start monitoring', Boolean(started?.sdpAnswer));
     await sup.peer.pc.setRemoteDescription({ type: 'answer', sdp: started.sdpAnswer });
     for (const c of sup.pendingCandidates.splice(0)) await sup.peer.pc.addIceCandidate(c).catch(() => { });
-    await waitFor(() => sup.peer.tracks.length >= 2, 8000, "both monitor tracks");
-    await sleep(2000);
-    sup.peer.tracks.forEach((t) => t.reset());
-    await sleep(3000);
-    const tones = sup.peer.tracks.map((t) => t.dominant());
-    check('supervisor hears the customer and the agent on separate tracks', tones.includes(440) && tones.includes(880), `tracks=${tones.join(",")}`);
+    check('the second audio line is answered as rejected (port 0)', /m=audio 0 /.test(started.sdpAnswer));
+    const supEar = await Promise.race([sup.peer.received, sleep(8000).then(() => null)]);
+    if (supEar) await hear(supEar);
+    check('supervisor hears the customer and the agent (the room mix)', Boolean(supEar?.has(440) && supEar?.has(880)),
+        supEar ? `bins=${JSON.stringify(Object.fromEntries(Object.entries(supEar.stats.bins).map(([f, e]) => [f, Math.round(Math.log10(e + 1))])))}` : 'no track');
 
     // What the agent and the customer hear of the supervisor in each mode.
     const agentEar = await a1.peer.received;
@@ -334,12 +335,13 @@ try {
     await hear(await c7.customer.received);
     const mediaState = (st) => waitFor(() => agent7.events.find((e) => e.event === 'call:customer:media:state'
         && String(e.payload.callId) === String(row7.id) && e.payload.state === st && !e.seen && (e.seen = true)), 15000, `customer media ${st}`);
-    c7.customer.tone.set([]);
+    // The customer's network drops: their RTP stops.
+    await c7.customer.stopSending();
     const drop1 = await mediaState('drop').catch(() => null);
-    c7.customer.tone.set([440]);
+    await c7.customer.resumeSending();
     const recovered7 = await mediaState('active').catch(() => null);
     check('the agent sees the customer’s audio drop and come back', Boolean(drop1 && recovered7));
-    c7.customer.tone.set([]);
+    await c7.customer.stopSending();
     const warned = await waitFor(() => agent7.events.find((e) => e.event === 'call:network:terminating' && String(e.payload.callId) === String(row7.id)), 25000, 'network terminating warning').catch(() => null);
     const lost = await waitFor(async () => { const r = await callRow(row7.id); return r.status === 'FAILED' ? r : null; }, 12000, 'call 7 ended by network loss').catch(() => null);
     check('a customer who stays silent: the agent is warned, then the call ends as CUSTOMER_NETWORK_LOSS',

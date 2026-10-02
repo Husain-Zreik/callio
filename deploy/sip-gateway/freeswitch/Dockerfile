@@ -5,6 +5,10 @@
 #   - opus-tools + curl: a recording is written as stereo WAV, encoded to Ogg
 #     Opus and uploaded to object storage by callio-recording-upload
 #   - Opus preferred over G.711 (the image prefers G.711)
+#   - a second endpoint profile, drachtio_mrf_g711 (port 5082), that offers
+#     G.711 only: Callio offers from it to SIP carriers. Offered Opus and
+#     answered G.711 in the re-INVITE, an endpoint stops sending the room and
+#     echoes the caller instead.
 # The event-socket password is set at start from ESL_PASSWORD.
 FROM drachtio/drachtio-freeswitch-mrf:latest
 
@@ -15,7 +19,11 @@ RUN apt-get update \
         /usr/local/freeswitch/conf/autoload_configs/modules.conf.xml \
  && sed -i -e 's/global_codec_prefs=[^"]*"/global_codec_prefs=OPUS,PCMU,PCMA,G722"/' \
         -e 's/outbound_codec_prefs=[^"]*"/outbound_codec_prefs=OPUS,PCMU,PCMA,G722"/' \
-        /usr/local/freeswitch/conf/vars.xml
+        /usr/local/freeswitch/conf/vars.xml \
+ && sed -e 's/name="drachtio_mrf"/name="drachtio_mrf_g711"/' \
+        -e 's/name="sip-port" value="5080"/name="sip-port" value="5082"/' \
+        -e 's/name="codec-prefs" value="[^"]*"/name="codec-prefs" value="PCMU,PCMA"/' \
+        /usr/local/freeswitch/conf/sip_profiles/mrf.xml > /usr/local/freeswitch/conf/sip_profiles/mrf_g711.xml
 
 COPY start.sh /start.sh
 COPY callio-recording-upload /usr/local/bin/callio-recording-upload

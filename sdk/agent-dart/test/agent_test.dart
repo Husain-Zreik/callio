@@ -291,22 +291,20 @@ void main() {
       expect(() => agent.monitor(72), throwsStateError);
     });
 
-    test('monitor: two lines, offer, answer, MONITOR candidates, mode, ends with the call', () async {
+    test('monitor: one line, offer, answer, MONITOR candidates, mode, ends with the call', () async {
       final (agent, transport, media) = await connected(role: 'SUPERVISOR');
       transport.server('calls:list', {'ongoing': [callPayload(80, agentId: 9, status: 'IN_PROGRESS')]});
       final m = await agent.monitor(80);
       final pc = media.lastPeer;
-      expect(pc.lines, hasLength(2));
+      expect(pc.lines, hasLength(1));
       expect(transport.last('call:monitor')!.map, {'callId': '80', 'sdpOffer': 'offer-0'});
       transport.server('connection:ice-candidate:server', {'callId': 80, 'connectionType': 'MONITOR', 'candidate': {'candidate': 'm-1', 'sdpMid': '0', 'sdpMLineIndex': 0}});
       transport.server('call:monitor:started', {'callId': 80, 'sdpAnswer': 'monitor-answer'});
       await settle();
       expect(pc.remote?.sdp, 'monitor-answer');
       expect(pc.candidates.single.candidate, 'm-1');
-      pc.track(FakeStream('agent-audio'), mid: '0');
-      pc.track(FakeStream('customer-audio'), mid: '1');
-      expect(m.agentStream?.id, 'agent-audio');
-      expect(m.customerStream?.id, 'customer-audio');
+      pc.track(FakeStream('call-audio'), mid: '0');
+      expect(m.stream?.id, 'call-audio');
       pc.connected();
       expect(m.state, MonitorState.active);
       m.setMode(MonitorMode.whisper);

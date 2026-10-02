@@ -6,7 +6,7 @@ import { callLifecycleLogger } from "../../core/calls/CallLifecycleLogger.js";
 import { EventTypes } from "../../core/events/EventTypes.js";
 import { registerAllSocketListeners } from "../namespaces/index.js";
 import { agentAssignmentCoordinator } from "../../core/routing/AgentAssignmentCoordinator.js";
-import { iceServersFor } from "../../media/webrtc/IceServers.js";
+import { iceServersFor } from "../IceServers.js";
 import { AGENT_PROTOCOL_VERSION } from "../middleware/authMiddleware.js";
 import { logger, runWithLogContext } from '../../infra/logging/logger.js';
 

@@ -1,10 +1,8 @@
 // src/core/events/handlers/ConnectionEventHandler.js
 import CallRepository from '../../../persistence/CallRepository.js';
 import { callLifecycleLogger } from '../../calls/CallLifecycleLogger.js';
-import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
 import { callTerminator } from '../../calls/CallTerminator.js';
-import { audioCoordinator } from '../../../media/bridge/AudioCoordinator.js';
-import { iceCoordinator } from '../../../media/webrtc/ice/ICECandidateCoordinator.js';
+import { callMedia } from '../../media/CallMedia.js';
 import { TerminationReason, TerminatedBy } from '../../constants/CallConstants.js';
 import { logger } from '../../../infra/logging/logger.js';
 
@@ -55,10 +53,12 @@ export class ConnectionEventHandler {
             reason: data.reason ?? 'disconnect',
         }).catch(() => {});
 
+        // The agent's leg goes; the customer hears the reconnect tone until
+        // they're back (a reconnect brings a new leg).
         try {
-            await audioCoordinator.handleFrontendDisconnected(callId);
+            await callMedia.dropAgent(callId, userId ?? null);
         } catch (error) {
-            log.error({ callId, err: error }, 'Failed to attach beep');
+            log.error({ callId, err: error }, 'Dropping the agent leg failed');
         }
 
         this.clearReconnectTimer(callId);
@@ -86,19 +86,10 @@ export class ConnectionEventHandler {
         this._reconnectTimers.set(callId, timerId);
     }
 
+    // A client's trickled ICE candidate. rtpengine learns the client's address
+    // from the client's own connectivity checks, so trickled candidates aren't
+    // needed for the leg to connect.
     async handleICECandidate(data) {
-        const { callId, candidate, connectionType } = data;
-
-        log.debug({ callId }, `ICE candidate for ${connectionType}`);
-
-        try {
-            const result = peerRegistry.getConnectionData(callId, connectionType);
-            await iceCoordinator.handleInboundCandidate(
-                result.valid ? result.data.pc : null,
-                candidate, callId, connectionType
-            );
-        } catch (error) {
-            log.error({ callId, err: error }, 'Failed to handle ICE candidate');
-        }
+        log.trace({ callId: data.callId }, `ICE candidate for ${data.connectionType} (not needed)`);
     }
 }

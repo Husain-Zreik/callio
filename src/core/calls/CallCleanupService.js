@@ -3,7 +3,8 @@
 import CallRepository from '../../persistence/CallRepository.js';
 import RecordingRepository from '../../persistence/RecordingRepository.js';
 import EventBus from '../EventBus.js';
-import { peerRegistry } from '../../media/webrtc/PeerRegistry.js';
+import { callMedia } from '../media/CallMedia.js';
+import { mediaLegs } from '../media/MediaLegs.js';
 import { CallStatus, TerminationReason, TerminatedBy } from '../constants/CallConstants.js';
 import { callLifecycleLogger } from './CallLifecycleLogger.js';
 import { callTerminator } from './CallTerminator.js';
@@ -237,20 +238,13 @@ class CallCleanupService {
     }
 
     /**
-     * Reconcile this worker's in-memory peer connections against the DB.
-     *
-     * A call can be finalized in the DB without this worker's closePeerConnection
-     * ever running — most notably IVR-only inbound calls, which have a CUSTOMER peer
-     * but no AGENT/agent and therefore never subscribe to the Redis CALL_TERMINATED
-     * event. When such a call ends (caller hangup → WhatsApp webhook, or an IVR hangup
-     * node), the DB is marked terminal but the owning worker keeps the wrtc peer
-     * (peerConnections + connectionStates + ~native memory) forever. The RINGING/
-     * IN_PROGRESS stuck-call scan can't catch it because the row is already terminal.
-     *
-     * This closes any local peer whose call is terminal (or no longer present) in the DB.
+     * Reconcile this worker's call media against the DB: a call can be
+     * finalized in the DB without this worker closing its legs (an IVR-only
+     * call ending at the provider, whose owner never got CALL_TERMINATED).
+     * Closes the media of any call that is terminal or gone.
      */
     async _reconcileOrphanedPeers() {
-        const localCallIds = [...peerRegistry.peerConnections.keys()];
+        const localCallIds = callMedia.activeCallIds();
         if (localCallIds.length === 0) return;
 
         let calls;
@@ -269,14 +263,13 @@ class CallCleanupService {
             // Close if the call is terminal, or no longer exists in the DB at all.
             if (status !== undefined && !TERMINAL_STATUSES.has(status)) continue;
 
-            log.info({ callId }, `Closing orphaned peer (db status: ${status ?? 'not found'})`);
-            await peerRegistry.closePeerConnection(callId).catch(err =>
+            log.info({ callId }, `Closing an ended call's media (db status: ${status ?? 'not found'})`);
+            await mediaLegs.close(callId).catch(err =>
                 log.error({ callId, err }, 'Reconciler close failed')
             );
 
-            // Emit call:terminated so QueueAudioCoordinator (and any other EventBus
-            // subscriber) receives the stop signal. Without this emit the queue audio
-            // keeps running until a WhatsApp webhook arrives — up to 32 seconds later.
+            // Emit call:terminated so every EventBus subscriber (the IVR, the
+            // network-loss policy) stops for this call too.
             const call = callById.get(String(callId));
             EventBus.emit('call:terminated', {
                 callId,

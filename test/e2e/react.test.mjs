@@ -99,8 +99,8 @@ try {
     supView.watch = row1.id;
     supTree.update(provider('sup-1', 'SUPERVISOR', 'react-sup', SupervisorProbe));
     await supView.monitor.start({ stream: mic(660) });
-    await waitFor(() => supView.monitor.state === 'active' && supView.monitor.agentStream && supView.monitor.customerStream, 10000, 'monitoring');
-    check('useMonitor(callId).start() listens: both streams arrive', supView.monitor.mode === 'listen');
+    await waitFor(() => supView.monitor.state === 'active' && supView.monitor.stream, 10000, 'monitoring');
+    check('useMonitor(callId).start() listens: the call stream arrives', supView.monitor.mode === 'listen');
     supView.monitor.setMode('whisper');
     await waitFor(() => supView.monitor.mode === 'whisper', 8000, 'whisper');
     await hear(agentEar);

@@ -1,16 +1,17 @@
-// src/channels/sip/RtpEngineClient.js
+// src/infra/media/RtpEngineClient.js
 // rtpengine's "ng" control protocol: bencoded dictionaries over UDP, each
 // request prefixed with a cookie the reply echoes.
 //
-// rtpengine is the SIP channel's media converter: it relays the carrier's
-// plain RTP to and from a WebRTC session (ICE + DTLS-SRTP) that Callio's
-// media engine terminates like any other customer leg. A call is keyed by
-// call-id; each side by a tag. rtpengine never parses SIP, so the tags are
-// just labels for the two sides — not the SIP From/To tags.
+// rtpengine is the media edge (docs/media-architecture.md): every external
+// leg — a customer over WhatsApp or SIP, an agent's WebRTC — ends on it, and
+// it relays plain RTP to the leg's FreeSWITCH endpoint. One rtpengine call per
+// leg, keyed by call-id; its two sides by tag (labels only, not SIP tags).
+// Cookies must be unique: rtpengine answers a repeated cookie from its reply
+// cache, with whatever it answered the first time.
 import dgram from 'dgram';
-import { logger } from '../../infra/logging/logger.js';
+import { logger } from '../logging/logger.js';
 
-const log = logger('channels.sip.RtpEngineClient');
+const log = logger('infra.media.RtpEngineClient');
 
 function bencode(value) {
     if (typeof value === 'number' && Number.isInteger(value)) return `i${value}e`;
@@ -57,32 +58,11 @@ function bdecode(buf, pos) {
     return str;
 }
 
-// What each side of the conversion looks like on the wire. The DTLS role is
-// left to rtpengine: forcing 'passive' makes it answer a=setup:passive, which
-// libwebrtc (as the offerer) refuses to apply.
-const TO_WEBRTC = {
-    'transport-protocol': 'UDP/TLS/RTP/SAVPF',
-    ICE: 'force',
-    'rtcp-mux': ['require'],
-    SDES: ['off'],
-    flags: ['generate mid'],
-};
-const TO_CARRIER = {
-    'transport-protocol': 'RTP/AVP',
-    ICE: 'remove',
-    'rtcp-mux': ['demux'],
-    DTLS: 'off',
-    SDES: ['off'],
-};
-
 export class RtpEngineClient {
-    constructor({ host = '127.0.0.1', port = 22222, timeoutMs = 3000, carrierInterface = null, webrtcInterface = null } = {}) {
+    constructor({ host = '127.0.0.1', port = 22222, timeoutMs = 3000 } = {}) {
         this.host = host;
         this.port = port;
         this.timeoutMs = timeoutMs;
-        // Named rtpengine interfaces for each side (rtpengine.conf
-        // `interface = carrier/…;webrtc/…`); unset = rtpengine's only interface.
-        this.direction = carrierInterface && webrtcInterface ? { carrier: carrierInterface, webrtc: webrtcInterface } : null;
         this._counter = 0;
         this._pending = new Map();
         this.socket = null;
@@ -131,32 +111,25 @@ export class RtpEngineClient {
         });
     }
 
-    #dir(from, to) {
-        return this.direction ? { direction: [this.direction[from], this.direction[to]] } : {};
+    // offer / answer: the reply's SDP for the other side. `flags` is the ng
+    // dictionary describing that side (transport, ICE, DTLS…).
+    async offer({ callId, fromTag, sdp, flags = {} }) {
+        return (await this.send({ command: 'offer', 'call-id': callId, 'from-tag': fromTag, sdp, ...flags })).sdp;
     }
 
-    // Inbound: the carrier's offer → the WebRTC offer for Callio's customer peer.
-    async carrierOfferToWebrtc({ callId, sdp }) {
-        const r = await this.send({ command: 'offer', 'call-id': callId, 'from-tag': 'carrier', sdp, ...TO_WEBRTC, ...this.#dir('carrier', 'webrtc') });
-        return r.sdp;
+    async answer({ callId, fromTag, toTag, sdp, flags = {} }) {
+        return (await this.send({ command: 'answer', 'call-id': callId, 'from-tag': fromTag, 'to-tag': toTag, sdp, ...flags })).sdp;
     }
 
-    // Inbound: Callio's WebRTC answer → the answer SDP for the carrier.
-    async webrtcAnswerToCarrier({ callId, sdp }) {
-        const r = await this.send({ command: 'answer', 'call-id': callId, 'from-tag': 'carrier', 'to-tag': 'callio', sdp, ...TO_CARRIER });
-        return r.sdp;
+    // A call's per-tag media and stats (packets, last packet, RTCP-derived quality).
+    async query(callId) {
+        return this.send({ command: 'query', 'call-id': callId });
     }
 
-    // Outbound: Callio's WebRTC offer → the offer SDP for the carrier.
-    async webrtcOfferToCarrier({ callId, sdp }) {
-        const r = await this.send({ command: 'offer', 'call-id': callId, 'from-tag': 'callio', sdp, ...TO_CARRIER, ...this.#dir('webrtc', 'carrier') });
-        return r.sdp;
-    }
-
-    // Outbound: the carrier's answer → the WebRTC answer for Callio's customer peer.
-    async carrierAnswerToWebrtc({ callId, sdp }) {
-        const r = await this.send({ command: 'answer', 'call-id': callId, 'from-tag': 'callio', 'to-tag': 'carrier', sdp, ...TO_WEBRTC });
-        return r.sdp;
+    // Call-ids rtpengine holds (for the orphan sweep).
+    async list(limit = 1000) {
+        const r = await this.send({ command: 'list', limit });
+        return Array.isArray(r.calls) ? r.calls : [];
     }
 
     // Always on hang-up, or rtpengine keeps the ports allocated.

@@ -9,14 +9,15 @@ import CallConnectionRepository from '../../../persistence/CallConnectionReposit
 import AgentRepository from '../../../persistence/AgentRepository.js';
 import { customerChannels } from '../../channels/CustomerChannels.js';
 import { redisPubSubService } from '../../../infra/redis/RedisPubSubService.js';
-import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
-import { sdpCoordinator } from '../../../media/webrtc/SDPCoordinator.js';
+import CallParticipantRepository from '../../../persistence/CallParticipantRepository.js';
+import { callMedia } from '../../media/CallMedia.js';
+import { mediaLegs } from '../../media/MediaLegs.js';
+import { agentLegSockets } from '../../media/AgentLegSockets.js';
 import { callLifecycleLogger } from '../../calls/CallLifecycleLogger.js';
 import { consumerEventPublisher } from '../ConsumerEventPublisher.js';
 import { CallErrorCodes } from '../CallErrorCodes.js';
 import { emitCallError } from '../CallErrorEmitter.js';
 import EventBus from '../../EventBus.js';
-import { iceCoordinator } from '../../../media/webrtc/ice/ICECandidateCoordinator.js';
 import { agentAssignmentCoordinator } from '../../routing/AgentAssignmentCoordinator.js';
 import { toCallView } from '../../calls/CallView.js';
 import { callTerminator } from '../../calls/CallTerminator.js';
@@ -88,7 +89,7 @@ export class InitiationEventHandler {
         if (call.direction !== CallDirection.OUTBOUND) throw new Error('Not an outbound call');
         if (String(call.agent_id) !== String(userId)) throw new Error('This call belongs to another agent');
         if (call.status !== CallStatus.INITIATED) throw new Error(`Call is already ${call.status.toLowerCase()}`);
-        if (await CallConnectionRepository.findByCallAndType(callId, ConnectionType.AGENT)) {
+        if ((await CallParticipantRepository.findByCall(callId)).some((p) => p.kind === ParticipantKind.AGENT)) {
             throw new Error('Call was already started');
         }
         if (await CallRepository.hasAgentActiveCall(userId, callId)) {
@@ -103,16 +104,10 @@ export class InitiationEventHandler {
         // Subscribe before creating the peer so events arrive immediately.
         await redisPubSubService.subscribeToCallEvents(callId, subscriptionCallback);
 
-        iceCoordinator.setConnectionInfo(callId, ConnectionType.AGENT, socketId);
-        const sdpAnswer = await sdpCoordinator.createSDPAnswer(callId, sdpOffer, ConnectionType.AGENT);
-        iceCoordinator.markClientReady(callId);
-
-        // Durable device bookkeeping, same as the inbound accept path: a reload
-        // resync must see which device this call is bound to.
-        CallConnectionRepository.updateDeviceId(callId, ConnectionType.AGENT, deviceId ?? null)
-            .catch((err) => log.error({ callId, err }, 'Failed to persist deviceId'));
-        CallConnectionRepository.updateAgentId(callId, ConnectionType.AGENT, userId)
-            .catch((err) => log.error({ callId, err }, 'Failed to persist agent'));
+        agentLegSockets.set(callId, socketId);
+        // The leg records its device too: a reload resync must see which
+        // device this call is bound to.
+        const sdpAnswer = await mediaLegs.answerAgent(call, userId, sdpOffer, deviceId);
 
         await callParticipants.join(call, { kind: ParticipantKind.AGENT, agentId: userId, deviceId: deviceId ?? null });
 
@@ -121,18 +116,6 @@ export class InitiationEventHandler {
             tenantId, userId, availability: AgentAvailability.ON_CALL, updatedAt: new Date().toISOString(),
         });
         const agentName = await AgentRepository.getNameById(userId);
-
-        // Shared CallContext, read by triggerCustomerConnection on this worker.
-        const connResult = peerRegistry.getConnectionData(callId, ConnectionType.AGENT);
-        if (connResult.valid) {
-            connResult.data.context.update({
-                userId,
-                tenantId,
-                direction: CallDirection.OUTBOUND,
-                channelId: call.channel_id,
-                customer: { address: call.customer_address, addressType: call.customer_address_type, name: call.customer_name },
-            });
-        }
 
         callLifecycleLogger.logOutboundInitiated(callId, tenantId, userId, {
             channel_id: call.channel_id,
@@ -151,30 +134,24 @@ export class InitiationEventHandler {
     // ── Customer side connection ──────────────────────────────────────────────
 
     async triggerCustomerConnection(callId) {
-        const agentResult = peerRegistry.getConnectionData(callId, ConnectionType.AGENT);
-        if (!agentResult.valid) {
-            log.error({ callId }, 'Cannot dial customer: no AGENT connection');
+        if (!callMedia.owns(callId)) {
+            log.error({ callId }, 'Cannot dial customer: the agent leg is not on this worker');
             return;
         }
-        const agentConn = agentResult.data;
-        const agentId = agentConn.context?.userId ?? null;
+        const row = await CallRepository.findById(callId);
+        const agentId = row?.agent_id ?? null;
 
         try {
-            const { call, channel } = await customerChannels.forCall(callId);
-            const customerSdpOffer = await sdpCoordinator.createSDPOffer(
-                callId, ConnectionType.CUSTOMER, null, { sdpProfile: channel.sdp }
-            );
+            const { call, channel } = await customerChannels.forCall(row ?? callId);
+            const customerSdpOffer = await mediaLegs.offerCustomer(call, channel.sdp);
             const providerCallId = await channel.initiate(call, customerSdpOffer);
-
-            agentConn.context.setProviderCallId(providerCallId);
             await CallRepository.updateProviderCallId(callId, providerCallId);
 
             log.info({ callId, providerCallId }, 'Customer dialed');
         } catch (error) {
             log.error({ callId, err: error }, 'Dialing the customer failed');
-            const tenantId = agentConn.context.tenantId;
 
-            callLifecycleLogger.logOutboundFailed(callId, tenantId, agentId, {
+            callLifecycleLogger.logOutboundFailed(callId, row?.tenant_id, agentId, {
                 error: error.message,
             }).catch(() => { });
 

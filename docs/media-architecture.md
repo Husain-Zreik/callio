@@ -1,13 +1,14 @@
 # Media architecture (target)
 
-**Status: target design, not implemented.** Today every call's audio runs through
-`@roamhq/wrtc` inside the Callio workers ([architecture.md → Media](architecture.md#media)).
-This doc is where that is going and in what order. Update it as steps land.
+**Status: steps 1–3 done (branch `media-plane`).** Calls' media runs on rtpengine +
+FreeSWITCH rooms behind the media port; how it works today is in
+[architecture.md → Media](architecture.md#media). This doc is the target and the order of
+work; update it as steps land.
 
 ## Why
 
-Today a call's audio is decoded, processed and re-encoded in Node, on the same event loop as the
-API, the agent sockets and routing:
+Before this work a call's audio was decoded, processed and re-encoded in Node, on the same event
+loop as the API, the agent sockets and routing:
 
 - `AudioBridge` relays AGENT ⇄ CUSTOMER by handing one peer's received track to the other, so
   libwebrtc runs two jitter buffers, two decoders and two Opus encoders per call, even Opus ⇄
@@ -153,20 +154,46 @@ both, so that flips to accepting RFC 4733.
 ## Order of work
 
 1. **e2e checks** for the gaps above (`media.test.mjs`). Done.
-2. **Participants data model and the room-shaped port contract**, designed together.
+2. **Participants data model and the room-shaped port contract**, designed together. Done:
+   `call_participants`, `core/media/CallMedia.js`.
 3. **rtpengine + FreeSWITCH implementation:** a spike (one WhatsApp and one SIP call), then the
-   features until the suite passes.
-4. **Delete the wrtc media code** (`src/media/`). The test harness keeps `wrtc` for its simulated
-   customers and agents.
+   features until the suite passes. Done: `src/media/rooms/`, the local media plane in
+   `deploy/sip-gateway/docker-compose.local.yml`.
+4. **Delete the wrtc media code** (`src/media/webrtc|bridge|dtmf|recording|playback`). The test
+   harness keeps `wrtc` for its simulated customers and agents.
 5. **Failover-able call ownership**, with call inputs on Redis Streams.
 6. **Multi-party calls** and the primary-agent contract.
 
 Steps 2–4 break media until the suite passes again, and the dev server runs `main`, so they
 happen on a branch (or worktree) and merge green.
 
-## Open questions for the spike
+## Answered by the spike and step 3
 
-- Meta's relay accepting rtpengine's SDP (the rules in `whatsappSdp.js`).
-- FreeSWITCH writing Ogg Opus directly (`mod_opusfile`), or a conversion after the call.
-- `relate` covering whisper, barge and agent-private exactly as the e2e checks expect.
-- The latency of the two hops (rtpengine → FreeSWITCH → rtpengine) on one host.
+- **Ogg Opus:** the image's `mod_opusfile` is read-only. Recordings are stereo WAV on the media
+  server, encoded with `opusenc` and uploaded by presigned PUT from there
+  (`callio-recording-upload`).
+- **`relate`** covers whisper, barge and agent-private as the e2e checks expect.
+- **Supervisors** hear the room mixed on one audio line (a contract change, in
+  agent-protocol.md); a second line in their offer is answered as rejected.
+- **Drop detection** is a packet rate from rtpengine (RTP and multiplexed RTCP are counted
+  together), not silence.
+- **Orphans:** a worker that dies leaves its media-server endpoints up and streaming into
+  reused rtpengine ports; legs are tagged with the worker's boot id and swept.
+- **Offers to carriers are G.711 only.** A FreeSWITCH endpoint that offered Opus and is
+  answered G.711 in the re-INVITE stops sending the room (it echoes the caller). Legs Callio
+  offers to a SIP carrier come from a second profile, `drachtio_mrf_g711`, over a second
+  connection per worker; agents and WhatsApp keep Opus first.
+- **Local Docker:** rtpengine's two logical interfaces share one address, or Docker's published
+  ports can deliver a packet to the other interface's socket with the same port number.
+
+## Still open
+
+- **Meta's relay with rtpengine's SDP** (the rules in `whatsappSdp.js`, `a=ice-lite` kept) —
+  only a real WhatsApp call shows it. Manual test on the dev server.
+- **The production media plane:** FreeSWITCH in `deploy/sip-gateway/docker-compose.yml`
+  (host networking), rtpengine's `external`/`internal` interfaces there, `MEDIA_*` in the
+  dev server's `.env`.
+- **Trickled client ICE** is ignored (rtpengine learns the client from its checks); forwarding
+  it to rtpengine would help clients behind strict NATs without TURN.
+- **Latency** of the two hops (rtpengine → FreeSWITCH → rtpengine) on one host — measure on the
+  dev server.

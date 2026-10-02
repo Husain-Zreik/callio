@@ -13,9 +13,10 @@ in [data-model.md](data-model.md).
 
 A contact-center call engine that any product integrates with. Customers call over a channel.
 Agents answer in a browser or app over WebRTC. Callio owns everything in between: routing, IVR,
-availability, transfers, monitoring, recording and the call record. Every media leg ends at
-Callio, and Callio bridges them. Agents never talk to the provider, and consumers never touch
-media.
+availability, transfers, monitoring, recording and the call record. Every media leg ends on
+Callio's media plane — rtpengine at the edge, FreeSWITCH rooms behind it — and Callio decides
+who is in each room and who hears whom. No audio passes through Callio's Node processes. Agents
+never talk to the provider, and consumers never touch media.
 
 | Actor | What it is |
 |---|---|
@@ -53,8 +54,8 @@ reject the call. A slow consumer can delay a call but never drop it. Contract:
 
 ### Agent gateway
 
-Socket.IO with the websocket transport only (`src/realtime/server.js`), plus one WebRTC peer per
-agent leg. The consumer signs a short-lived HS256 JWT (`iss` consumer slug, `kid`, `sub` agent
+Socket.IO with the websocket transport only (`src/realtime/server.js`), plus one WebRTC peer
+connection per agent leg, to rtpengine. The consumer signs a short-lived HS256 JWT (`iss` consumer slug, `kid`, `sub` agent
 ref, `tnt` tenant ref). `src/realtime/middleware/authMiddleware.js` verifies it and provisions
 the agent on first connect. Socket handlers (`src/realtime/namespaces/call/socketHandlers.js`)
 check payload shape, authorize through `CallAccess` (`src/core/calls/`) and publish a Redis call
@@ -117,8 +118,10 @@ The one real port is the **customer channel**:
   - IVR or queue
   - the termination reason
   - agent release
-- **`sdp` hooks.** An adapter's `localOffer`, `remoteOffer` and `remoteAnswer` reach media as the
-  CUSTOMER leg's `sdpProfile` (`whatsappSdp.js`, `sipSdp.js`). Media knows no provider.
+- **`sdp` profile.** An adapter's `sdp` says how its customer leg is carried (`transport`:
+  `webrtc` or `rtp`) and holds its `localOffer`, `remoteOffer` and `remoteAnswer` rewrites; media
+  takes it as the customer leg's `sdpProfile` (`whatsappSdp.js`, `sipSdp.js`). Media knows no
+  provider.
 - **Registration.** Adapters are registered in `src/channels/index.js`. `core/` and `media/`
   import no adapter.
 
@@ -139,14 +142,11 @@ has a ringing call. `core/calls/CustomerNetworkLossPolicy` gives a silent
 customer 15 s before warning the agent and 20 s before ending the call as
 `CUSTOMER_NETWORK_LOSS`.
 
-Media is a plain import, not a port, by design. It is the engine's own
-machinery, not an integration:
-
-- **Media.** The event handlers, `ChannelIngress`, `CallTerminator`, `CallCleanupService`,
-  `AgentAssignmentCoordinator` and `core/ivr/` import `media/webrtc` directly: `peerRegistry`,
-  `sdpCoordinator` and `iceCoordinator`. They also import `media/bridge`, `media/dtmf` and
-  `media/playback`, and `IvrCoordinator` imports `@roamhq/wrtc`. Media imports the core back:
-  `PeerRegistry` imports `ivrCoordinator` and `CallErrorEmitter`.
+The **media port**, `callMedia` (`src/core/media/CallMedia.js`), is the core's only way to touch
+audio. It is room-shaped (participants, who hears whom) and documented in the file; the
+implementation, `src/media/rooms/`, is registered at startup by `server/bootstrap.js`.
+`core/media/MediaLegs.js` wraps the calls that also keep each leg's record in `call_connections`
+(its SDP, agent and device; the agent offer a ringing call is re-delivered with).
 
 ## Process model
 
@@ -154,24 +154,26 @@ machinery, not an integration:
   (`ecosystem.config.cjs`). Each worker runs every surface, and workers share no memory.
 - **No call-aware routing.** Any worker takes any HTTP request, webhook, socket or INVITE, and
   there is no call-aware load balancing. Callio routes to the right worker internally.
-- **Call ownership.** A call's media (wrtc peers, bridge, recording, IVR) lives on one worker.
+- **Call ownership.** A call's legs (their FreeSWITCH endpoints, which report back to the worker
+  that made them) and its IVR session live on one worker.
   - Inbound: `ChannelIngress` claims `call:owner:<CHANNEL>:<providerCallId>` through
-    `CallOwnershipService` (`src/infra/cluster/`). The winner creates the peers. The claim becomes
+    `CallOwnershipService` (`src/infra/cluster/`). The winner creates the legs. The claim becomes
     permanent while the call is live.
   - Outbound: media lives on the worker whose socket sent `call:start`.
   - SIP: a leg's dialog lives on the same worker. `SipDialogs` routes reject/terminate from other
     workers to it.
 - **Call events.** `RedisPubSubService.publishCallEvent` publishes to `callmanager:{callId}`.
-  Only the media owner subscribes, from `SDPCoordinator.createSDPOffer` (AGENT leg) or
-  `handleCallStart`. `CallEventHandler` routes each event to its handler, and handlers check
-  `peerRegistry` before touching media. Socket actions, API terminates and `CallTerminator` all
+  Only the media owner subscribes (when it offers the agent leg, or in `handleCallStart`).
+  `CallEventHandler` routes each event to its handler, and handlers check `callMedia.owns` /
+  `hasAgentOffer` before touching media. Socket actions, API terminates and `CallTerminator` all
   reach the owner this way.
 - **Rooms.** The Socket.IO Redis adapter carries room emits to every worker. `EventBus` is
   strictly in-process.
 - **Redis connections per worker.** The base client, plus four pub/sub clients
   (`PubSub-Publisher`, `PubSub-Subscriber`, `Adapter-Publisher`, `Adapter-Subscriber`). There is
-  also `LogLevels-Subscriber`, and `SIP-Commands` when SIP is registered.
-- **Admission control.** A worker holding `MAX_CALLS_PER_WORKER` calls' media refuses new sockets
+  also `LogLevels-Subscriber`, and `SIP-Commands` when SIP is registered. Media adds a FreeSWITCH
+  event-socket connection and a listener FreeSWITCH connects back to (HTTP port + 1000).
+- **Admission control.** A worker holding `MAX_CALLS_PER_WORKER` calls' legs refuses new sockets
   with `SERVER_AT_CAPACITY` (`index.js`).
 
 Every worker runs these background loops:
@@ -182,22 +184,24 @@ Every worker runs these background loops:
 | `QueueTimeoutService` | 2 s | Yes, lock `callio:queue-timeouts:lock` |
 | `RedisCleanupService`: stale ownership keys | 5 min | Yes, lock `cleanup:lock` |
 | `RetentionService`: old call detail, SDP, finished webhook deliveries, expired recordings ([data-model.md → Retention](data-model.md#retention)) | 1 h (`RETENTION_SWEEP_SECONDS`) | Yes, key `callio:retention:swept` with that TTL |
-| `CallCleanupService`: stuck calls, expired outbound intents, stale recordings, orphaned local peers, IVR agent ring timeout | 30 s | No lock. Every worker scans, and `CallTerminator`'s guarded commit applies side effects once. The peer reconcile is per worker by design. |
+| `CallCleanupService`: stuck calls, expired outbound intents, stale recordings, ended calls' local media, IVR agent ring timeout | 30 s | No lock. Every worker scans, and `CallTerminator`'s guarded commit applies side effects once. The media reconcile is per worker by design. |
+| `RoomMedia` orphan sweep: media-server endpoints and rtpengine legs of dead workers | 30 s, and at start | No lock: each leg is tagged with its worker's boot id, alive while that id is in Redis |
 
 ## Inbound call
 
 1. **Offer.** A WhatsApp `connect` webhook (`WhatsAppWebhookTranslator`) or a SIP INVITE
-   (`SipIngress` + rtpengine) reaches `ChannelIngress.inboundCall`, which claims ownership.
+   (`SipIngress`) reaches `ChannelIngress.inboundCall`, which claims ownership.
 2. **Pre-checks.** A tombstone means the end came first: record a missed call. An active call
    from the same customer is a duplicate: record CANCELLED. Otherwise run `CustomerLookup`.
 3. **Route.** `QueueRouter.selectIvrFlow` runs first. With no IVR, `claimForNewCall` claims an
    agent: ROUND_ROBIN or PRIORITY only, and never ahead of older waiting calls. Callio writes the
    `calls` row and the CUSTOMER `call_connections` row (the customer's offer) and publishes
    `call.created`.
-4. **IVR branch.** `sdpCoordinator.createSDPAnswer(CUSTOMER, sdpProfile)` → `channel.accept` →
-   `markIvrAutoAccepted`. Supervisors get `call:incoming:supervisor`. The session starts when
-   the customer leg connects ([IVR](#ivr)).
-5. **Queue branch.** `createSDPOffer(AGENT)` creates the agent peer and subscribes this worker.
+4. **IVR branch.** `mediaLegs.answerCustomer(sdpProfile)` → `channel.accept` →
+   `markIvrAutoAccepted`. Supervisors get `call:incoming:supervisor`. The IVR session starts and
+   plays once the caller's audio arrives ([IVR](#ivr)).
+5. **Queue branch.** This worker subscribes to the call's events and `mediaLegs.offerAgent`
+   creates the agent leg.
    `call:incoming` and a push go to the claimed agent, or to every available member (RING_ALL).
    If nobody can take it yet, Callio emits `call:waiting` and calls
    `assignOldestUnassignedCall`.
@@ -206,16 +210,14 @@ Every worker runs these background loops:
    1. Checks queue capacity and that the agent has no other call.
    2. Claims the call (`assignCallToAgentIfEligible` + `markOnCall`; `claimHandover` for a
       transfer).
-   3. Runs `iceCoordinator.setConnectionInfo` → `processSDPAnswer(AGENT)` → `markClientReady`,
-      which flushes the buffered server candidates.
-   4. Waits up to 5 s for the agent's mic track, and aborts the accept if none arrives.
-   5. Answers the customer if nothing has yet: `createSDPAnswer(CUSTOMER, sdpProfile)` →
+   3. Applies the agent's answer (`mediaLegs.agentAccepted`), which waits up to 5 s for the
+      agent's audio to reach rtpengine; the accept is aborted if none arrives.
+   4. Answers the customer if nobody has yet: `mediaLegs.answerCustomer(sdpProfile)` →
       `channel.accept`.
-   6. Moves the call from RINGING to IN_PROGRESS (guarded) and sets `answered_at`. It then logs,
-      resets the missed streak, emits `call:handled` (and `call:offer_taken` for RING_ALL), and
-      sends the resolved push.
-7. **Bridge.** With both peers connected, `PeerRegistry.checkAndStartBridging` starts the bridge
-   and recording ([Media](#media)).
+   5. Moves the call from RINGING to IN_PROGRESS (guarded) and sets `answered_at`.
+   6. **Bridges** it: `callMedia.bridge` puts the customer and the agent in the room and starts
+      the recording ([Media](#media)). It then logs, resets the missed streak, emits
+      `call:handled` (and `call:offer_taken` for RING_ALL), and sends the resolved push.
 
 ## Outbound call
 
@@ -223,18 +225,17 @@ Every worker runs these background loops:
    writes an INITIATED row bound to one agent. `CallCleanupService` cancels intents not started
    within 2 minutes.
 2. **Start.** The agent sends `call:start` (call id + SDP offer). On the socket's worker,
-   `InitiationEventHandler.handleCallStart` checks ownership and state, subscribes, and runs
-   `createSDPAnswer(AGENT)` → `markClientReady`. It sets the agent ON_CALL and returns the
+   `InitiationEventHandler.handleCallStart` checks ownership and state, subscribes, and answers
+   the agent's offer (`mediaLegs.answerAgent`). It sets the agent ON_CALL and returns the
    answer.
 3. **Dial.** The socket handler publishes `CALL_INITIATE`. `triggerCustomerConnection` runs
-   `createSDPOffer(CUSTOMER, sdpProfile)` → `channel.initiate` and stores the provider call id. A
+   `mediaLegs.offerCustomer(sdpProfile)` → `channel.initiate` and stores the provider call id. A
    failed dial ends the call FAILED through `CallTerminator`.
 4. **Answer.** The WhatsApp `connect` webhook or the SIP 200 OK reaches
    `ChannelIngress.outboundAnswered`, which publishes `CUSTOMER_ANSWER_RECEIVED`.
-   `CustomerEventHandler` runs `processSDPAnswer(CUSTOMER, sdpProfile)`. RINGING, ACCEPTED,
-   REJECTED and FAILED arrive through `statusChanged`.
-5. **Bridge.** Bridging starts as for an inbound call. When the call ends, the agent goes
-   OFFLINE, not back into the queue.
+   `CustomerEventHandler` applies it (`mediaLegs.customerAnswered`) and bridges the room. RINGING,
+   ACCEPTED, REJECTED and FAILED arrive through `statusChanged`.
+5. When the call ends, the agent goes OFFLINE, not back into the queue.
 
 ## Transfer
 
@@ -247,8 +248,8 @@ supervisor assigning an unassigned call takes the same path. On the owner,
 2. **Move.** Moves the call guarded (`updateCallAgentIfCurrent` /
    `assignCallToAgentIfUnassigned`) and updates the queue. On a live call it sets `offered_at`
    (`markHandoverOffered`) and releases the old agent.
-3. **Agent leg.** Closes the old AGENT peer and creates a new AGENT offer. The customer leg stays
-   up.
+3. **Agent leg.** The old agent's leg leaves the room (the customer hears the reconnect tone)
+   and a new agent leg is offered. The customer stays in the room.
 4. **Notify.** Emits `call:terminated` (`transferred`) to the room, moves room membership, logs,
    and sends `call:incoming` (TRANSFERRED) to the target. The target's accept is inbound step 6 as
    a handover.
@@ -269,8 +270,8 @@ Every end goes through `CallTerminator` (`src/core/calls/CallTerminator.js`), in
 3. **Release the agent.** Inbound: AVAILABLE, then drain the queues. Outbound (or
    `agentAfter: 'offline'`): OFFLINE.
 4. **Provider.** `terminate`, or `reject` for an unanswered inbound call.
-5. **Media.** Closes local peers and publishes `CALL_TERMINATED`, so the owning worker closes its
-   peers too.
+5. **Media.** Closes this worker's legs of the call and publishes `CALL_TERMINATED`, so the
+   owning worker closes its legs too.
 6. **Record.** Lifecycle log, queue snapshot and metrics.
 
 `settle()` is steps 2–6, for `ChannelIngress.callEnded`, which commits with the provider's own
@@ -321,90 +322,73 @@ All in `src/core/routing/`.
 
 ## Media
 
-**Legs and peers.** `PeerRegistry.peerConnections` holds `callId → { AGENT, CUSTOMER, MONITOR,
-context }`, all `@roamhq/wrtc` peers:
+No audio passes through Callio: rtpengine terminates every external leg and FreeSWITCH mixes
+each call in a room. Callio commands both (`src/media/rooms/`, behind the media port). The target
+design and what comes next are in [media-architecture.md](media-architecture.md).
 
-- **AGENT:** the agent's browser or app.
-- **CUSTOMER:** Meta's relay, or rtpengine for SIP.
-- **MONITOR:** a supervisor.
+**Legs.** Each participant — the customer, an agent, a supervisor — is a FreeSWITCH endpoint
+behind its own rtpengine leg (`RtpLegs.js`): the external side (WebRTC for agents and WhatsApp,
+plain RTP for a carrier, from the channel's `sdpProfile.transport`) on rtpengine's `external`
+interface, plain RTP to the endpoint on its `internal` one. Endpoints are created through
+drachtio with drachtio-fsmrf (`FreeSwitch.js`); FreeSWITCH connects back to the creating worker,
+which receives that endpoint's events (DTMF, playback ends).
 
-A call's peers share one `CallContext`. `Peer` holds per-leg SDP state and an `AudioTrackState`.
-`PeerEventManager` wires the connection state, ICE and track events.
+- **Someone else offers** (the customer inbound, a supervisor, an agent reconnecting or starting
+  an outbound call): rtpengine turns their offer into plain RTP, FreeSWITCH answers, rtpengine
+  turns the answer back.
+- **Callio offers** (a ringing agent, the customer outbound): FreeSWITCH offers, rtpengine turns
+  it into the external side's offer, and their answer is applied to the endpoint.
+- **ICE.** rtpengine's SDP carries its candidates, so Callio trickles none. Clients may trickle
+  theirs; rtpengine learns a client's address from the client's own checks, so they aren't
+  needed.
 
-**SDP and ICE.**
+**The room** (`RoomMedia.js`). A call is the conference `callio-<boot>-<callId>` (profile
+`callio`: 16 kHz mixing, no energy gate). `bridge()` puts the customer and the active agents in
+it once both are up. Every operation on a call runs one at a time, and who hears whom is applied
+as conference rules after each change:
 
-- `SDPCoordinator` owns offers and answers for every leg and stores them in `call_connections`.
-- `SDPProcessor` applies the `sdpProfile` to the CUSTOMER leg only.
-- ICE servers come from `IceServers.js`: TURN REST credentials from `TURN_SECRET`, or a static
-  pair. Clients get the same list in `session:ready`.
-- Inbound candidates are buffered in two stages. `PreConnectionICEBuffer` holds them before the
-  peer exists, and `ICECandidateManager` holds them until the remote description is set.
-- Outbound candidates wait in `OutboundICECandidateBuffer` until `markClientReady`. Then
-  `ICECandidateDispatcher` sends them via `EventBus` to the socket from `setConnectionInfo`.
-- `PeerRegistry` warns when one leg has been connected for 8 s while the other is still stuck in
-  ICE.
+| | Rule |
+|---|---|
+| listen | the supervisor is muted |
+| whisper | the supervisor is unmuted; `relate supervisor customer nospeak` |
+| barge | the supervisor is unmuted, no relation |
+| agent-private (whisper only) | `relate agent customer nospeak` |
 
-**Bridging.** `PeerRegistry.checkAndStartBridging` runs on every connection-ready event and on a
-late customer track. An IVR call whose flow hasn't finished needs only CUSTOMER, and starts the
-IVR session. Any other call waits for AGENT and CUSTOMER, then runs
-`AudioCoordinator.checkAndStartBridging`:
+A supervisor hears the room mixed on one audio line; extra lines in their offer are answered as
+rejected (`sdpLines.js`). One supervisor per call for now.
 
-- `AudioCoordinator` is the entry point for audio.
-- `AudioBridgeCoordinator` owns `Map<callId, AudioBridge>`.
-- `AudioBridge` relays AGENT ⇄ CUSTOMER via `Peer.deliverTrack` and feeds MONITOR.
-- `RecordingCoordinator` starts the recording.
+**Customer audio outside the room.** Before the customer is bridged they hear only what is
+played to their endpoint: IVR prompts (`player()`) and hold music (`startHold`, the queue's hold
+audio or the node's busy audio, looped; the built-in tone with none). Files are fetched by the
+media server from Callio — `GET /media/audio/<signed token>/<name>` (`MediaAudio.js`), local or
+object storage. With no agent left in the room (a transfer, a drop) the customer hears the
+reconnect tone (600 → 750 → 900 Hz, then 1.2 s of silence) until one joins.
 
-**Supervisor monitoring.** `call:monitor` adds a MONITOR peer (`MonitorEventHandler`). The
-supervisor always hears both sides. `SupervisorCapture` copies the supervisor's mic PCM, and
-`MixingRelay` mixes it into a path, 10 ms frames, allocation-free:
+**DTMF.** Detection is on from the customer's endpoint creation — in-band and RFC 4733. Digits
+reach the core as `call:dtmf` only while an IVR menu listens (`listenForDigits`); a long press
+reported twice within 600 ms counts once.
 
-- **listen:** no relays.
-- **whisper:** mixed into customer → agent. `call:agent:private` swaps agent → customer to
-  silence, so the agent can reply privately.
-- **barge:** mixed into both directions.
+**The agent's audio.** Accepting waits until the agent's audio reaches rtpengine (up to 5 s), so
+the provider is told "accepted" only with a working uplink. An agent's socket dropping
+(`AGENT_DISCONNECTED`) drops their leg; a reconnect brings a new one. `ConnectionEventHandler`
+ends the call if the agent isn't back within 120 s.
 
-**Placeholders and watchdogs.**
+**The customer leg** (`CustomerLegMonitor.js`) is polled from rtpengine every second. Fewer than
+4 packets in 3 s is a drop, 3 in a second is audio again (RTP and multiplexed RTCP are counted
+together; Opus in silence still sends packets). Each change emits `customer:media:state`, and
+`CustomerNetworkLossPolicy` ends the call as CUSTOMER_NETWORK_LOSS at 20 s. Every 4 s the latest
+RTCP-derived report (jitter, loss) becomes `call:network:quality:customer`.
 
-- **Placeholder tracks.** `PlaceholderTrackFactory` fills senders that have no real track, with
-  silence or the reconnecting tone. The tone is 600 → 750 → 900 Hz (0.2 s each) plus 1.2 s of
-  silence, precomputed at 48 kHz.
-- **Agent drop.** When the agent peer drops mid-call (`AGENT_DISCONNECTED`), the customer hears
-  the tone and recording continues through it. `ConnectionEventHandler` ends the call if the
-  agent isn't back within 120 s.
-- **Customer drop.** `CustomerSilenceWatchdog` watches the customer track. About 3 s of all-zero
-  PCM (jitter-buffer concealment) counts as a drop, and the first non-zero frame counts as a
-  recovery. Each change emits `customer:media:state`, and `network.js` ends the call as
-  CUSTOMER_NETWORK_LOSS at 20 s.
-- **Quality.** `CustomerNetworkMonitor` polls `getStats()` (jitter, loss) and reports a 4-level
-  quality to the room.
+**Recording** (`RoomRecorder.js`). Per channel (`channels.recording_enabled`) within the
+tenant's quota. When the room is first bridged the customer's endpoint records in stereo: left
+what the customer says, right what they hear. When the call ends the media server encodes it to
+Ogg Opus and PUTs it to a presigned object-storage URL (`callio-recording-upload` in the
+FreeSWITCH image, run with `bg_system`); Callio checks the object landed and completes the row.
 
-**DTMF.** `DTMFCaptureService` sinks the customer track and sends PCM to one worker thread per
-process (`DTMFWorkerBridge` → `DTMFWorker`). There, `DTMFDetector` runs Goertzel with twist,
-power and consecutive-window checks. It re-initialises its window when the sample rate changes:
-wrtc starts at 16 kHz, then switches to 48 kHz. Digits come back as `call:dtmf` on `EventBus`.
-Detection is in-band only, so `sipSdp.js` drops `telephone-event` and carriers send DTMF as
-audio.
-
-**Recording.**
-
-- **Policy.** Recording is per channel (`channels.recording_enabled`), decided by
-  `RecordingCoordinator`. `RecordingManager` holds `Map<callId, RecordingSession>`.
-- **Format.** One stereo OGG/Opus file per call: customer on the left, agent on the right.
-  `AudioCaptureService` captures both sides.
-- **Encoding.** Mixing (`StereoMixBuffer`), `OpusEncoder` (`@discordjs/opus`) and `OggMuxer` run
-  in `ENCODING_WORKER_COUNT` worker threads (`EncodingWorkerBridge`, default 2) that restart
-  with backoff. Without native Opus bindings, encoding is disabled and calls go unrecorded.
-- **Upload.** Pages stream to S3 (`infra/storage/StreamUploader`).
-- **Agent changes.** A reconnect or a transfer replaces the agent track in the running session.
-
-**Playback.** `IvrAudioPlayer` decodes audio to 48 kHz mono PCM: WAV directly, other formats
-through ffmpeg. It pushes 10 ms frames through an `RTCAudioSource`, and IVR prompts use it.
-`QueueAudioCoordinator` loops hold audio after an IVR transfer. It plays the reconnecting tone
-while the file decodes and stops when the agent bridge starts.
-
-**SIP media.** rtpengine converts the carrier's RTP to WebRTC and back (ICE + DTLS-SRTP), so a
-SIP customer leg is an ordinary CUSTOMER peer. Bridge, IVR, DTMF, recording and monitoring are
-the same code for both channels ([sip.md](sip.md)).
+**Orphans.** A worker that dies leaves its endpoints up on FreeSWITCH, still streaming into
+rtpengine ports that get reused. Every leg is tagged `callio.<boot>.<callId>`; each worker
+registers its boot id in Redis while it runs, and the sweep hangs up endpoints and deletes
+rtpengine legs of boots that are gone, and this worker's own legs of calls it no longer holds.
 
 ## IVR
 
@@ -418,15 +402,17 @@ the same code for both channels ([sip.md](sip.md)).
   - `ivr_transfer`: ends the flow as `transferred`.
   - `ivr_hangup`: ends the flow as `hung_up`.
   - An unknown node type ends the flow as `error`.
-- **`IvrCoordinator`** is started by `checkAndStartBridging` and owns the sessions. It puts the
-  IVR audio track on the customer sender and drives `dtmfCaptureService` directly: start, pause
-  while a prompt plays, resume, stop.
+- **`IvrCoordinator`** is started by `ChannelIngress` once the system answered the call, and
+  owns the sessions. It waits (up to 5 s) for the caller's audio, plays prompts to the caller
+  through `callMedia.player`, and has key presses counted only on menu nodes
+  (`callMedia.listenForDigits`).
 - **`IvrTransferHandler`** runs on `transferred`:
   1. Checks whether the target agent or queue is available.
   2. Applies the node's offline or busy action: hang up, replay, queue, or wait with busy audio.
-  3. Resets `ringing_at`, calls `enterQueue` (starts `queued_at`) and pre-creates the AGENT offer
-     on the owning worker.
-  4. Starts queue audio and calls `AgentAssignmentCoordinator.assignTransferredCall`.
+  3. Resets `ringing_at`, calls `enterQueue` (starts `queued_at`) and pre-creates the agent
+     leg's offer on the owning worker.
+  4. Starts hold music (`callMedia.startHold`) and calls
+     `AgentAssignmentCoordinator.assignTransferredCall`.
 - **`IvrTerminationHandler`** handles `call:ivr_terminated`, sent for every other ending. It ends
   the call through `CallTerminator`: hang-up → COMPLETED, timeout → TIMEOUT, error →
   SYSTEM_ERROR. If the agent an IVR call was handed to never answers, `CallCleanupService` ends
@@ -440,8 +426,8 @@ the same code for both channels ([sip.md](sip.md)).
    bridges `console.*`. Then Fastify, the access log and CORS.
 2. **`initRedis()`.** The base client, then `redisPubSubService`, `presenceService` and
    `redisCleanupService`, then log-level control. A failure here aborts startup.
-3. **`initOptionalServices()`.** S3, the encoding worker pool and the DTMF worker, under
-   `Promise.allSettled`. A failure only disables recording or DTMF.
+3. **`initOptionalServices()`.** Object storage, under `Promise.allSettled`. A failure only
+   disables recording.
 4. **Routes.** `registerChannels()`, then health, `/metrics`, `/v1` and each channel's routes.
 5. **`createWebSocketServer()`.** The Redis adapter, `authMiddleware`, the `EventBus` relays and
    the connection handler. Then runtime gauges and admission control.
@@ -450,25 +436,25 @@ the same code for both channels ([sip.md](sip.md)).
    - Clears this worker's stale presence.
    - Starts `redisCleanupService`, `callCleanupService`, `queueTimeoutService` and
      `outboxDispatcher`.
-   - Runs each channel's `start()`. SIP connects to drachtio and rtpengine here.
+   - Connects to drachtio, registers the media implementation and starts it: FreeSWITCH, the
+     boot heartbeat, the orphan sweep. A media server that isn't up doesn't stop the worker.
+   - Runs each channel's `start()`. SIP takes INVITEs from here on.
 7. **Listen.** Signal handlers, worker stats, then `listen`.
 
 **Shutdown** (`src/server/shutdown.js`) runs in strict order. It has a double-run guard, and
 `isShuttingDown` makes the WhatsApp webhook answer 503. A hard exit is armed first: the worker
 exits after 60 s even if a step hangs. PM2's `WORKER_KILL_TIMEOUT` (default 65 s) is above it.
 
-0. Stop `callCleanupService` (its sweep would race the peer closing below).
+0. Stop `callCleanupService` (its sweep would race the media closing below).
 1. Close Socket.IO and wait 800 ms.
-2. Stop recordings: flush Opus, finalize the OGG, end the upload streams. Then (2a) terminate
-   the encoding and DTMF worker threads.
-3. Close all peers.
+2–3. Close every call's media held here (their recordings start uploading).
    - `batchTerminateCalls` as SERVICE_MAINTENANCE, and fill in the durations.
    - Stop IVR sessions and write lifecycle logs.
    - `customerChannels.terminate` each live call, best effort.
 4. Stop worker stats.
-5. Wait up to 45 s for S3 uploads.
-6. Stop `redisCleanupService`, `queueTimeoutService`, `outboxDispatcher` and each channel's
-   `stop()`.
+5. Wait up to 45 s for recording uploads, then disconnect from the media server.
+6. Stop `redisCleanupService`, `queueTimeoutService`, `outboxDispatcher`, each channel's
+   `stop()` and drachtio.
 7. Release the cleanup lock and close pub/sub.
 8. Close the Redis clients.
 9. Close storage.

@@ -1,17 +1,15 @@
 // Graceful shutdown sequence — invoked on SIGINT / SIGTERM.
-// Steps are strictly ordered (Socket.IO → recordings → worker threads → peers
-// → DB updates → S3 drain → Redis teardown). Do not reorder: each step depends
+// Steps are strictly ordered (Socket.IO → call media → DB updates → recording
+// uploads → Redis teardown). Do not reorder: each step depends
 // on the previous one having completed. Adding a new step: read the ordering
 // contract in the numbered comments below before choosing where to insert it.
 import { redisClient } from '../infra/redis/RedisClient.js';
 import { redisPubSubService } from '../infra/redis/RedisPubSubService.js';
 import { redisCleanupService } from '../infra/cluster/RedisCleanupService.js';
 import { storageClient } from '../infra/storage/StorageClient.js';
-import { streamUploader } from '../infra/storage/StreamUploader.js';
-import { recordingManager } from '../media/recording/RecordingManager.js';
-import { encodingWorkerBridge } from '../media/recording/encoding/EncodingWorkerBridge.js';
-import { dtmfWorkerBridge } from '../media/dtmf/DTMFWorkerBridge.js';
-import { peerRegistry } from '../media/webrtc/PeerRegistry.js';
+import { drachtio } from '../infra/sip/Drachtio.js';
+import { callMedia } from '../core/media/CallMedia.js';
+import { mediaLegs } from '../core/media/MediaLegs.js';
 import { workerStatsService } from '../infra/monitoring/WorkerStatsService.js';
 import { customerChannels } from '../core/channels/CustomerChannels.js';
 import { callLifecycleLogger } from '../core/calls/CallLifecycleLogger.js';
@@ -32,7 +30,7 @@ const log = logger('server.shutdown');
 // stale copy taken at import time.
 //
 // server.close() (which stops the HTTP server from accepting new requests) only
-// runs at the very end of this function, after peer connections are closed and
+// runs at the very end of this function, after the calls' media is closed and
 // activeCalls/ivrCalls are already snapshotted for termination (step 3 below). Until
 // then the webhook endpoint stays open, so Meta can deliver a brand-new incoming-call
 // webhook at any point during this whole sequence. A call created from one of those
@@ -57,13 +55,13 @@ export async function shutdown(server, io) {
         process.exit(1);
     }, 60_000);
 
-    // 0. Stop the stuck-call / orphan-peer sweep — it would race step 3's peer
+    // 0. Stop the stuck-call / orphan-media sweep — it would race step 3's media
     //    closing and batch terminate, and could tick after Redis or the DB pool
     //    are closed.
     callCleanupService.stop();
 
     try {
-        // 1. Close Socket.IO — stops new events from triggering peer or Redis ops.
+        // 1. Close Socket.IO — stops new events from triggering media or Redis ops.
         //    Brief settle wait lets async disconnect handlers (presence cleanup) drain.
         if (io) {
             await new Promise((resolve) => io.close(resolve));
@@ -71,33 +69,14 @@ export async function shutdown(server, io) {
             log.info('Socket.IO closed');
         }
 
-        // 2. Stop all active recordings — flushes the Opus encoder, finalizes the
-        //    OGG stream, and calls uploadStream.end() on each PassThrough.
-        //    This MUST happen before streamUploader.cleanup() so the streams are
-        //    properly ended (not just destroyed) before we wait for S3 to confirm.
-        log.info('Stopping active recordings...');
-        await recordingManager.cleanup();
-
-        // 2a. Terminate both worker bridges in parallel — safe because every active
-        //     session's stop() has already awaited the encoding worker's 'stopped'
-        //     ACK in the step above, and DTMF has no pending state at this point.
-        const _workersT0 = Date.now();
-        await Promise.all([
-            encodingWorkerBridge.terminate(),
-            dtmfWorkerBridge.terminate(),
-        ]);
-        log.info(`Worker threads terminated (${Date.now() - _workersT0}ms)`);
-
-        // 3. Close all WebRTC peer connections — this terminates any active media
-        //    bridges and releases native wrtc resources. Calls whose recording was
-        //    just stopped will have their S3 uploads still in flight; they complete
-        //    in step 5 below.
-        const activeCalls = [...peerRegistry.peerConnections.keys()];
+        // 2–3. Close every call's media held here — their rooms end on the media
+        //    server and their recordings start uploading (drained in step 5).
+        const activeCalls = callMedia.activeCallIds();
         if (activeCalls.length > 0) {
-            log.info(`Closing ${activeCalls.length} peer connection(s)...`);
+            log.info(`Closing the media of ${activeCalls.length} call(s)...`);
             await Promise.allSettled(activeCalls.map((callId) =>
-                peerRegistry.closePeerConnection(callId).catch((err) =>
-                    log.warn({ callId, err }, 'closePeerConnection failed')
+                mediaLegs.close(callId).catch((err) =>
+                    log.warn({ callId, err }, 'Closing the call media failed')
                 )
             ));
 
@@ -146,9 +125,8 @@ export async function shutdown(server, io) {
                 }));
             }
 
-            // Stop IVR sessions cleanly — closes engine timers, DTMF capture, and the
-            // IVR DB session record. The CUSTOMER peer is already closed above via
-            // closePeerConnection; stopSession handles the remaining IVR resources safely.
+            // Stop IVR sessions cleanly — closes engine timers and the IVR DB
+            // session record. The caller's leg is already closed above.
             if (ivrCalls.length > 0) {
                 await Promise.allSettled(ivrCalls.map(c =>
                     ivrCoordinator.stopSession(c.id, 'hung_up')
@@ -184,11 +162,11 @@ export async function shutdown(server, io) {
         workerStatsService.logSnapshot('graceful_shutdown');
         workerStatsService.stop();
 
-        // 5. Wait for S3 uploads to complete (max 45 s). Recordings stopped in step 2
-        //    have their streams ended; this gives S3 time to finalize the multipart
-        //    upload and write recording_url + status = 'completed' to the DB.
-        log.info('Waiting for storage uploads to complete...');
-        await streamUploader.cleanup(45_000);
+        // 5. Recording uploads (max 45 s): the media server uploads each closed
+        //    call's recording; this waits for them to land and completes the rows.
+        //    Then the media plane disconnects.
+        log.info('Waiting for recording uploads to complete...');
+        await callMedia.stop().catch((err) => log.warn({ err }, 'Stopping the media plane failed'));
 
         // 6. Stop background jobs (Redis reaper, outbox dispatcher lease)
         await redisCleanupService.stop();
@@ -198,6 +176,7 @@ export async function shutdown(server, io) {
         for (const channel of customerChannels.all()) {
             await Promise.resolve(channel.stop?.()).catch((err) => log.warn({ err }, `${channel.type} channel stop failed`));
         }
+        drachtio.stop();
 
         // 7. Close Redis service connections (in reverse order)
         log.info('Closing Redis services...');

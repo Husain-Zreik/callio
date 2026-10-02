@@ -70,10 +70,10 @@ does. The connection closes on unmount.
 | `useQueues()` | queue snapshots |
 | `useTeam()` | the tenant's agents' availability |
 | `useBoard()` | supervisors: the tenant's live calls |
-| `useMonitor(callId)` | supervisors: `{ state, mode, agentStream, customerStream, error, start(), stop(), setMode(), mute() }` — stops on unmount |
+| `useMonitor(callId)` | supervisors: `{ state, mode, stream, error, start(), stop(), setMode(), mute() }` — `stream` is the call as they hear it; stops on unmount |
 
 `<RemoteAudio stream />` plays a stream (a call's `remoteStream`, a monitor's
-`agentStream` / `customerStream`); other props go to the `<audio>` element.
+`stream`); other props go to the `<audio>` element.
 
 ## Supervisor screen
 
@@ -95,12 +95,12 @@ function Board() {
 }
 
 function Listening({ callId }) {
-  const { state, mode, agentStream, customerStream, start, setMode, stop } = useMonitor(callId);
+  const { state, mode, stream, start, setMode, stop } = useMonitor(callId);
   useEffect(() => { start(); }, [start]);
   return (
     <div>
       {state} · {mode}
-      <RemoteAudio stream={agentStream} /> <RemoteAudio stream={customerStream} />
+      <RemoteAudio stream={stream} />
       <button onClick={() => setMode('whisper')}>Whisper</button>
       <button onClick={() => setMode('barge')}>Barge</button>
       <button onClick={stop}>Stop</button>

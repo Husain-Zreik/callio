@@ -1,5 +1,5 @@
 // src/infra/storage/StorageClient.js
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { config } from '../../../config/envConfig.js';
 import { logger } from '../logging/logger.js';
@@ -134,6 +134,30 @@ class StorageClient {
             return signedUrl;
         } catch (error) {
             log.error({ err: error }, `Signed URL generation failed for ${key}`);
+            throw error;
+        }
+    }
+
+    /**
+     * A presigned PUT for `key`: the media server uploads a recording with it
+     * (it holds no storage credentials).
+     */
+    async getSignedUploadUrl(key, contentType, expiresIn = config.storage.signedUrlExpiry) {
+        this.ensureInitialized();
+        const command = new PutObjectCommand({ Bucket: this.bucket, Key: key, ContentType: contentType });
+        return getSignedUrl(this.client, command, { expiresIn, signableHeaders: new Set(['content-type']) });
+    }
+
+    /**
+     * { size } of an object, or null if it isn't there.
+     */
+    async head(key) {
+        this.ensureInitialized();
+        try {
+            const r = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+            return { size: Number(r.ContentLength ?? 0) };
+        } catch (error) {
+            if (error?.$metadata?.httpStatusCode === 404 || error?.name === 'NotFound') return null;
             throw error;
         }
     }

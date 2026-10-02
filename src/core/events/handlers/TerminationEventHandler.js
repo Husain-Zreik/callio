@@ -4,7 +4,7 @@
 // a call another path already ended — just close this worker's peers.
 import CallRepository from '../../../persistence/CallRepository.js';
 import { callTerminator } from '../../calls/CallTerminator.js';
-import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
+import { mediaLegs } from '../../media/MediaLegs.js';
 import { TerminationReason, TerminatedBy, InternalErrorCodes, CallStatus } from '../../constants/CallConstants.js';
 import { logger } from '../../../infra/logging/logger.js';
 
@@ -22,7 +22,7 @@ export class TerminationEventHandler {
             if (!call) { log.warn({ callId }, 'Call not found'); return; }
 
             if (call.status === CallStatus.TERMINATED || call.status === CallStatus.FAILED) {
-                await peerRegistry.closePeerConnection(callId);
+                await mediaLegs.close(callId);
                 return;
             }
 

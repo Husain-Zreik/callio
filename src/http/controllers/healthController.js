@@ -4,11 +4,8 @@
 //   handleHealth        GET /api/health  — detailed per-worker diagnostics for dashboards
 //                                          and on-call engineers. Async (event-loop lag).
 import { redisClient } from '../../infra/redis/RedisClient.js';
-import { peerRegistry } from '../../media/webrtc/PeerRegistry.js';
-import { recordingManager } from '../../media/recording/RecordingManager.js';
 import { workerStatsService } from '../../infra/monitoring/WorkerStatsService.js';
-import { encodingWorkerBridge } from '../../media/recording/encoding/EncodingWorkerBridge.js';
-import { dtmfWorkerBridge } from '../../media/dtmf/DTMFWorkerBridge.js';
+import { callMedia } from '../../core/media/CallMedia.js';
 import { config } from '../../../config/envConfig.js';
 
 function toMB(bytes) {
@@ -23,19 +20,17 @@ function measureEventLoopLag() {
 }
 
 // Lightweight infra health check — used by PM2, nginx, and load-balancer probes.
-// Returns 200 when encoding workers are ready, 503 otherwise.
+// `media.connected` says whether this worker reaches the media server; the
+// worker stays up (the API and sockets work) while it reconnects.
 export function handleWorkerHealth(_request, reply) {
     const workerStats = workerStatsService.snapshot();
-    const encodingStats = encodingWorkerBridge.getStats();
-    const dtmfStats = dtmfWorkerBridge.getStats();
-    const activeCalls = peerRegistry.peerConnections.size;
-    const ok = encodingStats.ready && workerStats.ok !== false;
+    const media = callMedia.stats();
+    const ok = workerStats.ok !== false;
     reply.code(ok ? 200 : 503).send({
         ok,
-        activeCalls,
+        activeCalls: media.rooms,
         ...workerStats,
-        encodingWorker: encodingStats,
-        dtmfWorker: dtmfStats,
+        media,
     });
 }
 
@@ -44,8 +39,8 @@ export async function handleHealth(request, reply) {
     const mem = process.memoryUsage();
     const lag = await measureEventLoopLag();
 
-    const activeCalls = peerRegistry.peerConnections.size;
-    const activeRecordings = recordingManager.activeSessions.size;
+    const media = callMedia.stats();
+    const activeCalls = media.rooms;
     const status = lag > 500 ? 'degraded' : 'ok';
 
     reply.code(status === 'ok' ? 200 : 503).send({
@@ -54,7 +49,7 @@ export async function handleHealth(request, reply) {
         pid:              process.pid,
         uptime:           Math.floor(process.uptime()) + 's',
         activeCalls,
-        activeRecordings,
+        media,
         memory: {
             rss:       toMB(mem.rss),
             heapUsed:  toMB(mem.heapUsed),

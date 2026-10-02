@@ -2,11 +2,13 @@
 // Every HTTP surface Callio exposes (docs/architecture.md#integration-surfaces):
 //   /health, /v1/health            probes (unauthenticated)
 //   /metrics                       Prometheus (METRICS_TOKEN)
+//   /media/audio/:token/:name      audio the media server plays (signed token)
 //   channel ingress                each customer channel's own webhooks, e.g.
 //                                  /webhooks/whatsapp and /v1/webhooks/whatsapp/forward
 //   /v1/...                        Management API (API key)
 import { handleWorkerHealth, handleHealth } from '../controllers/healthController.js';
 import { handleMetrics } from '../controllers/metricsController.js';
+import { handleMediaAudio } from '../controllers/mediaAudioController.js';
 import managementRoutes from '../v1/managementRoutes.js';
 import callRoutes from '../v1/callRoutes.js';
 import eventRoutes from '../v1/eventRoutes.js';
@@ -23,6 +25,7 @@ export default async function registerRoutes(fastify) {
     fastify.get('/health', handleWorkerHealth);
     fastify.get('/v1/health', handleHealth);
     fastify.get('/metrics', handleMetrics);
+    fastify.get('/media/audio/:token/:name', handleMediaAudio);
 
     for (const channel of customerChannels.all()) {
         if (channel.registerRoutes) await channel.registerRoutes(fastify);

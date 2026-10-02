@@ -9,8 +9,8 @@ import EventBus from '../../EventBus.js';
 import { agentAssignmentCoordinator } from '../../routing/AgentAssignmentCoordinator.js';
 import { queueRouter } from '../../routing/QueueRouter.js';
 import { callLifecycleLogger } from '../../calls/CallLifecycleLogger.js';
-import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
-import { sdpCoordinator } from '../../../media/webrtc/SDPCoordinator.js';
+import { callMedia } from '../../media/CallMedia.js';
+import { mediaLegs } from '../../media/MediaLegs.js';
 import { ConnectionType, AssignmentType, AgentRole, InitiatorType, CallStatus, ParticipantKind, LeaveReason } from '../../constants/CallConstants.js';
 import { IncomingCallPayload } from '../../calls/IncomingCallPayload.js';
 import { callParticipants } from '../../calls/CallParticipants.js';
@@ -70,10 +70,10 @@ export class TransferEventHandler {
                 await agentAssignmentCoordinator.releaseAgentIfIdle(oldAgentId);
             }
 
-            // Replace the AGENT leg: close the old agent's peer, offer a fresh one to the new agent.
-            await peerRegistry.closePeerConnection(callId, ConnectionType.AGENT);
-            await CallConnectionRepository.cleanupConnection(callId, ConnectionType.AGENT);
-            const sdpOffer = await sdpCoordinator.createSDPOffer(callId, ConnectionType.AGENT);
+            // The old agent leaves the room (the customer hears the reconnect tone
+            // until the new agent joins); a fresh leg is offered to the new agent.
+            if (oldAgentId) await callMedia.dropAgent(callId, oldAgentId);
+            const sdpOffer = await mediaLegs.offerAgent(call);
 
             const wasUnassigned = oldAgentId == null;
             const transferredFrom = wasUnassigned

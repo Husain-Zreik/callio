@@ -11,7 +11,7 @@ import { COMPONENTS } from "./src/infra/logging/policy.js";
 
 import { config } from "./config/envConfig.js";
 import { createWebSocketServer } from "./src/realtime/server.js";
-import { peerRegistry } from "./src/media/webrtc/PeerRegistry.js";
+import { callMedia } from "./src/core/media/CallMedia.js";
 import { workerStatsService } from "./src/infra/monitoring/WorkerStatsService.js";
 import { initRedis, initOptionalServices, startCoreServices } from "./src/server/bootstrap.js";
 import { shutdown } from "./src/server/shutdown.js";
@@ -54,7 +54,7 @@ async function startServer() {
 
         io = createWebSocketServer(server);
         registerRuntimeGauges({
-            activeMediaCalls: () => peerRegistry.peerConnections.size,
+            activeMediaCalls: () => callMedia.activeCallIds().length,
             agentSockets: () => io.engine.clientsCount,
             diagnostics: () => workerStatsService.diagnostics(),
         });
@@ -68,8 +68,9 @@ async function startServer() {
         // a less-loaded worker.
         const MAX_CALLS_PER_WORKER = config.call.workers.maxCallsPerWorker;
         io.use((socket, next) => {
-            if (peerRegistry.peerConnections.size >= MAX_CALLS_PER_WORKER) {
-                log.warn(`Worker at capacity (${peerRegistry.peerConnections.size}/${MAX_CALLS_PER_WORKER}) — rejecting connection`);
+            const held = callMedia.activeCallIds().length;
+            if (held >= MAX_CALLS_PER_WORKER) {
+                log.warn(`Worker at capacity (${held}/${MAX_CALLS_PER_WORKER}) — rejecting connection`);
                 return next(new Error('SERVER_AT_CAPACITY'));
             }
             next();

@@ -169,7 +169,7 @@ export function useBoard() {
     return agent ? [...agent.board.values()] : [];
 }
 
-const MONITOR_EVENTS = ['state', 'mode', 'agentStream', 'customerStream', 'ended'];
+const MONITOR_EVENTS = ['state', 'mode', 'stream', 'ended'];
 
 /**
  * Supervisors: monitoring one call. start() asks for the microphone and
@@ -209,8 +209,7 @@ export function useMonitor(callId) {
         monitor: active,
         state: active?.state ?? 'idle',
         mode: active?.mode ?? null,
-        agentStream: active?.agentStream ?? null,
-        customerStream: active?.customerStream ?? null,
+        stream: active?.stream ?? null,
         error,
         start,
         stop: () => active?.stop(),

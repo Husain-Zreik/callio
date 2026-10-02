@@ -3,28 +3,26 @@
 // Lifecycle coordinator for IVR sessions.  Mirrors DTMFCoordinator /
 // RecordingCoordinator in pattern: one singleton, owns state map, clean API.
 //
-// Called from PeerRegistry.checkAndStartBridging when ivr_flow_id is set.
+// Started by ChannelIngress once the system answered an IVR call; it plays
+// to the caller once their audio arrives. The flow's prompts play and its
+// key presses arrive through the media port (core/media/CallMedia.js).
 // On 'call:ivr_complete' with action='transfer', delegates to IvrTransferHandler.
-import wrtc from '@roamhq/wrtc';
 import EventBus from '../EventBus.js';
 import IvrRepository from '../../persistence/IvrRepository.js';
 import { callLifecycleLogger } from '../calls/CallLifecycleLogger.js';
 import { IvrEngine } from './IvrEngine.js';
-import { IvrAudioPlayer } from '../../media/playback/IvrAudioPlayer.js';
 import { ivrTransferHandler } from './IvrTransferHandler.js';
-import { dtmfCaptureService } from '../../media/dtmf/DTMFCaptureService.js';
-import { resolveStoragePath } from '../../infra/storage/StorageResolver.js';
-import { storageClient } from '../../infra/storage/StorageClient.js';
-import { leakMetrics } from '../../infra/monitoring/leakMetrics.js';
-import { placeholderTrackFactory } from '../../media/bridge/PlaceholderTrackFactory.js';
+import { callMedia } from '../media/CallMedia.js';
 import { logger } from '../../infra/logging/logger.js';
 
 const log = logger('core.ivr.IvrCoordinator');
 
+// How long the IVR waits for the caller's audio before playing anyway.
+const CUSTOMER_AUDIO_WAIT_MS = 5000;
+
 class IvrCoordinator {
     constructor() {
-        // callId → { engine, audioSource, sender, senderTrack, customerPeer, customerPc,
-        //             sessionId, ivrFlowId, tenantId, startedAtMs, completeHandler, terminationHandler }
+        // callId → { engine, sessionId, ivrFlowId, tenantId, startedAtMs, completeHandler, terminationHandler }
         this._sessions = new Map();
 
         // One-way latch: callIds whose IVR session has completed at least once
@@ -32,11 +30,8 @@ class IvrCoordinator {
         // this call" — set synchronously in stopSession(), before any awaits, so
         // it can never disagree with reality the way calls.state can (that DB
         // write can fail, lag, or race with a concurrent read; this cannot).
-        // PeerRegistry.checkAndStartBridging consults this — not just isActive()
-        // and calls.state — before ever re-entering the IVR branch, which makes
-        // "re-launch IVR on a call that already finished it" structurally
-        // impossible rather than merely unlikely. Cleared on call:terminated so
-        // this doesn't grow unbounded across the process lifetime.
+        // startSession refuses a call that already finished its IVR. Cleared on
+        // call:terminated so this doesn't grow unbounded across the process lifetime.
         this._completedCallIds = new Set();
         EventBus.on('call:terminated', ({ callId }) => this._completedCallIds.delete(callId));
         // IvrTransferHandler emits this when a transfer target was unavailable and
@@ -61,16 +56,13 @@ class IvrCoordinator {
     }
 
     /**
-     * Start an IVR session for an incoming call.
+     * Start an IVR session for an incoming call the system answered.
      *
      * @param {string}            callId
      * @param {number}            ivrFlowId
-     * @param {RTCPeerConnection} customerPc     the WhatsApp peer connection
-     * @param {MediaStreamTrack}  customerTrack  the caller's audio track (for DTMF)
      * @param {object}            callMeta       { tenantId, channelId, queueId }
-     * @param {Peer|null}         customerPeer
      */
-    async startSession(callId, ivrFlowId, customerPc, customerTrack, callMeta = {}, customerPeer = null) {
+    async startSession(callId, ivrFlowId, callMeta = {}) {
         if (this._sessions.has(callId)) {
             log.warn({ callId }, 'Session already active');
             return;
@@ -80,37 +72,30 @@ class IvrCoordinator {
             return;
         }
 
-        // Reserve the slot synchronously, before any await. checkAndStartBridging can
-        // invoke startSession twice in quick succession for the same call (e.g. a
-        // CUSTOMER connectionReady event and a trackReceived event landing close
-        // together) — the has()-check above and the real _sessions.set() further down
-        // used to be separated by a long async gap (menu fetch, audio decode, DB
-        // insert), during which a second call would ALSO pass the check and both would
-        // build a full IVR engine/RTCAudioSource/DTMF capture for one call, with the
-        // second _sessions.set() silently clobbering the first and leaking its
-        // resources forever. Reserving here — with zero awaits between the check above
-        // and this line — closes that window: a concurrent second call now sees
-        // isActive()===true immediately. stopSession() treats a `_pending` entry the
-        // same as no session (see its guard) since setup hasn't allocated anything yet.
+        // Reserve the slot synchronously, before any await, so a second start
+        // for the same call sees isActive()===true at once instead of building
+        // a second engine. stopSession() treats a `_pending` entry the same as
+        // no session (see its guard) since setup hasn't allocated anything yet.
         this._sessions.set(callId, { _pending: true });
         let sessionEstablished = false;
 
         log.info({ callId, ivrFlowId }, 'Starting IVR session');
 
-        // Guard against call:terminated firing during the async setup window (menu fetch,
-        // audio path resolution / S3 downloads / ffmpeg decode, DB session creation).
-        // Without this, _sessions.set() can run after the termination event already fired,
+        // Guard against call:terminated firing during the async setup window
+        // (waiting for audio, menu fetch, DB session creation). Without this,
+        // _sessions.set() can run after the termination event already fired,
         // leaving the session stuck with no cleanup handler.
         let terminated = false;
         const earlyGuard = ({ callId: cid }) => { if (cid === callId) terminated = true; };
         EventBus.on('call:terminated', earlyGuard);
 
-        // Held in outer scope so the catch block can release the native source if setup
-        // throws before _sessions.set() transfers ownership to the session.
-        let ivrTrack = null;
-        let dtmfStarted = false;
-
         try {
+            // The first prompt plays once the caller's audio is flowing, so its
+            // start isn't lost while the media connects.
+            if (!await callMedia.customerAudio(callId, CUSTOMER_AUDIO_WAIT_MS)) {
+                log.warn({ callId }, 'No audio from the caller yet — starting the IVR anyway');
+            }
+
             // 1. Fetch menu structure + audio file metadata
             const menu = await IvrRepository.findFlow(ivrFlowId, callMeta.tenantId ?? null);
             if (!menu) {
@@ -124,49 +109,10 @@ class IvrCoordinator {
             const lifecycleTenantId = Number(callMeta.tenantId ?? 0);
             const canLogLifecycle = Number.isInteger(lifecycleTenantId) && lifecycleTenantId > 0;
 
-            // 2. Resolve audio paths for all nodes that reference an audio file
-            const audioPathMap = await this._resolveAudioPaths(menu);
+            // 2. Each node's audio, as the media server fetches it
+            const audioPathMap = this._resolveAudio(menu);
 
-            // 3. Create RTCAudioSource → track
-            const { nonstandard } = wrtc;
-            if (!nonstandard?.RTCAudioSource) {
-                log.error('RTCAudioSource unavailable');
-                return;
-            }
-
-            const audioSource = new nonstandard.RTCAudioSource();
-            leakMetrics.audioSourceCreated++;   // DIAGNOSTIC (native): IVR source
-            ivrTrack = audioSource.createTrack();
-            ivrTrack._isGeneratedSource = true;   // releaseGeneratedTrack() frees the native source on teardown
-            const ivrStream = new wrtc.MediaStream([ivrTrack]);
-
-            // Replace the placeholder track on the WhatsApp PC so the caller only
-            // hears the IVR audio (not the placeholder tone).
-            let sender;
-            if (customerPeer) {
-                const placeholderSender = customerPeer.shiftPlaceholderSender();
-                if (placeholderSender) {
-                    await placeholderSender.replaceTrack(ivrTrack);
-                    sender = placeholderSender;
-                    log.debug({ callId }, 'Replaced placeholder track with IVR track');
-                }
-            }
-            if (!sender) {
-                sender = customerPc.addTrack(ivrTrack, ivrStream);
-            }
-
-            // 4. Create the DTMF sink now (paused) so it's ready when the first
-            //    ivr_menu node is entered. Goertzel only runs on ivr_menu nodes —
-            //    onNodeEntered toggles pause/resume as the engine navigates.
-            if (customerTrack) {
-                dtmfCaptureService.startCapture(callId, customerTrack);
-                dtmfCaptureService.pauseCapture(callId);
-                dtmfStarted = true;
-            } else {
-                log.warn({ callId }, 'No customer track — DTMF detection disabled');
-            }
-
-            // 5. Persist session
+            // 3. Persist session
             const sessionId = await IvrRepository.createSession({
                 callId,
                 ivrFlowId,
@@ -184,24 +130,21 @@ class IvrCoordinator {
 
             logIvrLifecycle('logIvrStarted');
 
-            // 6. Create and start engine — pass only the function it actually needs
+            // 4. Create and start engine
             const engine = new IvrEngine({
                 callId,
                 tenantId: callMeta.tenantId ?? null,
                 structure: menu.structure,
                 defaultTimeout: menu.timeout_seconds,
-                audioSource,
+                createPlayer: () => callMedia.player(callId),
+                errorAudio: callMedia.errorAudio(),
                 audioPathMap,
                 sessionId,
                 recordInput: (data) => IvrRepository.recordInput(data),
                 onNodeEntered: ({ nodeId, nodeType, nodeLabel }) => {
-                    // Run Goertzel only on ivr_menu nodes — the only nodes
-                    // where the caller is expected to press a digit.
-                    if (nodeType === 'ivr_menu') {
-                        dtmfCaptureService.resumeCapture(callId);
-                    } else {
-                        dtmfCaptureService.pauseCapture(callId);
-                    }
+                    // Key presses count only on ivr_menu nodes — the only
+                    // nodes where the caller is expected to press a digit.
+                    callMedia.listenForDigits(callId, nodeType === 'ivr_menu');
 
                     logIvrLifecycle('logIvrNodeEntered', {
                         node_id: nodeId,
@@ -242,7 +185,7 @@ class IvrCoordinator {
                 },
             });
 
-            // 7. Listen for IVR completion
+            // 5. Listen for IVR completion
             // terminationHandler stays registered after completion: a transfer to
             // an unavailable target keeps the session alive while it plays the
             // offline/busy message and possibly replays the menu, and a hang-up in
@@ -255,7 +198,7 @@ class IvrCoordinator {
                 );
             };
 
-            // 8. Listen for external termination (WhatsApp hang-up, cleanup, etc.)
+            // 6. Listen for external termination (provider hang-up, cleanup, etc.)
             const terminationHandler = async ({ callId: cid }) => {
                 if (cid !== callId) return;
                 EventBus.off('call:terminated', terminationHandler);
@@ -268,17 +211,10 @@ class IvrCoordinator {
                 } catch (err) {
                     log.error({ callId, err }, 'stopSession error');
                 }
-                // Trigger peer connection cleanup. The call:ivr_terminated handler in
-                // serverListeners calls peerRegistry.closePeerConnection(callId), which
-                // removes the call from activeCalls and logs "Peer cleanup done".
-                // Without this, IVR calls that end via caller hang-up never get cleaned up
-                // because there is no Redis subscription and no AGENT peer connection
-                // to route the webhook call_terminated event to the cleanup path.
                 EventBus.emit('call:ivr_terminated', { callId, action: 'hung_up', tenantId });
             };
 
-            // Final guard: if the call terminated during the async menu fetch / audio
-            // decode / DB session creation, abort now and release allocated resources.
+            // Final guard: if the call terminated during setup, abort now.
             if (terminated) {
                 log.info({ callId }, 'Call terminated during IVR setup — aborting');
                 engine.stop();
@@ -290,11 +226,6 @@ class IvrCoordinator {
 
             this._sessions.set(callId, {
                 engine,
-                audioSource,
-                senderTrack: ivrTrack,
-                sender,
-                customerPeer,
-                customerPc,
                 sessionId,
                 ivrFlowId,
                 tenantId: callMeta.tenantId ?? null,
@@ -303,10 +234,6 @@ class IvrCoordinator {
                 terminationHandler,
             });
             sessionEstablished = true;
-
-            // Ownership of ivrTrack transferred to the session — clear the local ref
-            // so the finally block does not double-release on a normal exit.
-            ivrTrack = null;
 
             EventBus.on('call:ivr_complete', completeHandler);
             EventBus.on('call:terminated', terminationHandler);
@@ -322,14 +249,7 @@ class IvrCoordinator {
             // — release the slot so isActive(callId) doesn't stay stuck true forever.
             if (!sessionEstablished) {
                 this._sessions.delete(callId);
-            }
-            // Release the native RTCAudioSource if setup failed or was aborted before
-            // ownership transferred to the session.
-            if (ivrTrack) {
-                placeholderTrackFactory.releaseGeneratedTrack(ivrTrack);
-            }
-            if (dtmfStarted && !this._sessions.has(callId)) {
-                dtmfCaptureService.stopCapture(callId);
+                callMedia.listenForDigits(callId, false);
             }
         }
     }
@@ -343,7 +263,7 @@ class IvrCoordinator {
     async stopSession(callId, outcome = 'hung_up', timing = {}) {
         const session = this._sessions.get(callId);
         // No session, or startSession() has only reserved the slot and hasn't
-        // finished building it yet (no engine/sender exist to stop) — nothing to do.
+        // finished building it yet (no engine exists to stop) — nothing to do.
         // Reachable from shutdown.js, which drives this off a DB query rather than
         // isActive(), so it can legitimately observe the reservation mid-setup.
         if (!session || session._pending) return;
@@ -357,9 +277,6 @@ class IvrCoordinator {
 
         const {
             engine,
-            sender,
-            customerPeer,
-            customerPc,
             sessionId,
             ivrFlowId,
             tenantId,
@@ -373,32 +290,7 @@ class IvrCoordinator {
 
         engine.stop();
 
-        // For transfers: return the sender to the placeholder pool so the agent bridge
-        // can re-use it via replaceTrack (avoids removeTrack → WebRTC teardown).
-        if (outcome === 'transferred' && customerPeer && sender) {
-            try {
-                customerPeer.addPlaceholderSender(sender);
-                // The IVR track stays on the sender until the agent bridge replaces it.
-                // Stash a stable reference so that replaceTrack (Peer.deliverTrack) or
-                // final teardown (clearPlaceholderSenders) releases its RTCAudioSource.
-                sender._placeholderTrack = session.senderTrack ?? null;
-                log.info({ callId }, 'IVR sender returned to placeholder pool');
-            } catch (err) {
-                log.warn({ callId, err }, 'addPlaceholderSender failed');
-            }
-        } else {
-            try {
-                if (customerPc && sender && customerPc.signalingState !== 'closed') {
-                    customerPc.removeTrack(sender);
-                }
-            } catch (err) {
-                log.warn({ callId, err }, 'removeTrack failed');
-            }
-            // Not reused — release the IVR RTCAudioSource native buffer now.
-            placeholderTrackFactory.releaseGeneratedTrack(session.senderTrack);
-        }
-
-        dtmfCaptureService.stopCapture(callId);
+        callMedia.listenForDigits(callId, false);
 
         const endedAt = timing.endedAt instanceof Date ? timing.endedAt : new Date();
         const durationSeconds = Number.isFinite(Number(timing.durationSeconds))
@@ -419,15 +311,9 @@ class IvrCoordinator {
             // Clear the IVR call state for non-transfer outcomes so the dashboard
             // does not keep showing "IVR Processing" after the session ends.
             //
-            // For 'transferred', flip state straight to 'QUEUE' here — atomically
-            // with this._sessions.delete() below, no await in between. This used to
-            // happen later, in IvrTransferHandler, after a couple of its own awaits
-            // (logIvrTransferred, audio file resolution). That left a window where
-            // the DB still showed state='IVR' while isActive(callId) was already
-            // false; if checkAndStartBridging fired in that window (a CUSTOMER
-            // track/ICE event landing at just the wrong moment) it matched the
-            // IVR-start condition again and re-launched IVR on a call that had
-            // already been handed off to the queue.
+            // For 'transferred', flip state straight to 'QUEUE' here, before the
+            // transfer handler's own awaits, so the queue scan sees the call as
+            // waiting the moment the IVR lets go of it.
             if (outcome === 'transferred') {
                 await IvrRepository.updateCallState(callId, 'QUEUE', 'RINGING').catch(() => { });
             } else {
@@ -461,16 +347,13 @@ class IvrCoordinator {
     }
 
     /**
-     * Build a Map from nodeId → resolved audio for every node that references
-     * an audio file.  S3-stored files are downloaded as Buffer objects so the
-     * IvrAudioPlayer can decode them without needing to re-fetch presigned URLs
-     * (which fail when fetched from within the Node.js process due to HTTPS
-     * signing issues).  Local files stay as absolute path strings.
+     * nodeId → the node's audio as the media server fetches it, for every node
+     * that references an audio file.
      *
      * @param {object} menu   result of IvrRepository.findFlow
-     * @returns {Promise<Map<string, string|Buffer>>}
+     * @returns {Map<string, object>}
      */
-    async _resolveAudioPaths(menu) {
+    _resolveAudio(menu) {
         const map = new Map();
         const audioFilesById = menu.audioFilesById ?? {};
 
@@ -483,22 +366,10 @@ class IvrCoordinator {
                 log.warn({ audioFileId, nodeId: node.id }, 'No storage record for the node audio');
                 continue;
             }
-
             try {
-                // Fetch raw input (Buffer for S3, local path string for disk)
-                let rawInput;
-                if (audioFile.storage_disk === 's3') {
-                    rawInput = await storageClient.downloadBuffer(audioFile.storage_key);
-                } else {
-                    rawInput = await resolveStoragePath(audioFile);
-                }
-                // Decode to PCM once at IVR session start — IvrEngine calls player.play(pcm)
-                // which hits the Int16Array fast-path and skips all per-play ffmpeg spawns.
-                const pcm = await IvrAudioPlayer.decode(rawInput);
-                log.debug({ nodeId: node.id, samples: pcm.length }, 'Pre-decoded node audio');
-                map.set(node.id, pcm);
+                map.set(node.id, callMedia.audioUrl(audioFile));
             } catch (err) {
-                log.warn({ nodeId: node.id, err }, 'Could not resolve or decode the node audio');
+                log.warn({ nodeId: node.id, err }, 'Could not resolve the node audio');
             }
         }
 
@@ -515,18 +386,10 @@ class IvrCoordinator {
         const timing = { endedAt, durationSeconds };
 
         if (action === 'transferred') {
-            const session = this._sessions.get(callId);
-            const sessionSnap = {
-                sender: session?.sender ?? null,
-                customerPc: session?.customerPc ?? null,
-                audioSource: session?.audioSource ?? null,
-            };
-
             await ivrTransferHandler.handle(
                 callId,
                 callMeta,
                 transferData,
-                sessionSnap,
                 (outcome) => this.stopSession(callId, outcome, timing),
             );
         } else {

@@ -66,8 +66,8 @@ export function useMonitor(callId: number | string | null | undefined): {
     monitor: Monitor | null;
     state: 'idle' | 'connecting' | 'active';
     mode: MonitorMode | null;
-    agentStream: MediaStream | null;
-    customerStream: MediaStream | null;
+    /** The call as the supervisor hears it: the customer and the agent, mixed. */
+    stream: MediaStream | null;
     error: Error | null;
     start(opts?: { stream?: MediaStream }): Promise<Monitor | null>;
     stop(): void;

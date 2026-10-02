@@ -252,16 +252,18 @@ for the timeout scans, plus `channel_id`, `ivr_flow_id`.
 
 ### call_connections
 
-One row per (`call_id`, `connection_type`), unique — the media layer holds
-one live peer per leg type per call, so a transfer or reconnect replaces the
-`AGENT` row and one supervisor monitors at a time. `agent_id` is who is on the
-leg now.
+One row per (`call_id`, `connection_type`), unique — the SDP record of each
+media leg, written by `src/core/media/MediaLegs.js`: a new offer, a transfer
+or a reconnect replaces the `AGENT` row, and one supervisor monitors at a time.
+`agent_id` and `device_id` are who is on the leg now (a reloaded client's
+resync reads them, and a ringing call's `local_sdp` is the offer it is
+re-delivered with). Who was in the call over time is `call_participants`.
 
 | Column | Values |
 |---|---|
 | `connection_type` | `AGENT` (an agent's WebRTC peer), `CUSTOMER` (over WhatsApp or SIP), `MONITOR` (a supervisor). |
-| `connection_state` | `NEW` / `CONNECTING` / `CONNECTED` / `DISCONNECTED` / `FAILED` / `CLOSED`. |
-| `ice_gathering_state`, `ice_connection_state` | WebRTC states, uppercase. |
+| `connection_state` | `NEW` (offered) / `CONNECTED` (answered) / `CLOSED` (the call ended). |
+| `ice_gathering_state`, `ice_connection_state` | Not tracked since media left Node (stay `NEW` until `CLOSED`). |
 | `sdp_type`, `local_sdp`, `remote_sdp`, `ice_candidates`, `media_types` | Diagnostics. |
 
 ### call_participants

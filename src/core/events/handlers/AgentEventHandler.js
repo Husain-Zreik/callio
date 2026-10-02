@@ -5,10 +5,9 @@ import CallConnectionRepository from '../../../persistence/CallConnectionReposit
 import { customerChannels } from '../../channels/CustomerChannels.js';
 import EventBus from '../../EventBus.js';
 import { callLifecycleLogger } from '../../calls/CallLifecycleLogger.js';
-import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
-import { peerEventManager } from '../../../media/webrtc/PeerEventManager.js';
-import { sdpCoordinator } from '../../../media/webrtc/SDPCoordinator.js';
-import { iceCoordinator } from '../../../media/webrtc/ice/ICECandidateCoordinator.js';
+import { callMedia } from '../../media/CallMedia.js';
+import { mediaLegs } from '../../media/MediaLegs.js';
+import { agentLegSockets } from '../../media/AgentLegSockets.js';
 import { emitCallError } from '../CallErrorEmitter.js';
 import { CallErrorCodes } from '../CallErrorCodes.js';
 import { ConnectionType, CallStatus, CallDirection, TerminationReason, TerminatedBy } from '../../constants/CallConstants.js';
@@ -27,13 +26,6 @@ import { callParticipants } from '../../calls/CallParticipants.js';
 
 const log = logger('core.events.AgentEventHandler');
 
-// Max wait for the agent's inbound audio track to arrive on the AGENT peer
-// before we tell Meta "accepted". Empirically the ontrack dispatch lands within
-// ~100-800 ms after processSDPAnswer on a healthy connection; 5 s is generous
-// headroom for slow networks, but bounded so we fail-fast on "mic denied" /
-// "bad SDP" scenarios instead of accepting with a broken uplink.
-const AGENT_AUDIO_TRACK_TIMEOUT_MS = 5000;
-
 export class AgentEventHandler {
 
     async handleAgentJoined(data) {
@@ -41,10 +33,9 @@ export class AgentEventHandler {
 
         log.debug({ agentId: userId, callId, socketId }, 'Agent joined call');
 
-        // Guard: only the worker owning the in-memory peer connection should handle this.
-        const ownsConnection = peerRegistry.getConnectionData(callId, ConnectionType.AGENT).valid;
-        if (!ownsConnection) {
-            log.debug({ callId }, 'Worker does not own peer connection — skipping');
+        // Guard: only the worker holding the offered agent leg handles this.
+        if (!callMedia.hasAgentOffer(callId)) {
+            log.debug({ callId }, 'Worker does not hold the agent leg — skipping');
             return;
         }
 
@@ -102,32 +93,18 @@ export class AgentEventHandler {
                 throw new Error('Call assignment conflict. The transfer is no longer yours.');
             }
 
-            iceCoordinator.setConnectionInfo(callId, ConnectionType.AGENT, socketId);
-            // Durable per-device identity (survives this socket disconnecting/
-            // reconnecting) — recorded alongside the ephemeral socketId above so
-            // ongoing-calls resync and reconnect-authorization can tell "my other
-            // session" apart from "this exact device", which socketId/userId alone
-            // can't do. Awaited (unlike this same call's counterpart in
-            // handleAgentReconnected, which stays fire-and-forget because it runs
-            // after its own row-recreating step) so a resync landing immediately
-            // after accept can never read a call still carrying a stale/absent
-            // device_id.
-            await CallConnectionRepository.updateDeviceId(callId, ConnectionType.AGENT, deviceId ?? null)
-                .catch((err) => log.error({ callId, err }, 'Failed to persist deviceId'));
-            await sdpCoordinator.processSDPAnswer(callId, sdpAnswer, ConnectionType.AGENT);
-            iceCoordinator.markClientReady(callId);
+            agentLegSockets.set(callId, socketId);
 
-            // ── Gate: wait for the agent's microphone track on the AGENT peer ───
-            // Previously the provider accept was fired immediately after processSDPAnswer.
-            // Meta would then start streaming the customer's audio toward us while our
-            // AGENT had no inbound audio track yet — client hears nothing back,
-            // Meta's "no media received" watchdog kills the call. Waiting here makes
-            // sure the uplink is real before we confirm to Meta.
+            // The agent's answer. Resolves once their microphone's audio reaches
+            // the media server — the provider is told "accepted" only after, so
+            // the customer never answers into an agent with no uplink.
             try {
-                await this.#waitForFrontendAudioTrack(callId, AGENT_AUDIO_TRACK_TIMEOUT_MS);
-            } catch (waitErr) {
-                await this.#abortAcceptOnMediaFailure(callId, userId, waitErr.message);
-                throw waitErr;
+                await mediaLegs.agentAccepted(callQueueRow ?? { id: callId, tenant_id: tenantId }, userId, sdpAnswer, deviceId);
+            } catch (mediaErr) {
+                if (/Microphone audio did not reach/.test(mediaErr.message)) {
+                    await this.#abortAcceptOnMediaFailure(callId, userId, mediaErr.message);
+                }
+                throw mediaErr;
             }
 
             // Single read covers both the status check and the IVR-detection that follows,
@@ -139,23 +116,14 @@ export class AgentEventHandler {
             if (currentStatus === CallStatus.RINGING) {
 
                 if (!isIvrTransferred) {
-                    // Skip if the CUSTOMER peer is already fully connected — this happens when an
-                    // agent transfer re-routes a call to a new agent after the first agent's accept
-                    // already completed. The customer's audio is live; we must not re-signal
-                    // it with a new SDP answer or we'd issue a redundant provider accept.
-                    // `requireReady=true` uses the registry's isReady flag, which is set only on
-                    // connectionState→'connected' — safe to read without touching the wrtc native pc.
-                    const customerAlreadyReady = peerRegistry.getConnectionData(callId, ConnectionType.CUSTOMER, true).valid;
-
-                    if (!customerAlreadyReady) {
-                        // Fresh RINGING call — answer the customer now that the agent is ready
+                    // A handover that came back to the queue was answered before:
+                    // the customer's leg is up, so the provider isn't answered again.
+                    if (!callRecord?.answered_at) {
                         const customerConn = await CallConnectionRepository.findByCallAndType(callId, ConnectionType.CUSTOMER);
                         if (!customerConn || !customerConn.remote_sdp) throw new Error('Customer offer not found');
 
                         const { call: customerCall, channel } = await customerChannels.forCall(callRecord ?? callId);
-                        const customerSdpAnswer = await sdpCoordinator.createSDPAnswer(
-                            callId, customerConn.remote_sdp, ConnectionType.CUSTOMER, { sdpProfile: channel.sdp }
-                        );
+                        const customerSdpAnswer = await mediaLegs.answerCustomer(customerCall, customerConn.remote_sdp, channel.sdp);
                         await channel.accept(customerCall, customerSdpAnswer);
 
                         // Guard: verify call wasn't terminated while the API call was in progress
@@ -164,7 +132,7 @@ export class AgentEventHandler {
                             throw new Error(`Call already ${postAcceptStatus.toLowerCase()}, cannot accept`);
                         }
                     } else {
-                        log.debug({ callId }, 'Customer peer already connected — skipping re-accept');
+                        log.debug({ callId }, 'Customer already answered — skipping re-accept');
                     }
                 } else {
                     log.debug({ callId }, 'IVR-transferred call — customer already answered, skipping re-accept');
@@ -187,12 +155,10 @@ export class AgentEventHandler {
                 if (!returnedHandover) await CallRepository.updateTimestamp(callId, 'answered_at', new Date());
             }
 
-            const result = peerRegistry.getConnectionData(callId, ConnectionType.AGENT);
-            if (result.valid) result.data.context.update({ userId, tenantId });
-
-            // Who is on the AGENT leg now.
-            CallConnectionRepository.updateAgentId(callId, ConnectionType.AGENT, userId)
-                .catch((err) => log.error({ callId, err }, 'Failed to persist agent'));
+            // The agent and the customer are both up: into the room. A supervisor
+            // already listening hears this (new) agent from now on.
+            await callMedia.bridge(callRecord ?? { id: callId, tenant_id: tenantId });
+            if (callMedia.hasSupervisor(callId)) EventBus.emit('call:monitor:agent:reconnected', { callId });
 
             await callParticipants.join(callRecord ?? { id: callId, tenant_id: tenantId }, {
                 kind: ParticipantKind.AGENT, agentId: userId, deviceId: deviceId ?? null,
@@ -316,19 +282,16 @@ export class AgentEventHandler {
      * worker and continues to route all AGENT_JOINED events here.
      */
     async handleRingingAgentReconnect({ callId, socketId, userId, tenantId }) {
-        if (!peerRegistry.getConnectionData(callId, ConnectionType.CUSTOMER).valid) {
-            log.debug({ callId }, 'RINGING_AGENT_RECONNECT: no CUSTOMER peer on this worker — skipping');
+        if (!callMedia.owns(callId)) {
+            log.debug({ callId }, 'RINGING_AGENT_RECONNECT: the call has no media on this worker — skipping');
             return;
         }
 
         try {
-            await peerRegistry.closePeerConnection(callId, ConnectionType.AGENT).catch(() => { });
-            await CallConnectionRepository.cleanupConnection(callId, ConnectionType.AGENT).catch(() => { });
-
-            const sdpOffer = await sdpCoordinator.createSDPOffer(callId, ConnectionType.AGENT);
-
             const call = await CallRepository.findById(callId);
             if (!call) return;
+            // A fresh leg replaces the one offered before the agent dropped.
+            const sdpOffer = await mediaLegs.offerAgent(call);
 
             const agent = await AgentRepository.findById(userId);
 
@@ -385,7 +348,7 @@ export class AgentEventHandler {
             // just taken over, instead of leaving it silently dead with no
             // explanation — that silence is what "stuck" looked like from the
             // other device's side.
-            const previousConnectionInfo = iceCoordinator.getConnectionInfo(callId);
+            const previousConnectionInfo = { socketId: agentLegSockets.get(callId) };
 
             // Decide purely on cluster-wide socket liveness, not on comparing
             // deviceId: deviceId can't reliably distinguish two sessions —
@@ -405,15 +368,12 @@ export class AgentEventHandler {
                 ? await agentConnections.isSocketConnected(previousConnectionInfo.socketId)
                 : false;
 
-            // Close old AGENT and guard CUSTOMER still exists
-            await peerRegistry.closePeerConnection(callId, ConnectionType.AGENT);
-            await CallConnectionRepository.cleanupConnection(callId, ConnectionType.AGENT);
-
-            if (!peerRegistry.getConnectionData(callId, ConnectionType.CUSTOMER).valid) {
+            // The call's media must be on this worker (the reconnect is routed to it).
+            if (!callMedia.owns(callId)) {
                 throw new Error('No active call found for reconnecting.');
             }
 
-            iceCoordinator.setConnectionInfo(callId, ConnectionType.AGENT, socketId);
+            agentLegSockets.set(callId, socketId);
 
             // Cross-device handoff, not a lockout: moving an active call to another
             // of your own devices/tabs is a deliberate, supported action. The bug
@@ -432,21 +392,11 @@ export class AgentEventHandler {
                 log.debug({ callId, previousSocketId: previousConnectionInfo?.socketId ?? null, sameSocket: !isDifferentSocket }, 'Reconnect — no supersede notification needed');
             }
 
-            const sdpAnswer = await sdpCoordinator.createSDPAnswer(callId, sdpOffer, ConnectionType.AGENT);
-            // Must run AFTER createSDPAnswer, not before: cleanupConnection above
-            // *deletes* the AGENT call_connections row, and createSDPAnswer is
-            // what recreates it (via Peer.insertConnectionRecord). Writing the
-            // deviceId any earlier silently updates zero rows — the row doesn't
-            // exist yet — which would have meant every reconnect kept whatever
-            // device_id was persisted at the *original* accept, never updating it,
-            // making all subsequent resyncs/handoffs reason about a stale device.
-            CallConnectionRepository.updateDeviceId(callId, ConnectionType.AGENT, deviceId ?? null)
-                .catch((err) => log.error({ callId, err }, 'Failed to persist deviceId'));
-            iceCoordinator.markClientReady(callId);
-            await peerRegistry.checkAndStartBridging(callId);
+            // The new leg replaces the agent's old one, then joins the room.
+            const sdpAnswer = await mediaLegs.answerAgent(call, userId, sdpOffer, deviceId);
+            await callMedia.bridge(call);
+            if (callMedia.hasSupervisor(callId)) EventBus.emit('call:monitor:agent:reconnected', { callId });
 
-            CallConnectionRepository.updateAgentId(callId, ConnectionType.AGENT, userId)
-                .catch((err) => log.error({ callId, err }, 'Failed to persist agent'));
             await callParticipants.agentDevice(callId, userId, deviceId ?? null);
             const agentName = await AgentRepository.getNameById(userId);
 
@@ -464,66 +414,6 @@ export class AgentEventHandler {
             log.error({ callId, err: error }, 'Failed to handle agent reconnect');
             throw error;
         }
-    }
-
-    /**
-     * Resolve once the agent's browser has actually delivered an inbound audio
-     * track on its AGENT peer connection. If the track already arrived before
-     * we got here (fast renegotiation), return immediately. Otherwise listen for
-     * `trackReceived` from PeerEventManager. Reject on timeout so the caller can
-     * fail the accept cleanly.
-     */
-    async #waitForFrontendAudioTrack(callId, timeoutMs) {
-        // Already arrived?
-        const existing = peerRegistry.getConnectionData(callId, ConnectionType.AGENT);
-        if (existing.valid) {
-            // Wrapped in try/catch: wrtc throws "Invalid argument" during native peer
-            // connection state transitions (Pattern A race). On failure fall back to
-            // the trackBuffer maintained by PeerEventManager, which captures every
-            // ontrack event regardless of getReceivers() availability.
-            let track = null;
-            try {
-                track = existing.data.pc.getReceivers()
-                    .find(r => r.track?.kind === 'audio' && r.track.readyState === 'live')?.track;
-            } catch (err) {
-                log.warn({ callId, err }, 'getReceivers failed — checking trackBuffer');
-                const buffered = existing.data.audio?.trackBuffer;
-                if (buffered?.length > 0) {
-                    track = buffered.find(t => t.track?.kind === 'audio' && t.track.readyState === 'live')?.track ?? null;
-                }
-                if (!track) {
-                    log.warn({ callId }, 'No buffered track — waiting for trackReceived event');
-                }
-            }
-            if (track) {
-                return track;
-            }
-        }
-
-        return new Promise((resolve, reject) => {
-            const cleanup = () => {
-                clearTimeout(timer);
-                peerEventManager.off('trackReceived', listener);
-            };
-
-            const listener = (evt) => {
-                if (
-                    evt?.callId === callId
-                    && evt.connectionType === ConnectionType.AGENT
-                    && evt.track?.kind === 'audio'
-                ) {
-                    cleanup();
-                    resolve(evt.track);
-                }
-            };
-
-            const timer = setTimeout(() => {
-                cleanup();
-                reject(new Error(`Microphone audio did not reach the server within ${Math.round(timeoutMs / 1000)}s`));
-            }, timeoutMs);
-
-            peerEventManager.on('trackReceived', listener);
-        });
     }
 
     /**

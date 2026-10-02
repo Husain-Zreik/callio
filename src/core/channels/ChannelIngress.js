@@ -26,7 +26,8 @@ import AgentRepository from '../../persistence/AgentRepository.js';
 import IvrRepository from '../../persistence/IvrRepository.js';
 import CallConnectionRepository from '../../persistence/CallConnectionRepository.js';
 import { callEventHandler } from '../events/CallEventHandler.js';
-import { sdpCoordinator } from '../../media/webrtc/SDPCoordinator.js';
+import { mediaLegs } from '../media/MediaLegs.js';
+import { ivrCoordinator } from '../ivr/IvrCoordinator.js';
 import { callOwnershipService } from '../../infra/cluster/CallOwnershipService.js';
 import { redisPubSubService } from '../../infra/redis/RedisPubSubService.js';
 import { redisCleanupService } from '../../infra/cluster/RedisCleanupService.js';
@@ -289,9 +290,7 @@ class ChannelIngress {
                     // call's peers unsubscribes.
                     await redisPubSubService.subscribeToCallEvents(callId, callEventHandler.handleCallEvent);
                     const adapter = customerChannels.get(channel.type);
-                    const customerSdpAnswer = await sdpCoordinator.createSDPAnswer(
-                        callId, sdpOffer, ConnectionType.CUSTOMER, { sdpProfile: adapter.sdp }
-                    );
+                    const customerSdpAnswer = await mediaLegs.answerCustomer(callRow, sdpOffer, adapter.sdp);
                     await adapter.accept(callRow, customerSdpAnswer);
                     // Guarded (state='IVR'): accepting is a real provider round trip
                     // and a trivial flow can finish before it returns — see
@@ -304,7 +303,10 @@ class ChannelIngress {
                         ivr_flow_name: flowHeader?.name ?? null,
                         accepted_by: 'system',
                     });
-                    log.info({ callId }, 'IVR call accepted by system — IVR session starts on media connect');
+                    log.info({ callId }, 'IVR call accepted by system');
+                    ivrCoordinator.startSession(callId, ivrFlowId, {
+                        tenantId, channelId: channel.id, queueId: callRow.queue_id ?? null,
+                    }).catch((err) => log.error({ callId, err }, 'Starting the IVR failed'));
                 } catch (ivrErr) {
                     log.error({ callId, err: ivrErr }, 'IVR auto-accept failed');
                 }
@@ -318,7 +320,9 @@ class ChannelIngress {
                 return;
             }
 
-            const agentSdpOffer = await sdpCoordinator.createSDPOffer(callId, ConnectionType.AGENT, callEventHandler.handleCallEvent);
+            // This worker holds the call's media: agents' answers come back here.
+            await redisPubSubService.subscribeToCallEvents(callId, callEventHandler.handleCallEvent);
+            const agentSdpOffer = await mediaLegs.offerAgent(callRow);
 
             if (userId) {
                 EventBus.emit('call:incoming', IncomingCallPayload.fromCall(callRow, {

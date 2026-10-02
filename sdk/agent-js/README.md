@@ -98,16 +98,15 @@ appeared or changed), `boardCallEnded` (view, { terminationReason, terminatedBy 
 
 ```js
 const monitor = await agent.monitor(callId);            // asks for the microphone
-monitor.on('agentStream', (s) => { agentAudio.srcObject = s; });
-monitor.on('customerStream', (s) => { customerAudio.srcObject = s; });
+monitor.on('stream', (s) => { callAudio.srcObject = s; });   // the customer and the agent, mixed
 monitor.setMode('whisper');                              // 'listen' | 'whisper' | 'barge'
 monitor.stop();
 ```
 
-`listen`: the supervisor hears both, nobody hears the supervisor ·
+`listen`: the supervisor hears the call, nobody hears the supervisor ·
 `whisper`: the agent hears the supervisor · `barge`: both do. Callio mixes, so
-switching modes is instant. Monitor events: `state`, `agentStream`,
-`customerStream`, `mode`, `agentPrivate` (the agent talking privately to you),
+switching modes is instant. Monitor events: `state`, `stream` (the call as you
+hear it), `mode`, `agentPrivate` (the agent talking privately to you),
 `agentReconnected`, `ended` ({ reason: `stopped` \| `call_ended` \| `ended` \|
 `disconnected` \| `failed` }). A reconnect of the supervisor's socket ends
 monitoring — start it again.

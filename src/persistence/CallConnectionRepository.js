@@ -128,6 +128,7 @@ class CallConnectionRepository {
         await connection.execute(`
             UPDATE call_connections
             SET connected_at = NOW(),
+                connection_state = 'CONNECTED',
                 updated_at = NOW()
             WHERE call_id = ? AND connection_type = ?
         `, [callId, connectionType]);

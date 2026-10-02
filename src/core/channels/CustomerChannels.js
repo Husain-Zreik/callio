@@ -11,9 +11,11 @@
 // A CustomerChannel adapter:
 //   type               'WHATSAPP' | 'SIP' — matches channels.type / calls.channel
 //   supportsOutbound   whether initiate() is implemented
-//   sdp                optional { localOffer(sdp), remoteOffer(sdp), remoteAnswer(sdp) }
-//                      rewrites for the customer leg's SDP (provider quirks);
-//                      each returns the SDP to use. Missing hooks = unchanged.
+//   sdp                { transport, localOffer(sdp), remoteOffer(sdp), remoteAnswer(sdp) }
+//                      how the customer leg is carried — transport 'webrtc'
+//                      (ICE + DTLS-SRTP) or 'rtp' (plain RTP) — and rewrites for
+//                      its SDP (provider quirks); each hook returns the SDP to
+//                      use. Missing hooks = unchanged.
 //   accept(call, sdpAnswer)      answer a ringing inbound call with our SDP
 //   reject(call)                 decline a ringing inbound call
 //   terminate(call)              end the call at the provider (any state)

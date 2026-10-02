@@ -1,34 +1,40 @@
-// src/channels/sip/SipGateway.js
-// This worker's connections to the SIP gateway (deploy/sip-gateway): the
-// drachtio-server control connection (SIP signaling) and the rtpengine ng
-// client (media conversion). Every worker connects; drachtio-server spreads
-// new INVITEs across the connected workers, and in-dialog requests (BYE) go
-// back to the worker that owns the dialog.
+// src/infra/sip/Drachtio.js
+// This worker's control connection to drachtio-server (deploy/sip-gateway).
+// Two users: the SIP channel (carrier calls; drachtio spreads new INVITEs
+// across connected workers, and sends in-dialog requests back to the worker
+// that owns the dialog), and the media plane, whose FreeSWITCH endpoints are
+// created by INVITEs sent through it (drachtio-fsmrf). Every worker connects.
 import Srf from 'drachtio-srf';
-import { RtpEngineClient } from './RtpEngineClient.js';
 import { config } from '../../../config/envConfig.js';
-import { logger } from '../../infra/logging/logger.js';
+import { logger } from '../logging/logger.js';
 
-const log = logger('channels.sip.SipGateway');
+const log = logger('infra.sip.Drachtio');
 
-class SipGateway {
+class Drachtio {
     constructor() {
         this.srf = null;
-        this.rtpengine = null;
         this.connected = false;
+        this._onInvite = null;
+        this._waiters = [];
     }
 
     get enabled() {
         return Boolean(config.sip.drachtio.host);
     }
 
-    start(onInvite) {
-        if (!this.enabled || this.srf) return;
-        const { drachtio, rtpengine } = config.sip;
+    // Inbound INVITEs (the SIP channel). Set before or after start().
+    onInvite(handler) {
+        this._onInvite = handler;
+    }
 
-        this.rtpengine = new RtpEngineClient(rtpengine);
+    start() {
+        if (!this.enabled || this.srf) return;
+        const { drachtio } = config.sip;
         this.srf = new Srf();
-        this.srf.invite(onInvite);
+        this.srf.invite((req, res) => {
+            if (this._onInvite) return this._onInvite(req, res);
+            res.send(503);
+        });
         this.srf.on('connect', (err, hostport) => {
             if (err) {
                 // drachtio-srf's errors are often plain objects that log as {}.
@@ -43,6 +49,7 @@ class SipGateway {
             this._lastError = null;
             this.connected = true;
             log.info(`Connected to drachtio-server (${hostport})`);
+            for (const resolve of this._waiters.splice(0)) resolve();
         });
         // drachtio-srf reconnects by itself; this only tracks the state.
         this.srf.on('error', (err) => {
@@ -59,18 +66,26 @@ class SipGateway {
         this.srf.connect({ host: drachtio.host, port: drachtio.port, secret: drachtio.secret });
     }
 
+    // Resolves once connected (or after timeoutMs, false).
+    async ready(timeoutMs = 10_000) {
+        if (this.connected) return true;
+        if (!this.srf) return false;
+        return Promise.race([
+            new Promise((resolve) => this._waiters.push(() => resolve(true))),
+            new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs).unref()),
+        ]);
+    }
+
     stop() {
         try { this.srf?.disconnect(); } catch { /* already closed */ }
-        this.rtpengine?.close();
         this.srf = null;
-        this.rtpengine = null;
         this.connected = false;
     }
 
     require() {
-        if (!this.srf || !this.connected) throw new Error('The SIP gateway is not connected');
-        return { srf: this.srf, rtpengine: this.rtpengine };
+        if (!this.srf || !this.connected) throw new Error('drachtio-server is not connected');
+        return this.srf;
     }
 }
 
-export const sipGateway = new SipGateway();
+export const drachtio = new Drachtio();

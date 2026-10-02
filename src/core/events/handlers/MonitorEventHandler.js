@@ -1,12 +1,9 @@
 // src/core/events/handlers/MonitorEventHandler.js
 import CallRepository from '../../../persistence/CallRepository.js';
-import CallConnectionRepository from '../../../persistence/CallConnectionRepository.js';
 import { agentConnections } from '../../agents/AgentConnections.js';
 import EventBus from '../../EventBus.js';
-import { peerRegistry } from '../../../media/webrtc/PeerRegistry.js';
-import { sdpCoordinator } from '../../../media/webrtc/SDPCoordinator.js';
-import { iceCoordinator } from '../../../media/webrtc/ice/ICECandidateCoordinator.js';
-import { audioCoordinator } from '../../../media/bridge/AudioCoordinator.js';
+import { callMedia } from '../../media/CallMedia.js';
+import { mediaLegs } from '../../media/MediaLegs.js';
 import { CallErrorCodes } from '../CallErrorCodes.js';
 import { emitCallError } from '../CallErrorEmitter.js';
 import { ConnectionType, ParticipantKind, LeaveReason } from '../../constants/CallConstants.js';
@@ -24,16 +21,11 @@ export class MonitorEventHandler {
             const call = await CallRepository.getInProgressCall(tenantId, callId);
             if (!call) throw new Error('Call not found or already ended');
 
-            if (peerRegistry.getConnectionData(callId, ConnectionType.MONITOR).valid) {
+            if (callMedia.hasSupervisor(callId)) {
                 throw new Error('Another supervisor is monitoring this call right now.');
             }
 
-            const callConnection = await CallConnectionRepository.findByCallAndType(callId, ConnectionType.MONITOR);
-            if (callConnection) throw new Error('Another supervisor is monitoring this call right now.');
-
-            iceCoordinator.setConnectionInfo(callId, ConnectionType.MONITOR, socketId);
-            const sdpAnswer = await sdpCoordinator.createSDPAnswer(callId, sdpOffer, ConnectionType.MONITOR);
-            iceCoordinator.markClientReady(callId);
+            const sdpAnswer = await mediaLegs.addSupervisor(call, userId, sdpOffer);
 
             await callParticipants.join(call, { kind: ParticipantKind.SUPERVISOR, agentId: userId });
             log.info({ callId }, 'Monitoring session created');
@@ -48,7 +40,7 @@ export class MonitorEventHandler {
                 error.message === 'Another supervisor is monitoring this call right now.';
 
             if (!isValidationError) {
-                await peerRegistry.closePeerConnection(callId, ConnectionType.MONITOR);
+                await mediaLegs.removeSupervisor(callId, userId).catch(() => { });
             }
 
             await agentConnections.detachSocketFromCall(socketId, callId).catch(() => { });
@@ -67,7 +59,7 @@ export class MonitorEventHandler {
         }
 
         try {
-            const endedPrivate = audioCoordinator.setSupervisorMode(callId, mode);
+            const endedPrivate = await callMedia.setSupervisorMode(callId, mode);
             // Confirm to the supervisor, and reflect the mode to the agent so their
             // active-call UI can show "supervisor is whispering" / "joined the call".
             EventBus.emit('call:monitor:mode:changed', { callId, mode, socketId });
@@ -89,7 +81,7 @@ export class MonitorEventHandler {
         const { callId, active, socketId } = data;
 
         try {
-            const now = await audioCoordinator.setAgentPrivate(callId, !!active);
+            const now = await callMedia.setAgentPrivate(callId, !!active);
             // Broadcast the state the bridge is actually in, so the agent's UI
             // and the supervisor's indicator never show a mute that didn't happen.
             EventBus.emit('call:agent:private:changed', { callId, active: now, socketId });
@@ -112,8 +104,7 @@ export class MonitorEventHandler {
             log.info({ callId, agentId: userId }, 'Stopping monitoring');
 
             // Closing the monitor leg ends a private reply; the agent must hear of it.
-            const wasPrivate = Boolean(audioCoordinator.getBridge(callId)?.agentPrivate);
-            await peerRegistry.closePeerConnection(callId, ConnectionType.MONITOR);
+            const wasPrivate = await mediaLegs.removeSupervisor(callId, userId);
             await callParticipants.leave(callId, { kind: ParticipantKind.SUPERVISOR, agentId: userId, reason: LeaveReason.MONITOR_STOPPED });
             if (wasPrivate) EventBus.emit('call:agent:private:changed', { callId, active: false });
 

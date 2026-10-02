@@ -1,14 +1,15 @@
 // Service initialization sequences run at startup.
 // initRedis()           — required services; throws on failure, aborting startup.
-// initOptionalServices() — degradable services (storage, worker threads); warns on
+// initOptionalServices() — degradable services (object storage); warns on
 //                          failure and continues. Add new optional services here.
 import { redisBaseService } from '../infra/redis/RedisBaseService.js';
 import { redisPubSubService } from '../infra/redis/RedisPubSubService.js';
 import { presenceService } from '../core/agents/PresenceService.js';
 import { redisCleanupService } from '../infra/cluster/RedisCleanupService.js';
 import { storageClient } from '../infra/storage/StorageClient.js';
-import { encodingWorkerBridge } from '../media/recording/encoding/EncodingWorkerBridge.js';
-import { dtmfWorkerBridge } from '../media/dtmf/DTMFWorkerBridge.js';
+import { drachtio } from '../infra/sip/Drachtio.js';
+import { callMedia } from '../core/media/CallMedia.js';
+import { roomMedia } from '../media/rooms/RoomMedia.js';
 import { callNotifications } from '../core/calls/CallNotifications.js';
 import { callPushNotifier } from '../push/CallPushNotifier.js';
 import { customerNetworkLossPolicy } from '../core/calls/CustomerNetworkLossPolicy.js';
@@ -46,19 +47,10 @@ export async function initRedis() {
     await logLevelControl.start().catch((err) => log.warn({ err }, 'Log-level control unavailable'));
 }
 
-// storageClient (S3) and worker bridges (worker_threads) have no dependency on
-// Redis or on each other — run together. All are optional: failure warns but
-// does not abort startup.
+// Object storage is optional: failure warns but does not abort startup.
 export async function initOptionalServices() {
-    const [storageResult, encodingResult, dtmfResult] = await Promise.allSettled([
-        storageClient.init(),
-        encodingWorkerBridge.init(),
-        dtmfWorkerBridge.init(),
-    ]);
-
-    logOptional('Storage service',  storageResult,  'recording');
-    logOptional('Encoding worker',  encodingResult, 'recording');
-    logOptional('DTMF worker',      dtmfResult,     'IVR digit detection');
+    const [storageResult] = await Promise.allSettled([storageClient.init()]);
+    logOptional('Storage service', storageResult, 'recording');
 }
 
 // Core listeners and background loops — after Redis and the socket server
@@ -76,6 +68,13 @@ export async function startCoreServices() {
     queueTimeoutService.start();
     retentionService.start();
     outboxDispatcher.start();
+
+    // The media plane: drachtio (also the SIP channel's signalling), then the
+    // rooms on FreeSWITCH. A media server that isn't up yet doesn't stop the
+    // worker: the first call reconnects.
+    drachtio.start();
+    callMedia.register(roomMedia);
+    await callMedia.start().catch((err) => log.error({ err }, 'Media plane not ready — calls fail until it connects'));
 
     // Channels that hold a connection to their provider (SIP's drachtio) take
     // calls from here on.
